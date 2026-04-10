@@ -1,14 +1,20 @@
-# Cognition Bridge
+# Context Library
 
-Persistent operational context for AI assistants via MCP. Stores handoff state, manages tasks, and provides semantic search over accumulated history.
+A personal MCP server that provides persistent operational context, task management, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
+
+## What It Does
+
+AI assistants lose all context between conversations. Context Library solves this by providing MCP tools that any compatible assistant can use to store and retrieve operational state, track tasks, and search across accumulated history.
+
+The server name is configurable via the `SERVER_NAME` environment variable (default: `context-library`). Name it whatever fits your mental model.
 
 ## Architecture
 
 - **Server:** Hono 4.x + StreamableHTTP MCP transport (Node.js 22, TypeScript)
 - **Database:** PostgreSQL 16 with pgvector for semantic search
 - **Embeddings:** Text Embeddings Inference (TEI) with nomic-embed-text-v2-moe (768 dims)
-- **Auth:** Auth0 RS256 JWT validation
-- **Deployment:** Docker Compose on NAS, Cloudflare Tunnel for external access
+- **Auth:** Handled externally by [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) — the server itself is unauthenticated and trusts its network boundary
+- **Deployment:** Docker Compose with Cloudflare Tunnel for external access
 
 ## MCP Tools
 
@@ -30,16 +36,16 @@ Persistent operational context for AI assistants via MCP. Stores handoff state, 
 ### Prerequisites
 
 - Docker and Docker Compose
-- An Auth0 tenant (or use `SKIP_AUTH=true` for local dev)
-- TEI embedding server (optional — degrades gracefully without it)
+- An OIDC provider (Auth0, Google, etc.) for authentication via mcp-auth-proxy
+- TEI embedding server (optional — semantic search degrades gracefully without it)
 
 ### Setup
 
 ```bash
-git clone <repo-url>
-cd cognition-bridge
+git clone https://github.com/onideus/context-library.git
+cd context-library
 cp .env.example .env
-# Edit .env with your Auth0 credentials and Postgres password
+# Edit .env with your OIDC credentials and Postgres password
 ```
 
 ### Run with Docker
@@ -48,7 +54,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-This starts PostgreSQL, Cognition Bridge, the auth proxy, and Cloudflare Tunnel.
+This starts PostgreSQL, the MCP server, the auth proxy, and Cloudflare Tunnel.
 
 ### Local Development
 
@@ -59,6 +65,33 @@ npm test             # Run test suite
 npm run build        # TypeScript compile
 ```
 
+## Security
+
+This server holds personal operational data — handoff state, tasks, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.** The included `docker-compose.yml` routes all external traffic through mcp-auth-proxy, which handles OAuth 2.1 (DCR, authorization, token exchange) before forwarding authenticated requests to the server.
+
+## Environment Variables
+
+See `.env.example` for all configuration options. Key variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SERVER_NAME` | `context-library` | MCP server name (visible to LLM clients as the tool namespace) |
+| `MCP_PORT` | `3100` | Server port |
+| `DATA_DIR` | `./data` | Handoff file storage path |
+| `RETENTION_COUNT` | `5000` | Max handoff files to retain |
+| `PGHOST` / `PGPASSWORD` / `PGDATABASE` | — | PostgreSQL connection |
+| `EMBEDDING_URL` | `http://embeddings:80` | TEI server endpoint |
+
+Auth proxy configuration (see `docker-compose.yml`):
+
+| Variable | Description |
+|---|---|
+| `AUTH0_ISSUER` | OIDC provider issuer URL |
+| `AUTH0_CLIENT_ID` | OAuth client ID |
+| `AUTH0_CLIENT_SECRET` | OAuth client secret |
+| `ALLOWED_USERS` | Comma-separated list of authorized email addresses |
+| `EXTERNAL_URL` | Public-facing URL (e.g., `https://your-domain.com`) |
+
 ## Deployment
 
 ```bash
@@ -68,16 +101,6 @@ docker compose up -d
 ```
 
 The Docker build uses multi-stage node:22-slim images. The production container runs as non-root (`appuser`).
-
-## Environment Variables
-
-See `.env.example` for all configuration options. Key variables:
-
-- `AUTH0_DOMAIN` / `AUTH0_AUDIENCE` — Auth0 tenant configuration
-- `SKIP_AUTH` — Set `true` for local dev only. **NEVER true in production.**
-- `PGHOST` / `PGPASSWORD` / `PGDATABASE` — PostgreSQL connection
-- `EMBEDDING_URL` — TEI server endpoint
-- `MCP_PORT` — Server port (default: 3100)
 
 ## License
 
