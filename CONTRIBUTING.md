@@ -13,7 +13,7 @@ Thank you for your interest in contributing. Context Library is a personal cogni
 
 ```bash
 npm run dev          # Start with hot reload (tsx watch)
-npm test             # Run full test suite (66 tests)
+npm test             # Run full test suite
 npm run build        # TypeScript compile
 ```
 
@@ -29,6 +29,14 @@ npm run test:watch   # Watch mode
 ```
 
 Tests use Vitest. The `dist/` directory is excluded from test discovery to prevent port conflicts.
+
+### PostgreSQL Tests
+
+Task-related tests (~29 tests) require a running PostgreSQL instance. Without Postgres, these tests are automatically skipped. To run the full suite:
+
+```bash
+docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16
+```
 
 ## Pull Requests
 

@@ -110,6 +110,8 @@ export async function getHandoffCount(): Promise<number> {
  * Filenames sort chronologically by ISO timestamp prefix.
  */
 async function pruneHandoffs(handoffsDir: string, retentionCount: number): Promise<void> {
+  if (retentionCount <= 0) return; // 0 = unlimited retention
+
   const entries = (await readdir(handoffsDir))
     .filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-"))
     .sort();

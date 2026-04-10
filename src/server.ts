@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
@@ -10,7 +11,10 @@ import { registerSearchTools } from "./tools/search.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
-import { stat } from "node:fs/promises";
+import { access, constants } from "node:fs/promises";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json");
 
 const app = new Hono();
 
@@ -18,7 +22,7 @@ const app = new Hono();
 app.use(
   "/*",
   cors({
-    origin: ["https://claude.ai", "https://claude.com"],
+    origin: config.corsOrigins,
     allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "mcp-session-id"],
     exposeHeaders: ["WWW-Authenticate", "mcp-session-id"],
@@ -37,7 +41,7 @@ app.use("/*", async (c, next) => {
 app.get("/health", (c) =>
   c.json({
     status: "ok",
-    version: "0.5.0",
+    version,
     uptime: Math.floor(process.uptime()),
   })
 );
@@ -46,7 +50,7 @@ app.get("/health", (c) =>
 app.get("/health/ready", async (c) => {
   let archiveWritable = false;
   try {
-    await stat(config.dataDir);
+    await access(config.dataDir, constants.W_OK);
     archiveWritable = true;
   } catch {
     archiveWritable = false;
@@ -63,7 +67,7 @@ app.get("/health/ready", async (c) => {
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: config.serverName,
-    version: "0.5.0",
+    version,
   });
   registerHandoffTools(server);
   registerTaskTools(server);
@@ -117,6 +121,8 @@ app.delete("/mcp", async (c) => {
 });
 
 // Initialize and start
+let httpServer: ReturnType<typeof serve>;
+
 async function main() {
   await ensureDataDir();
   try {
@@ -128,7 +134,7 @@ async function main() {
     );
   }
 
-  serve(
+  httpServer = serve(
     {
       fetch: app.fetch,
       port: config.port,
@@ -142,9 +148,10 @@ async function main() {
   );
 }
 
-// Graceful shutdown — drain pg pool on container stop
+// Graceful shutdown — close HTTP server and drain pg pool on container stop
 async function shutdown(signal: string) {
   console.log(`[shutdown] ${signal} received, draining...`);
+  httpServer?.close();
   await pool.end();
   process.exit(0);
 }

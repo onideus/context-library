@@ -7,7 +7,7 @@ import { join } from "node:path";
  * Task tool integration tests.
  *
  * These tests require a running PostgreSQL instance. Set PG* env vars
- * or run: docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test postgres:16-alpine
+ * or run: docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16
  *
  * If Postgres is not available, tests are skipped gracefully.
  */
@@ -99,7 +99,11 @@ async function checkPostgres(): Promise<boolean> {
 beforeAll(async () => {
   pgAvailable = await checkPostgres();
   if (!pgAvailable) {
-    console.warn("\u26a0\ufe0f  Postgres not available \u2014 task tests will be skipped");
+    console.log("\n" + "=".repeat(60));
+    console.log("  NOTICE: PostgreSQL not available");
+    console.log("  ~29 task tests will be SKIPPED");
+    console.log("  See CONTRIBUTING.md for setup instructions");
+    console.log("=".repeat(60) + "\n");
     return;
   }
 

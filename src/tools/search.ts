@@ -24,13 +24,22 @@ function sourceFileTimestamp(sourceFile: string): string {
   return match ? match[1] : "9999"; // unknown files sort last
 }
 
+interface SearchResultRow {
+  content_type: string;
+  content_id: string;
+  content_text: string;
+  metadata: Record<string, unknown>;
+  similarity?: number;
+  rrf_score?: number;
+}
+
 /**
  * Deduplicate search results by content fingerprint, keeping the oldest source_file.
  * Returns { deduped, preDedupCount }.
  */
-export function deduplicateResults(rows: any[]): { deduped: any[]; preDedupCount: number } {
+export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchResultRow[]; preDedupCount: number } {
   const preDedupCount = rows.length;
-  const groups = new Map<string, any[]>();
+  const groups = new Map<string, SearchResultRow[]>();
 
   for (const row of rows) {
     const fp = contentFingerprint(row.content_text ?? "");
@@ -40,15 +49,15 @@ export function deduplicateResults(rows: any[]): { deduped: any[]; preDedupCount
     groups.get(fp)!.push(row);
   }
 
-  const deduped: any[] = [];
+  const deduped: SearchResultRow[] = [];
   for (const group of groups.values()) {
     if (group.length === 1) {
       deduped.push(group[0]);
     } else {
       // Keep the row with the oldest source_file
       group.sort((a, b) => {
-        const aFile = a.metadata?.source_file ?? "";
-        const bFile = b.metadata?.source_file ?? "";
+        const aFile = (a.metadata?.source_file as string) ?? "";
+        const bFile = (b.metadata?.source_file as string) ?? "";
         if (!aFile && !bFile) return 0;
         if (!aFile) return -1; // no source_file = keep first encountered
         if (!bFile) return 1;
@@ -61,7 +70,7 @@ export function deduplicateResults(rows: any[]): { deduped: any[]; preDedupCount
   return { deduped, preDedupCount };
 }
 
-const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across indexed content \u2014 handoff history, tasks, and documents. Returns results ranked by meaning similarity, not keyword match.
+const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across indexed content — handoff history, tasks, and documents. Returns results ranked by meaning similarity, not keyword match.
 
 Use this when the user asks about past decisions, previous conversations, historical context, or when full-text search (search_tasks) might miss results because exact words don't match.
 
@@ -74,7 +83,7 @@ Parameters:
 
 Returns: Array of {content_type, content_id, content_text (truncated), metadata, similarity}
 
-Retrieval guidance: If results appear to reference an event, decision, or incident indirectly (e.g., \"the throwing star incident was validated\" rather than describing what actually happened), the original source may exist deeper in the index. Reformulate your query with more specific contextual terms (names, locations, actions) and search again with a lower similarity_threshold (try 0.05) and higher limit (try 20). Prefer results from the oldest source_file \u2014 the filename timestamp indicates when the content was originally captured.`;
+Retrieval guidance: If results appear to reference an event, decision, or incident indirectly (e.g., "the deployment issue was resolved" rather than describing what actually happened), the original source may exist deeper in the index. Reformulate your query with more specific contextual terms (names, locations, actions) and search again with a lower similarity_threshold (try 0.05) and higher limit (try 20). Prefer results from the oldest source_file — the filename timestamp indicates when the content was originally captured.`;
 
 const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes or when search results seem stale.
 
@@ -213,18 +222,22 @@ export function registerSearchTools(mcpServer: McpServer): void {
         }
 
         // Deduplicate: collapse near-identical content to oldest source
-        const { deduped, preDedupCount } = deduplicateResults(result.rows);
+        const { deduped, preDedupCount } = deduplicateResults(result.rows as unknown as SearchResultRow[]);
 
         // Re-sort by original ranking and truncate to requested limit
         const sortKey = useHybrid ? "rrf_score" : "similarity";
-        deduped.sort((a: any, b: any) => (b[sortKey] ?? 0) - (a[sortKey] ?? 0));
+        deduped.sort((a, b) => {
+          const aVal = sortKey === "rrf_score" ? (a.rrf_score ?? 0) : (a.similarity ?? 0);
+          const bVal = sortKey === "rrf_score" ? (b.rrf_score ?? 0) : (b.similarity ?? 0);
+          return bVal - aVal;
+        });
         const finalRows = deduped.slice(0, limit);
 
         return {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
-              results: finalRows.map((r: any) => ({
+              results: finalRows.map((r: SearchResultRow) => ({
                 content_type: r.content_type,
                 content_id: r.content_id,
                 content_text: r.content_text,

@@ -22,6 +22,8 @@ docker compose up -d
 
 **Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`
 
+> Handoff files are retained indefinitely by default. To enable automatic pruning of old handoffs, set `RETENTION_COUNT` to a positive number (e.g., `5000`).
+
 ### Tier 2: + PostgreSQL (Tasks + Full-Text Search)
 
 Adds structured task management with full-text search. Requires PostgreSQL 16 with pgvector.
@@ -226,6 +228,8 @@ If you see `Postgres migrations skipped — database not available`, the server 
 
 This server holds personal operational data — handoff state, tasks, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.**
 
+> **Note:** When using the auth proxy overlay (`docker-compose.auth.yml`), the MCP server still binds to `127.0.0.1:3100` from the base compose file. This means the unauthenticated server remains accessible on localhost. This is intentional for local debugging but should be considered in your deployment security model. A future release will address this in the overlay.
+
 For external access, use mcp-auth-proxy (included in the auth compose overlay) which handles OAuth 2.1 (DCR, authorization, token exchange) before forwarding authenticated requests to the server. Route external traffic through the proxy via Cloudflare Tunnel or your preferred reverse proxy.
 
 ## Environment Variables
@@ -239,7 +243,8 @@ See `.env.example` for all configuration options.
 | `SERVER_NAME` | `context-library` | MCP server name (visible to LLM clients as the tool namespace) |
 | `MCP_PORT` | `3100` | Server port |
 | `DATA_DIR` | `./data` | Handoff file storage path |
-| `RETENTION_COUNT` | `5000` | Max handoff files to retain |
+| `RETENTION_COUNT` | `0` | Max handoff files to retain (`0` = unlimited) |
+| `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
 
 ### PostgreSQL (Tier 2)
 

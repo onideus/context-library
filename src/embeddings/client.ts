@@ -1,5 +1,10 @@
 import { config } from "../config.js";
 
+interface EmbeddingResponseItem {
+  index: number;
+  embedding: number[];
+}
+
 /**
  * Generate embeddings via local TEI server.
  * TEI exposes an OpenAI-compatible /v1/embeddings endpoint.
@@ -26,6 +31,9 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   }
 
   const data = await response.json();
+  if (!data?.data?.[0]?.embedding) {
+    throw new Error(`Unexpected embedding response: missing data.data[0].embedding`);
+  }
   return data.data[0].embedding;
 }
 
@@ -51,9 +59,12 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   }
 
   const data = await response.json();
+  if (!Array.isArray(data?.data) || data.data.length === 0) {
+    throw new Error(`Unexpected embedding response: missing or empty data.data array`);
+  }
   return data.data
-    .sort((a: any, b: any) => a.index - b.index)
-    .map((d: any) => d.embedding);
+    .sort((a: EmbeddingResponseItem, b: EmbeddingResponseItem) => a.index - b.index)
+    .map((d: EmbeddingResponseItem) => d.embedding);
 }
 
 /**

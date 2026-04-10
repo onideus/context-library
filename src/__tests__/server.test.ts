@@ -695,3 +695,37 @@ describe("MCP Tools", () => {
     });
   });
 });
+
+// ────────────────────────────────────────────────
+// Embedding unavailability tests
+// ────────────────────────────────────────────────
+
+describe("search_context — graceful degradation", () => {
+  it("returns EMBEDDING_UNAVAILABLE when embedding server is not running", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "search_context",
+        arguments: { query: "test query" },
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.error).toBe(true);
+    expect(result.code).toBe("EMBEDDING_UNAVAILABLE");
+  });
+
+  it("reindex returns EMBEDDING_UNAVAILABLE when embedding server is not running", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "reindex",
+        arguments: {},
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.error).toBe(true);
+    expect(result.code).toBe("EMBEDDING_UNAVAILABLE");
+  });
+});
