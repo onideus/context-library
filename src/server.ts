@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
@@ -12,9 +11,19 @@ import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
 import { access, constants } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
-const require = createRequire(import.meta.url);
-const { version } = require("../package.json");
+// Read version: prefer APP_VERSION env var, fall back to package.json
+function getVersion(): string {
+  if (process.env.APP_VERSION) return process.env.APP_VERSION;
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+const version = getVersion();
 
 const app = new Hono();
 
@@ -29,7 +38,7 @@ app.use(
   })
 );
 
-// ── Request logger ────────────────────────────────────
+// ── Request logger ────────────────────────────────────────
 app.use("/*", async (c, next) => {
   const start = Date.now();
   await next();
@@ -62,7 +71,7 @@ app.get("/health/ready", async (c) => {
   });
 });
 
-// ── MCP transport route (authenticated) ─────────────────
+// ── MCP transport route (authenticated) ─────────────────────
 // Factory for stateless MCP server instances (one per request, per SDK pattern)
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -129,7 +138,7 @@ async function main() {
     await runMigrations();
   } catch (err) {
     console.warn(
-      "[startup] Postgres migrations skipped — database not available:",
+      "[startup] Postgres migrations skipped \u2014 database not available:",
       (err as Error).message
     );
   }
