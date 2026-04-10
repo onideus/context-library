@@ -1,7 +1,7 @@
 -- Enable pgvector
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Embeddings table — stores vector representations of any CB content type
+-- Embeddings table — stores vector representations of any content type
 CREATE TABLE IF NOT EXISTS embeddings (
     id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
     content_type    TEXT            NOT NULL,  -- 'handoff', 'task', 'document', 'transcript'

@@ -22,8 +22,8 @@ function makeRow(
 describe("search_context source deduplication", () => {
   it("collapses identical content to the oldest source_file", () => {
     const sharedText =
-      "The kid throwing star incident occurred on March 21 when a child brought a shuriken to school. " +
-      "This was reported by the teacher and escalated to administration. The parents were contacted immediately.";
+      "The database failover incident occurred on March 21 when the primary replica lost connectivity. " +
+      "This was detected by automated monitoring and escalated to the on-call engineer. The backup was promoted immediately.";
 
     const rows = [
       makeRow(sharedText, "2026-04-04T10-00-00-000Z-aaaa1111.json", { rrf_score: 0.035 }),
@@ -72,8 +72,8 @@ describe("search_context source deduplication", () => {
 
   it("over-fetch scenario: 15 duplicates + 5 unique collapses to 6", () => {
     const duplicateText =
-      "The throwing star incident was validated in the March 21 handoff. " +
-      "This event was significant because it required immediate escalation.";
+      "The database failover incident was documented in the March 21 handoff. " +
+      "This event was significant because it required immediate intervention.";
 
     const rows: any[] = [];
 
@@ -102,7 +102,7 @@ describe("search_context source deduplication", () => {
 
     // The surviving duplicate should be from March 01 (oldest)
     const dupSurvivor = deduped.find((r) =>
-      r.content_text.includes("throwing star incident was validated")
+      r.content_text.includes("database failover incident was documented")
     );
     expect(dupSurvivor).toBeDefined();
     expect(dupSurvivor!.metadata.source_file).toBe("2026-03-01T10-00-00-000Z-dup00000.json");

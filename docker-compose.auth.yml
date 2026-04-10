@@ -5,6 +5,8 @@
 
 services:
   mcp-auth-proxy:
+    # No ports published — requires a tunnel or reverse proxy for external access.
+    # See README for Cloudflare Tunnel example.
     image: ghcr.io/sigbit/mcp-auth-proxy:latest
     container_name: mcp-auth-proxy
     restart: unless-stopped

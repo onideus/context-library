@@ -46,14 +46,16 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - Handoff schema versioning strategy for forward/backward compatibility
 - Migration tooling for schema changes across stored handoff files
 - Evaluate migrating append-only JSON handoffs to PostgreSQL events table
+- Migrate `z.any()` to `z.unknown()` in handoff schemas and tool parameter definitions for stricter type safety
 
 ### Artifact Storage
 - File/content storage with metadata, SHA-256 hashing, versioning
 - Prompt library via tagging convention on artifacts
 
 ### Integrations
-- Oura ring health data integration
+- Health/wearable data integration (e.g., Oura, Whoop, Apple Health)
 - Calendar/scheduling data feeds
 
 ### Infrastructure
 - CI/CD pipeline (GitHub Actions)
+- Refactor dynamic SQL assembly in search tools to a query builder pattern for maintainability

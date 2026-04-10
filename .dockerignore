@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+.env
+logs
+.cloudflared
+proxy-certs
+proxy-data
+.git
+.claude

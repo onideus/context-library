@@ -7,7 +7,7 @@ export const pool = new Pool({
   connectionTimeoutMillis: 3_000, // fail fast when Postgres is unavailable
 });
 
-export async function query<T extends pg.QueryResultRow = any>(
+export async function query<T extends pg.QueryResultRow = Record<string, unknown>>(
   text: string,
   params?: unknown[]
 ): Promise<pg.QueryResult<T>> {
