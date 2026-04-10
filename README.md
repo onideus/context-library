@@ -103,6 +103,14 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
+> **Data directory ownership:** The container runs as `appuser` (UID 999). If you're migrating data from an existing deployment or running on a NAS, ensure the `data/` directory is owned by the correct UID:
+>
+> ```bash
+> sudo chown -R 999:999 ./data
+> ```
+>
+> Without this, the server will fail with `EACCES: permission denied` when writing handoff files. The `proxy-data/` and `proxy-certs/` directories (used by `mcp-auth-proxy`) do not need this — the proxy runs as root.
+
 ### Local Development
 
 ```bash
