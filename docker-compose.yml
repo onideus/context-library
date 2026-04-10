@@ -1,0 +1,80 @@
+services:
+  mcp-auth-proxy:
+    image: ghcr.io/sigbit/mcp-auth-proxy:latest
+    container_name: mcp-auth-proxy
+    restart: unless-stopped
+    command:
+      - --external-url
+      - ${EXTERNAL_URL:-https://localhost}
+      - --tls-cert-file
+      - /certs/cert.pem
+      - --tls-key-file
+      - /certs/key.pem
+      - --oidc-configuration-url
+      - ${AUTH0_ISSUER}.well-known/openid-configuration
+      - --oidc-client-id
+      - ${AUTH0_CLIENT_ID}
+      - --oidc-client-secret
+      - ${AUTH0_CLIENT_SECRET}
+      - --oidc-allowed-users
+      - ${ALLOWED_USERS}
+      - http://cognition-bridge:3100
+    volumes:
+      - ./proxy-data:/data
+      - ./proxy-certs:/certs:ro
+    expose:
+      - "443"
+
+  postgres:
+    build:
+      context: .
+      dockerfile: postgres.Dockerfile
+    container_name: cognition-bridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cognition_bridge
+      POSTGRES_USER: cb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cb -d cognition_bridge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cognition-bridge:
+    build: .
+    container_name: cognition-bridge
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "3100"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGUSER=cb
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+      - PGDATABASE=cognition_bridge
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cognition-bridge-tunnel
+    restart: unless-stopped
+    user: "0"
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared-config.yml:/etc/cloudflared/config.yml:ro
+      - ${CLOUDFLARED_CREDS_PATH:-./.cloudflared}:/etc/cloudflared/creds:ro
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
+    depends_on:
+      - mcp-auth-proxy

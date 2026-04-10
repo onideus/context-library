@@ -1,0 +1,36 @@
+# Standalone TEI embedding server (GPU-accelerated)
+# Provides embeddings to Cognition Bridge via network
+#
+# First run downloads ~1GB model to ./models/
+#
+# Usage:
+#   docker compose up -d
+#
+# Health check:
+#   curl http://localhost:8090/health
+#
+# Configure Cognition Bridge to use this server:
+#   EMBEDDING_URL=http://<hostname>:8090
+
+services:
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9
+    container_name: tei-embeddings
+    restart: unless-stopped
+    command: --model-id nomic-ai/nomic-embed-text-v2-moe --port 80
+    ports:
+      - "8090:80"
+    volumes:
+      - ./models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5

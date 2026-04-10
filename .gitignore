@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+.env
+logs/
+!logs/.gitkeep
+.cloudflared/
+proxy-certs/
+proxy-data/
+.claude/worktrees/
