@@ -34,7 +34,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 
 ### Tier 3: + Embeddings (Semantic Search)
 
-Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Requires a GPU for reasonable performance.
+Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.embeddings.yml up -d
@@ -42,7 +42,24 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 
 **Additional tools:** `search_context`, `reindex`
 
-The TEI server can run on a separate machine (e.g., a desktop with a GPU) — just point `EMBEDDING_URL` to its address.
+The TEI server can run on a separate machine — just point `EMBEDDING_URL` to its address. This is the recommended setup if your main server doesn't have a GPU.
+
+#### Embedding Server Platform Options
+
+| Platform | Method | GPU Acceleration |
+|---|---|---|
+| **Linux/Windows (NVIDIA GPU)** | Docker: `ghcr.io/huggingface/text-embeddings-inference:cuda-1.9` | CUDA (compute capability 7.5+) |
+| **Linux/Windows (no GPU)** | Docker: `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9` | None (CPU only, slower) |
+| **macOS Apple Silicon** | Native: `brew install huggingface/tap/tei` | Metal (via native binary only) |
+
+> **Apple Silicon note:** macOS does not support GPU passthrough into Docker containers. Running TEI in Docker on M-series Macs will be CPU-bound and slow. For GPU acceleration, install TEI natively via Homebrew and run it outside of Docker:
+>
+> ```bash
+> brew install huggingface/tap/tei
+> text-embeddings-router --model-id nomic-ai/nomic-embed-text-v2-moe --port 8090
+> ```
+>
+> Then set `EMBEDDING_URL=http://host.docker.internal:8090` (Docker) or `EMBEDDING_URL=http://localhost:8090` (local dev) so Context Library can reach it.
 
 ## Architecture
 
@@ -75,7 +92,7 @@ Each component degrades gracefully when unavailable. If Postgres is down, handof
 
 - Docker and Docker Compose
 - For external access: an OIDC provider (Auth0, Google, etc.) and a domain with a Cloudflare Tunnel
-- For Tier 3: a machine with an NVIDIA GPU for the TEI embedding server
+- For Tier 3 embeddings: an NVIDIA GPU (Linux/Windows), or Apple Silicon Mac with Homebrew, or any CPU (slower)
 
 ### Setup
 
