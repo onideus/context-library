@@ -8,36 +8,74 @@ AI assistants lose all context between conversations. Context Library solves thi
 
 The server name is configurable via the `SERVER_NAME` environment variable (default: `context-library`). Name it whatever fits your mental model.
 
+## Deployment Tiers
+
+Context Library is designed to be deployed incrementally. Each tier adds functionality on top of the previous one, using Docker Compose file stacking.
+
+### Tier 1: Core (Handoffs Only)
+
+The simplest deployment. Stores and retrieves operational context as append-only JSON files. No database required.
+
+```bash
+docker compose up -d
+```
+
+**Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`
+
+### Tier 2: + PostgreSQL (Tasks + Full-Text Search)
+
+Adds structured task management with full-text search. Requires PostgreSQL 16 with pgvector.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+```
+
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`
+
+### Tier 3: + Embeddings (Semantic Search)
+
+Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Requires a GPU for reasonable performance.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.embeddings.yml up -d
+```
+
+**Additional tools:** `search_context`, `reindex`
+
+The TEI server can run on a separate machine (e.g., a desktop with a GPU) — just point `EMBEDDING_URL` to its address.
+
 ## Architecture
 
 - **Server:** Hono 4.x + StreamableHTTP MCP transport (Node.js 22, TypeScript)
-- **Database:** PostgreSQL 16 with pgvector for semantic search
-- **Embeddings:** Text Embeddings Inference (TEI) with nomic-embed-text-v2-moe (768 dims)
+- **Storage (Tier 1):** Append-only JSON files in `./data/handoffs/`
+- **Database (Tier 2):** PostgreSQL 16 with pgvector extension
+- **Embeddings (Tier 3):** Text Embeddings Inference with nomic-embed-text-v2-moe (768 dims)
 - **Auth:** Handled externally by [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) — the server itself is unauthenticated and trusts its network boundary
-- **Deployment:** Docker Compose with Cloudflare Tunnel for external access
+
+Each component degrades gracefully when unavailable. If Postgres is down, handoffs still work. If the embedding server is unreachable, task search still works via full-text search.
 
 ## MCP Tools
 
-| Tool | Description |
-|---|---|
-| `store_handoff` | Full-state capture at session boundaries (append-only) |
-| `get_latest_handoff` | Retrieve most recent handoff with pre-computed fields |
-| `patch_handoff` | Partial update with merge semantics |
-| `create_task` | Create task with scope, priority, tags, dates |
-| `get_task` | Retrieve task by UUID |
-| `list_tasks` | Paginated filtering with status, scope, priority, tags |
-| `update_task` | Field updates + lifecycle actions (complete/cancel/defer/reopen) |
-| `search_tasks` | Full-text search with PostgreSQL FTS |
-| `search_context` | Hybrid semantic search (vector + FTS with RRF fusion) |
-| `reindex` | Rebuild semantic search index |
+| Tool | Tier | Description |
+|---|---|---|
+| `store_handoff` | Core | Full-state capture at session boundaries (append-only) |
+| `get_latest_handoff` | Core | Retrieve most recent handoff with pre-computed fields |
+| `patch_handoff` | Core | Partial update with merge semantics |
+| `create_task` | Postgres | Create task with scope, priority, tags, dates |
+| `get_task` | Postgres | Retrieve task by UUID |
+| `list_tasks` | Postgres | Paginated filtering with status, scope, priority, tags |
+| `update_task` | Postgres | Field updates + lifecycle actions (complete/cancel/defer/reopen) |
+| `search_tasks` | Postgres | Full-text search with PostgreSQL FTS |
+| `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) |
+| `reindex` | Embeddings | Rebuild semantic search index |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- An OIDC provider (Auth0, Google, etc.) for authentication via mcp-auth-proxy
-- TEI embedding server (optional — semantic search degrades gracefully without it)
+- For external access: an OIDC provider (Auth0, Google, etc.) and a domain with a Cloudflare Tunnel
+- For Tier 3: a machine with an NVIDIA GPU for the TEI embedding server
 
 ### Setup
 
@@ -45,16 +83,8 @@ The server name is configurable via the `SERVER_NAME` environment variable (defa
 git clone https://github.com/onideus/context-library.git
 cd context-library
 cp .env.example .env
-# Edit .env with your OIDC credentials and Postgres password
+# Edit .env with your configuration
 ```
-
-### Run with Docker
-
-```bash
-docker compose up -d
-```
-
-This starts PostgreSQL, the MCP server, the auth proxy, and Cloudflare Tunnel.
 
 ### Local Development
 
@@ -67,11 +97,15 @@ npm run build        # TypeScript compile
 
 ## Security
 
-This server holds personal operational data — handoff state, tasks, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.** The included `docker-compose.yml` routes all external traffic through mcp-auth-proxy, which handles OAuth 2.1 (DCR, authorization, token exchange) before forwarding authenticated requests to the server.
+This server holds personal operational data — handoff state, tasks, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.**
+
+For external access, use mcp-auth-proxy (included in the auth compose overlay) which handles OAuth 2.1 (DCR, authorization, token exchange) before forwarding authenticated requests to the server. Route external traffic through the proxy via Cloudflare Tunnel or your preferred reverse proxy.
 
 ## Environment Variables
 
-See `.env.example` for all configuration options. Key variables:
+See `.env.example` for all configuration options.
+
+### Core
 
 | Variable | Default | Description |
 |---|---|---|
@@ -79,10 +113,27 @@ See `.env.example` for all configuration options. Key variables:
 | `MCP_PORT` | `3100` | Server port |
 | `DATA_DIR` | `./data` | Handoff file storage path |
 | `RETENTION_COUNT` | `5000` | Max handoff files to retain |
-| `PGHOST` / `PGPASSWORD` / `PGDATABASE` | — | PostgreSQL connection |
-| `EMBEDDING_URL` | `http://embeddings:80` | TEI server endpoint |
 
-Auth proxy configuration (see `docker-compose.yml`):
+### PostgreSQL (Tier 2)
+
+| Variable | Default | Description |
+|---|---|---|
+| `PGHOST` | — | PostgreSQL host |
+| `PGPORT` | `5432` | PostgreSQL port |
+| `PGUSER` | — | PostgreSQL user |
+| `PGPASSWORD` | — | PostgreSQL password |
+| `PGDATABASE` | — | PostgreSQL database name |
+| `POSTGRES_PASSWORD` | — | Root Postgres password (used by compose) |
+
+### Embeddings (Tier 3)
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_URL` | `http://embeddings:80` | TEI server endpoint |
+| `EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v2-moe` | Embedding model name |
+| `EMBEDDING_DIMENSIONS` | `768` | Embedding vector dimensions |
+
+### Auth Proxy (External Access)
 
 | Variable | Description |
 |---|---|
@@ -91,16 +142,6 @@ Auth proxy configuration (see `docker-compose.yml`):
 | `AUTH0_CLIENT_SECRET` | OAuth client secret |
 | `ALLOWED_USERS` | Comma-separated list of authorized email addresses |
 | `EXTERNAL_URL` | Public-facing URL (e.g., `https://your-domain.com`) |
-
-## Deployment
-
-```bash
-git pull
-docker compose build --no-cache
-docker compose up -d
-```
-
-The Docker build uses multi-stage node:22-slim images. The production container runs as non-root (`appuser`).
 
 ## License
 
