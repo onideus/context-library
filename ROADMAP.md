@@ -25,10 +25,16 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 
 - Security audit (logging sanitization, secrets parameterization)
 - Test coverage (unit tests for merge logic, extraction, chunking)
-- Documentation (README, ROADMAP, CLAUDE.md)
+- Documentation (README, ROADMAP, CONTRIBUTING)
 - Tool description accuracy audit
 
 ## Future
+
+### LLM Bootstrap Files
+- Per-environment configuration files for different AI assistants and coding tools
+- Goal: anyone can use their preferred LLM/environment with a bootstrap file that provides project context
+- Examples: CLAUDE.md (Claude Code), .cursorrules (Cursor), AGENTS.md (Codex), custom system prompts
+- Each file teaches the respective tool about Context Library's architecture, conventions, and development workflow
 
 ### Knowledge Layer (Third Primitive)
 - `notes` table in PostgreSQL: id, title, content (interpretation, not summary), source_url, source_title, scope, tags, timestamps
@@ -51,4 +57,3 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 
 ### Infrastructure
 - CI/CD pipeline (GitHub Actions)
-- Contributor guide (CONTRIBUTING.md)

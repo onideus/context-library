@@ -86,18 +86,35 @@ Each component degrades gracefully when unavailable. If Postgres is down, handof
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) |
 | `reindex` | Embeddings | Rebuild semantic search index |
 
+## Health Checks
+
+The server exposes two health endpoints:
+
+- **`GET /health`** — Basic liveness check. Returns server status, version, and uptime.
+- **`GET /health/ready`** — Readiness check. Verifies the data directory is writable. Returns `"ok"` or `"degraded"` accordingly.
+
+Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after deployment to confirm the server can write data.
+
+```bash
+curl http://localhost:3100/health
+# {"status":"ok","version":"0.5.0","uptime":42}
+
+curl http://localhost:3100/health/ready
+# {"status":"ok","archive":true,"uptime":42}
+```
+
 ## Quick Start
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- For external access: an OIDC provider (Auth0, Google, etc.) and a domain with a Cloudflare Tunnel
+- For external access: an OIDC provider (Auth0, Google, etc.) and a reverse proxy or tunnel
 - For Tier 3 embeddings: an NVIDIA GPU (Linux/Windows), or Apple Silicon Mac with Homebrew, or any CPU (slower)
 
 ### Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/context-library.git
+git clone https://github.com/onideus/context-library.git
 cd context-library
 cp .env.example .env
 # Edit .env with your configuration
@@ -119,6 +136,91 @@ npm run dev          # Start with hot reload (tsx watch)
 npm test             # Run test suite
 npm run build        # TypeScript compile
 ```
+
+## External Access with Auth Proxy
+
+To expose Context Library to the internet (required for Claude.ai and other hosted MCP clients), you need two things: an OAuth proxy and a tunnel or reverse proxy.
+
+### Auth Proxy Setup
+
+The included `docker-compose.auth.yml` adds [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) as an OAuth 2.1 gateway.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.auth.yml up -d
+```
+
+**Required setup:**
+
+1. **OIDC Provider (Auth0 example):**
+   - Create a Regular Web Application (must be **first-party**, not third-party — third-party apps can't enable connections)
+   - Enable a social connection (e.g., GitHub) on the application
+   - Set the callback URL to: `https://YOUR_DOMAIN/.auth/oidc/callback`
+   - Copy the Client ID, Client Secret, and Issuer URL to your `.env`
+
+2. **TLS Certificates:**
+   The auth proxy requires TLS certificates in `./proxy-certs/` (as `cert.pem` and `key.pem`), even if your tunnel handles external TLS termination. For self-signed certs:
+   ```bash
+   mkdir -p proxy-certs
+   openssl req -x509 -newkey rsa:2048 -keyout proxy-certs/key.pem -out proxy-certs/cert.pem -days 365 -nodes -subj '/CN=localhost'
+   ```
+
+3. **Client Registration Data:**
+   Once MCP clients (Claude.ai, Claude Desktop, etc.) authenticate through the proxy, their OAuth client registrations are stored in `./proxy-data/`. This directory must be preserved across deployments — losing it means all connected clients will need to re-register.
+
+### Connecting from Claude.ai
+
+In Claude.ai, add the MCP server via **Settings → MCP Servers**. Use your public URL (e.g., `https://your-domain.com/mcp`). If dynamic client registration (DCR) doesn't work automatically, you can configure credentials manually via **Advanced Settings** using the client ID and secret stored in `./proxy-data/`.
+
+### Tunnel / Reverse Proxy
+
+Context Library does not include a tunnel in the public compose files — tunnel configuration is deployment-specific. Here's an example using Cloudflare Tunnel:
+
+```yaml
+# docker-compose.cloudflared.yml (deployment-specific, not committed)
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: context-library-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - mcp-auth-proxy
+```
+
+Start with:
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.postgres.yml \
+  -f docker-compose.auth.yml \
+  -f docker-compose.cloudflared.yml \
+  up -d
+```
+
+> **Note:** When using `TUNNEL_TOKEN`, the tunnel configuration is managed in the Cloudflare dashboard, not in a local config file. The dashboard config takes precedence. Point the tunnel's public hostname to `https://mcp-auth-proxy:443`.
+
+## Troubleshooting
+
+**`EACCES: permission denied` when writing handoffs**
+The container runs as UID 999. Fix ownership: `sudo chown -R 999:999 ./data`
+
+**Auth proxy returns "Authorization failed" in Claude.ai**
+Common causes:
+- Auth0 app is set as third-party (must be first-party)
+- Social connection (e.g., GitHub) not enabled on the app
+- Callback URL mismatch — must be `https://YOUR_DOMAIN/.auth/oidc/callback`
+- Missing or expired TLS certificates in `proxy-certs/`
+
+**Health check returns `"degraded"`**
+The data directory is not writable. Check ownership (UID 999) and that the volume mount exists.
+
+**Embeddings return errors but tasks still work**
+This is expected graceful degradation. Check that your embedding server is running and reachable at `EMBEDDING_URL`. If it's on a separate machine, ensure the hostname resolves from inside the Docker network.
+
+**Postgres migrations skipped on startup**
+If you see `Postgres migrations skipped — database not available`, the server is running in Tier 1 mode (handoffs only). This is normal if you didn't include `docker-compose.postgres.yml`.
 
 ## Security
 
@@ -162,7 +264,7 @@ See `.env.example` for all configuration options.
 
 | Variable | Description |
 |---|---|
-| `AUTH0_ISSUER` | OIDC provider issuer URL |
+| `AUTH0_ISSUER` | OIDC provider issuer URL (include trailing slash) |
 | `AUTH0_CLIENT_ID` | OAuth client ID |
 | `AUTH0_CLIENT_SECRET` | OAuth client secret |
 | `ALLOWED_USERS` | Comma-separated list of authorized email addresses |
