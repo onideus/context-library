@@ -1,0 +1,40 @@
+# Embedding server for semantic search (Tier 3)
+#
+# Platform options:
+#   NVIDIA GPU:  image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9 (default below)
+#   CPU only:    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+#                (remove the deploy.resources section if using CPU image)
+#   Apple Silicon: Run TEI natively via Homebrew (brew install huggingface/tap/tei)
+#                  Start with: text-embeddings-router --model-id nomic-ai/nomic-embed-text-v2-moe --port 8090
+#                  Then set EMBEDDING_URL=http://host.docker.internal:8090 in .env
+#                  and remove/comment out the embeddings service below.
+#
+# The embedding server can also run on a separate machine. Set EMBEDDING_URL accordingly.
+
+services:
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9
+    container_name: context-library-embeddings
+    restart: unless-stopped
+    command: --model-id ${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v2-moe} --port 80
+    volumes:
+      - ./data/models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  context-library:
+    environment:
+      - EMBEDDING_URL=http://embeddings:80
+    depends_on:
+      embeddings:
+        condition: service_healthy

@@ -1,8 +1,8 @@
-# Cognition Bridge — Roadmap
+# Context Library — Roadmap
 
 ## Design Philosophy: Three Primitives
 
-Cognition Bridge is built around three distinct data types that map to three questions:
+Context Library is built around three distinct data types that map to three questions:
 
 - **Handoffs** → *Where am I?* — Operational state captured at session boundaries. Ephemeral, append-only, scoped by time.
 - **Tasks** → *What do I need to do?* — Action items with lifecycles (open → completed/cancelled/deferred). Queryable, filterable, finite.
@@ -16,18 +16,17 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - Task management (CRUD + full-text search) on PostgreSQL
 - Semantic search via pgvector + TEI embeddings with hybrid RRF fusion
 - Recursive text extraction + chunking for handoff indexing
-- Auth0 RS256 JWT validation
-- Docker Compose deployment (NAS: CB + Postgres + auth proxy + tunnel)
-- TEI embedding server on desktop (separate compose)
+- OAuth delegated to mcp-auth-proxy
+- Three-tier Docker Compose deployment (core → Postgres → embeddings)
 - Scope filtering (full/work/personal) on handoff retrieval
+- Open-source release preparation (v0.5.0)
 
-## Current: v0.5.0 Hardening
+## Current: v0.5.0 Initial Release
 
 - Security audit (logging sanitization, secrets parameterization)
 - Test coverage (unit tests for merge logic, extraction, chunking)
-- Documentation updates (CLAUDE.md, README, ROADMAP)
+- Documentation (README, ROADMAP, CLAUDE.md)
 - Tool description accuracy audit
-- Codebase cleanup for open-source release
 
 ## Future
 
@@ -50,8 +49,6 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - Oura ring health data integration
 - Calendar/scheduling data feeds
 
-### Open-Source Prep
-- Remove all personal references from codebase
-- Parameterize all deployment-specific configuration
-- Write contributor guide
+### Infrastructure
 - CI/CD pipeline (GitHub Actions)
+- Contributor guide (CONTRIBUTING.md)

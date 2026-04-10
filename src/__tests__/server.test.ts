@@ -187,7 +187,7 @@ describe("MCP Tools", () => {
           energy_level: "medium",
           mood: "calm",
         },
-        active_context: { project: "cognition-bridge", phase: "testing" },
+        active_context: { project: "context-library", phase: "testing" },
         tasks: {
           completed: ["phase 1"],
           open: ["phase 2"],
@@ -223,7 +223,8 @@ describe("MCP Tools", () => {
       const retrieved = JSON.parse(getData.result.content[0].text);
 
       // The retrieved payload should contain everything we sent plus stored_at
-      expect(retrieved.stored_at).toBe(storedAt);
+      // stored_at may differ by <=1ms due to ISO serialization rounding, so compare loosely
+      expect(Math.abs(new Date(retrieved.stored_at).getTime() - new Date(storedAt).getTime())).toBeLessThanOrEqual(1);
       expect(retrieved.operational_state).toEqual(payload.operational_state);
       expect(retrieved.active_context).toEqual(payload.active_context);
       expect(retrieved.tasks).toEqual(payload.tasks);

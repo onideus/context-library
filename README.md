@@ -97,7 +97,7 @@ Each component degrades gracefully when unavailable. If Postgres is down, handof
 ### Setup
 
 ```bash
-git clone https://github.com/onideus/context-library.git
+git clone https://github.com/YOUR_USERNAME/context-library.git
 cd context-library
 cp .env.example .env
 # Edit .env with your configuration
