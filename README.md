@@ -110,6 +110,7 @@ curl http://localhost:3100/health/ready
 ### Prerequisites
 
 - Docker and Docker Compose
+- For local development without Docker: Node.js 22+
 - For external access: an OIDC provider (Auth0, Google, etc.) and a reverse proxy or tunnel
 - For Tier 3 embeddings: an NVIDIA GPU (Linux/Windows), or Apple Silicon Mac with Homebrew, or any CPU (slower)
 
@@ -137,6 +138,83 @@ npm install
 npm run dev          # Start with hot reload (tsx watch)
 npm test             # Run test suite
 npm run build        # TypeScript compile
+```
+
+The server starts on `http://localhost:3100` by default. The MCP endpoint is at `http://localhost:3100/mcp`. Verify it's running:
+
+```bash
+curl http://localhost:3100/health
+```
+
+## Connecting MCP Clients
+
+Once Context Library is running (either via `npm run dev` or Docker), you can connect any MCP-compatible client. The server uses **Streamable HTTP** transport on a single endpoint: `http://localhost:3100/mcp`.
+
+### Roo Code (VS Code)
+
+Roo Code is the most common local setup. Open your MCP settings (click the MCP icon in the Roo Code panel, then **Edit Global MCP** or **Edit Project MCP**) and add:
+
+```json
+{
+  "mcpServers": {
+    "context-library": {
+      "type": "streamable-http",
+      "url": "http://localhost:3100/mcp"
+    }
+  }
+}
+```
+
+For project-level configuration, create `.roo/mcp.json` in your project root with the same content. Project-level configs override global settings and can be committed to version control so your whole team shares the same MCP setup.
+
+Save the file and Context Library should appear in the MCP servers list with a connected status. Roo Code will discover all available tools automatically.
+
+### Claude Code (Terminal)
+
+```bash
+claude mcp add context-library --transport http http://localhost:3100/mcp
+```
+
+This registers the server globally. Claude Code will connect on next launch.
+
+### Claude Desktop
+
+Add to your Claude Desktop config file:
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+**Windows (Store):** `%LOCALAPPDATA%\Packages\Claude_<hash>\LocalCache\Roaming\Claude\claude_desktop_config.json`
+
+Claude Desktop does not natively support remote HTTP MCP servers. Use [mcp-remote](https://github.com/geelen/mcp-remote) as a stdio bridge:
+
+```json
+{
+  "mcpServers": {
+    "context-library": {
+      "command": "npx",
+      "args": ["mcp-remote", "http://localhost:3100/mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving.
+
+### Claude.ai (Hosted)
+
+Claude.ai requires the server to be publicly accessible with OAuth authentication. See [External Access with Auth Proxy](#external-access-with-auth-proxy) below.
+
+### Other MCP Clients
+
+Any client that supports Streamable HTTP transport can connect to `http://localhost:3100/mcp`. This includes VS Code with GitHub Copilot, Cursor, Windsurf, Continue, and others. Consult your client's documentation for the MCP server configuration format — typically you need to specify the URL and transport type (`streamable-http` or `streamableHttp` depending on the client).
+
+### Verifying the Connection
+
+After connecting, ask your AI assistant to call `get_latest_handoff`. If it returns a handoff (or an empty-state response on first use), the connection is working. You can also hit the health endpoint directly:
+
+```bash
+curl http://localhost:3100/health
+# {"status":"ok","version":"0.5.0","uptime":42}
 ```
 
 ## External Access with Auth Proxy
@@ -168,10 +246,6 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 
 3. **Client Registration Data:**
    Once MCP clients (Claude.ai, Claude Desktop, etc.) authenticate through the proxy, their OAuth client registrations are stored in `./proxy-data/`. This directory must be preserved across deployments — losing it means all connected clients will need to re-register.
-
-### Connecting from Claude.ai
-
-In Claude.ai, add the MCP server via **Settings → MCP Servers**. Use your public URL (e.g., `https://your-domain.com/mcp`). If dynamic client registration (DCR) doesn't work automatically, you can configure credentials manually via **Advanced Settings** using the client ID and secret stored in `./proxy-data/`.
 
 ### Tunnel / Reverse Proxy
 
