@@ -23,10 +23,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 COPY src/db/migrations ./dist/db/migrations
 
-RUN chmod -R 644 /app/dist/db/migrations/*.sql && \
-    chmod 644 /app/package.json && \
-    mkdir -p /app/data && \
-    chown -R appuser:appgroup /app/data /app/dist/db/migrations
+RUN mkdir -p /app/data && \
+    chown -R appuser:appgroup /app
 
 USER appuser
 
