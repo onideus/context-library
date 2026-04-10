@@ -7,7 +7,7 @@ import { join } from "node:path";
  * Task tool integration tests.
  *
  * These tests require a running PostgreSQL instance. Set PG* env vars
- * or run: docker run --rm -p 5432:5432 -e POSTGRES_DB=cb_test -e POSTGRES_USER=cb -e POSTGRES_PASSWORD=test postgres:16-alpine
+ * or run: docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test postgres:16-alpine
  *
  * If Postgres is not available, tests are skipped gracefully.
  */
@@ -17,8 +17,8 @@ const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_DATA_DIR = join(process.cwd(), "data", "test-tasks");
 
 // Use test-specific Postgres database to avoid conflicts
-const PG_DATABASE = "cb_test";
-const PG_USER = process.env.PGUSER ?? "cb";
+const PG_DATABASE = "cl_test";
+const PG_USER = process.env.PGUSER ?? "cl";
 const PG_PASSWORD = process.env.PGPASSWORD ?? "test";
 const PG_HOST = process.env.PGHOST ?? "localhost";
 const PG_PORT = process.env.PGPORT ?? "5432";
@@ -99,7 +99,7 @@ async function checkPostgres(): Promise<boolean> {
 beforeAll(async () => {
   pgAvailable = await checkPostgres();
   if (!pgAvailable) {
-    console.warn("⚠️  Postgres not available — task tests will be skipped");
+    console.warn("\u26a0\ufe0f  Postgres not available \u2014 task tests will be skipped");
     return;
   }
 
@@ -138,9 +138,9 @@ afterAll(async () => {
   await rm(TEST_DATA_DIR, { recursive: true, force: true });
 });
 
-// ────────────────────────────────────────────────
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // Tests
-// ────────────────────────────────────────────────
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 describe("Task Tools", () => {
   it.skipIf(!pgAvailable)("task tools appear in tools/list", async () => {

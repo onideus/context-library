@@ -61,7 +61,7 @@ export function deduplicateResults(rows: any[]): { deduped: any[]; preDedupCount
   return { deduped, preDedupCount };
 }
 
-const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across CB's indexed content — handoff history, tasks, and documents. Returns results ranked by meaning similarity, not keyword match.
+const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across indexed content \u2014 handoff history, tasks, and documents. Returns results ranked by meaning similarity, not keyword match.
 
 Use this when the user asks about past decisions, previous conversations, historical context, or when full-text search (search_tasks) might miss results because exact words don't match.
 
@@ -74,7 +74,7 @@ Parameters:
 
 Returns: Array of {content_type, content_id, content_text (truncated), metadata, similarity}
 
-Retrieval guidance: If results appear to reference an event, decision, or incident indirectly (e.g., "the throwing star incident was validated" rather than describing what actually happened), the original source may exist deeper in the index. Reformulate your query with more specific contextual terms (names, locations, actions) and search again with a lower similarity_threshold (try 0.05) and higher limit (try 20). Prefer results from the oldest source_file — the filename timestamp indicates when the content was originally captured.`;
+Retrieval guidance: If results appear to reference an event, decision, or incident indirectly (e.g., \"the throwing star incident was validated\" rather than describing what actually happened), the original source may exist deeper in the index. Reformulate your query with more specific contextual terms (names, locations, actions) and search again with a lower similarity_threshold (try 0.05) and higher limit (try 20). Prefer results from the oldest source_file \u2014 the filename timestamp indicates when the content was originally captured.`;
 
 const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes or when search results seem stale.
 
@@ -86,7 +86,7 @@ Parameters:
 Returns: {handoffs: {indexed, skipped, errors}, tasks: {indexed}}`;
 
 export function registerSearchTools(mcpServer: McpServer): void {
-  // ── search_context ──────────────────────────────────────────
+  // \u2500\u2500 search_context \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   mcpServer.tool(
     "search_context",
     SEARCH_CONTEXT_DESCRIPTION,
@@ -178,7 +178,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
           if (args.content_types?.length) params.push(args.content_types);
           params.push(overFetchLimit);
         } else {
-          // Pure vector search — over-fetch for dedup headroom
+          // Pure vector search \u2014 over-fetch for dedup headroom
           sql = `
             SELECT content_type, content_id,
                    LEFT(content_text, 500) as content_text, metadata,
@@ -257,7 +257,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── reindex ─────────────────────────────────────────────────
+  // \u2500\u2500 reindex \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   mcpServer.tool(
     "reindex",
     REINDEX_DESCRIPTION,
