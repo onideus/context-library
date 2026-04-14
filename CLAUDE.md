@@ -10,9 +10,9 @@ The problem it solves: AI assistants lose all context between sessions. Context 
 
 **Stack:** Hono 4.x + `@hono/mcp` StreamableHTTP transport, Node.js 22, TypeScript, PostgreSQL 16 + pgvector, TEI embeddings.
 
-**Transport model:** Stateless JSON-RPC over HTTP POST to `/mcp`. Each request creates a fresh `McpServer` + `StreamableHTTPTransport` pair — there is no persistent session or SSE streaming. GET and DELETE on `/mcp` return 405.
+**Transport model:** Stateless JSON-RPC over HTTP POST to `/mcp`. Each request creates a fresh `McpServer` + `StreamableHTTPTransport` pair — there is no persistent session or SSE streaming. GET and DELETE on `/mcp` return 405. This is intentional: an earlier singleton approach caused McpServer leaks and was replaced with per-request instantiation during the v0.5.0 hardening pass.
 
-**Auth:** The server itself is unauthenticated. Auth is delegated externally to [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) which handles OAuth 2.1 (DCR, authorization, token exchange). The server trusts its network boundary. Never expose the MCP port directly to the internet.
+**Auth:** The server itself is unauthenticated. Auth is delegated externally to [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) which handles OAuth 2.1 with manual client registration (not DCR — Dynamic Client Registration was evaluated and rejected). The server trusts its network boundary. Never expose the MCP port directly to the internet — use a Cloudflare Tunnel or similar reverse proxy with mcp-auth-proxy in front.
 
 **Graceful degradation:** Each tier degrades independently. If Postgres is down, handoffs still work (file-based). If the embedding server is unreachable, task search falls back to FTS. Migrations are try/catch at startup — failure logs a warning and continues in Tier 1 mode.
 
@@ -36,9 +36,11 @@ There are four planned content layers. Two are built, two are not.
 
 `search_context` and `reindex` provide hybrid semantic search (pgvector cosine similarity + FTS with Reciprocal Rank Fusion) across all indexed content types. Results are deduplicated by content fingerprint, keeping the oldest source file.
 
-## Tool Description Style
+## Tool Design
 
 Every tool description is a **cold-start briefing**. The model reads it with zero prior context about Context Library. Descriptions must be self-contained: explain what the tool does, what each parameter means, what the return shape looks like, and any usage guidance (e.g., "call get_latest_handoff before patching"). This is critical because different MCP clients inject tool descriptions differently and the model may have no system prompt context about this server.
+
+Before adding or modifying MCP tools, read the `mcp-builder` skill reference for tool design patterns, naming conventions, and quality benchmarks.
 
 ## File Structure
 
@@ -159,7 +161,7 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 
 1. **No polymorphic tools.** Each tool does one thing. Don't combine create/update into a single tool or add mode switches.
 
-2. **Don't break the stateless request model.** Each POST to `/mcp` creates a fresh McpServer + transport. There are no persistent sessions, no SSE streaming, no session state between requests.
+2. **Don't break the stateless request model.** Each POST to `/mcp` creates a fresh McpServer + transport. There are no persistent sessions, no SSE streaming, no session state between requests. A previous singleton approach caused resource leaks — the per-request model is intentional.
 
 3. **Don't maintain task lists outside Postgres.** The tasks table is the single source of truth. Handoff `tasks` arrays are a legacy convenience for quick session state — they are not authoritative. Tool descriptions explicitly say this.
 
@@ -175,4 +177,4 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 
 9. **Don't modify the migration runner to skip or reorder migrations.** Migrations are sequential and tracked in `_migrations`. Add new migrations as the next numbered file.
 
-10. **Don't publish the MCP port to the internet without mcp-auth-proxy.** The server has no authentication. It trusts its network boundary.
+10. **Don't publish the MCP port to the internet without mcp-auth-proxy.** The server has no authentication. It trusts its network boundary. Use a Cloudflare Tunnel with mcp-auth-proxy as the exposure path.
