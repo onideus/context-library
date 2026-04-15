@@ -36,11 +36,19 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 
 ### Tier 3: + Embeddings (Semantic Search)
 
-Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server.
+Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Use the `--profile` flag to select GPU or CPU runtime.
 
+**GPU (desktop with NVIDIA GPU):**
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.embeddings.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.embeddings.yml --profile embeddings-gpu up -d
 ```
+
+**CPU (NAS or any machine without GPU):**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.embeddings.yml --profile embeddings-cpu up -d
+```
+
+With no `--profile` flag, neither TEI service starts — the application degrades gracefully (semantic search falls back to FTS).
 
 **Additional tools:** `search_context`, `reindex`
 
@@ -48,10 +56,10 @@ The TEI server can run on a separate machine — just point `EMBEDDING_URL` to i
 
 #### Embedding Server Platform Options
 
-| Platform | Method | GPU Acceleration |
+| Platform | Profile / Method | GPU Acceleration |
 |---|---|---|
-| **Linux/Windows (NVIDIA GPU)** | Docker: `ghcr.io/huggingface/text-embeddings-inference:cuda-1.9` | CUDA (compute capability 7.5+) |
-| **Linux/Windows (no GPU)** | Docker: `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9` | None (CPU only, slower) |
+| **Linux/Windows (NVIDIA GPU)** | `--profile embeddings-gpu` | CUDA (compute capability 7.5+) |
+| **Linux/Windows (no GPU)** | `--profile embeddings-cpu` | None (CPU only, slower) |
 | **macOS Apple Silicon** | Native: `brew install huggingface/tap/tei` | Metal (via native binary only) |
 
 > **Apple Silicon note:** macOS does not support GPU passthrough into Docker containers. Running TEI in Docker on M-series Macs will be CPU-bound and slow. For GPU acceleration, install TEI natively via Homebrew and run it outside of Docker:

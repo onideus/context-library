@@ -1,24 +1,47 @@
 # Embedding server for semantic search (Tier 3)
 #
+# Uses Docker Compose profiles to select GPU or CPU runtime.
+# Only one profile can be active at a time (both services share
+# the same container_name, so Compose will refuse to start both).
+#
+# Start with:
+#   GPU:  docker compose ... -f docker-compose.embeddings.yml --profile embeddings-gpu up -d
+#   CPU:  docker compose ... -f docker-compose.embeddings.yml --profile embeddings-cpu up -d
+#
+# With no --profile flag, neither TEI service starts — the application
+# degrades gracefully (semantic search falls back to FTS).
+#
 # Platform options:
-#   NVIDIA GPU:  image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9 (default below)
-#   CPU only:    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
-#                (remove the deploy.resources section if using CPU image)
+#   NVIDIA GPU:    Use --profile embeddings-gpu (default for desktop with CUDA GPU)
+#   CPU only:      Use --profile embeddings-cpu (for NAS or machines without GPU)
 #   Apple Silicon: Run TEI natively via Homebrew (brew install huggingface/tap/tei)
 #                  Start with: text-embeddings-router --model-id nomic-ai/nomic-embed-text-v2-moe --port 8090
 #                  Then set EMBEDDING_URL=http://host.docker.internal:8090 in .env
-#                  and remove/comment out the embeddings service below.
+#                  and omit this compose file entirely.
 #
 # The embedding server can also run on a separate machine. Set EMBEDDING_URL accordingly.
+#
+# Note: depends_on is not used here because Compose does not support
+# cross-profile depends_on (the inactive profile's service is treated
+# as undefined). The application handles this via graceful degradation —
+# isEmbeddingAvailable() checks TEI health before every operation.
+# The healthcheck + restart: always policy ensures TEI recovers without
+# Compose-level startup ordering.
 
 services:
-  embeddings:
+  # ── GPU profile (NVIDIA CUDA) ──────────────────────────
+  embeddings-gpu:
     image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9
     container_name: context-library-embeddings
-    restart: unless-stopped
+    profiles: [embeddings-gpu]
+    restart: always
     command: --model-id ${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v2-moe} --port 80
     volumes:
       - ./data/models:/data
+    networks:
+      default:
+        aliases:
+          - embeddings
     deploy:
       resources:
         reservations:
@@ -32,9 +55,28 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── CPU profile (no GPU required) ──────────────────────
+  embeddings-cpu:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: context-library-embeddings
+    profiles: [embeddings-cpu]
+    restart: always
+    command: --model-id ${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v2-moe} --port 80
+    volumes:
+      - ./data/models:/data
+    networks:
+      default:
+        aliases:
+          - embeddings
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Context Library overlay ────────────────────────────
+  # Both services use network alias "embeddings", so EMBEDDING_URL
+  # works identically regardless of which profile is active.
   context-library:
     environment:
       - EMBEDDING_URL=http://embeddings:80
-    depends_on:
-      embeddings:
-        condition: service_healthy
