@@ -9,31 +9,21 @@ permissions:
   packages: write
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci-checks.yml
+    secrets:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      # --- CI gates (same as ci.yml) ---
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - run: npm ci
-
-      - run: npm run build
-
-      - run: npm test
-
-      - name: Snyk dependency scan
-        uses: snyk/actions/node@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=high
-
-      # --- Docker build + container scan + publish ---
       - name: Extract version from tag
         id: version
         run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
@@ -41,6 +31,7 @@ jobs:
       - name: Build Docker image
         run: |
           docker build \
+            --build-arg APP_VERSION=${{ steps.version.outputs.tag }} \
             -t ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }} \
             -t ghcr.io/onideus/context-library:latest \
             .
@@ -60,3 +51,16 @@ jobs:
         run: |
           docker push ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
           docker push ghcr.io/onideus/context-library:latest
+
+      - name: Notify on release
+        if: always()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          curl -s -o /dev/null \
+            -H "Title: Release ${STATUS}: v${{ steps.version.outputs.tag }}" \
+            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
+            -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
+            -d "Context Library v${{ steps.version.outputs.tag }} — image $( [ "$STATUS" = "success" ] && echo 'published to GHCR' || echo 'FAILED to publish' )" \
+            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
