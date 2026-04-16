@@ -36,13 +36,16 @@ jobs:
             -t ghcr.io/onideus/context-library:latest \
             .
 
+      # --exclude-base-image-vulns: ignore CVEs inherited from node:22-slim
+      # (e.g. zlib) that we can't patch ourselves. Snyk will still flag any
+      # vulnerability introduced in our own layers.
       - name: Snyk container scan
         uses: snyk/actions/docker@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           image: ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
-          args: --severity-threshold=high
+          args: --severity-threshold=high --exclude-base-image-vulns
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
