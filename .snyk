@@ -1,0 +1,27 @@
+# Snyk (https://snyk.io) policy file
+# Suppresses findings that cannot be resolved by the application itself.
+# Each ignore entry must have a reason and an expiry — revisit on or before
+# the expires date and either renew with updated context or remove.
+
+version: v1.0.0
+ignore:
+  SNYK-DEBIAN12-ZLIB-6008963:
+    - '*':
+        reason: >-
+          zlib1g CVE in Debian 12 (bookworm). Debian security has not shipped
+          a patched package; the latest available version is still 1:1.2.13.dfsg-1
+          after `apt-get upgrade`. The base image is node:22-slim which we track
+          upstream. Re-evaluate monthly; remove once Debian publishes a fix or
+          once we move to a patched base image.
+        expires: 2026-05-16T00:00:00.000Z
+
+  SNYK-JS-PICOMATCH-15765511:
+    - '*':
+        reason: >-
+          picomatch@4.0.3 ReDoS, reachable only through npm > node-gyp > tinyglobby.
+          The fix is in picomatch@4.0.4; no npm release currently ships the patched
+          version (latest npm 11.12.1 still bundles 4.0.3). The application does
+          not invoke npm at runtime. Re-evaluate when npm updates tinyglobby.
+        expires: 2026-05-16T00:00:00.000Z
+
+patch: {}
