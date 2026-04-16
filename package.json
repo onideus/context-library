@@ -23,7 +23,7 @@
     "zod": "^3.25.0"
   },
   "overrides": {
-    "path-to-regexp": "8.4.0"
+    "path-to-regexp": "8.4.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",
