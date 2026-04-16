@@ -11,6 +11,26 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: cl_test
+          POSTGRES_USER: cl
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cl -d cl_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGDATABASE: cl_test
+      PGUSER: cl
+      PGPASSWORD: test
     steps:
       # --- CI gates (same as ci.yml) ---
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -41,6 +61,7 @@ jobs:
       - name: Build Docker image
         run: |
           docker build \
+            --build-arg APP_VERSION=${{ steps.version.outputs.tag }} \
             -t ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }} \
             -t ghcr.io/onideus/context-library:latest \
             .
