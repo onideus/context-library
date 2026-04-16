@@ -20,13 +20,23 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - Three-tier Docker Compose deployment (core → Postgres → embeddings)
 - Scope filtering (full/work/personal) on handoff retrieval
 - Open-source release preparation (v0.5.0)
+- CI/CD pipeline with Snyk gates and GHCR publishing (GitHub Actions)
+- TEI compose profiles for GPU and CPU deployment
+- Entity system with context envelopes for entity-aware search
 
-## Current: v0.5.0 Initial Release
+## Current: v0.5.1
 
-- Security audit (logging sanitization, secrets parameterization)
-- Test coverage (unit tests for merge logic, extraction, chunking)
-- Documentation (README, ROADMAP, CONTRIBUTING)
-- Tool description accuracy audit
+- Entity system: canonical names, aliases, scope, constraints, boundary notices
+- JIT context envelopes injected into search results when entities are referenced
+- Proactive tool descriptions updated to reflect entity awareness
+- Pipeline hardening: Dockerfile fix, Postgres CI, reusable workflows, notifications
+
+## Next: v0.5.2
+
+- Judgment-class request gating (`evidence_pulled` field)
+- Per-model response format tuning
+- CLI `extract-entities` bootstrap script
+- `last_referenced` timestamp population
 
 ## Future
 
@@ -57,5 +67,4 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - Calendar/scheduling data feeds
 
 ### Infrastructure
-- CI/CD pipeline (GitHub Actions)
 - Refactor dynamic SQL assembly in search tools to a query builder pattern for maintainability
