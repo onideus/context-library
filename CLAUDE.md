@@ -125,7 +125,7 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 **Compose stacking** (additive overlays):
 - `docker-compose.yml` — Base: context-library container, binds `127.0.0.1:3100`, mounts `./data`.
 - `docker-compose.postgres.yml` — Adds Postgres (pgvector/pgvector:pg16), healthcheck, PG* env vars injected into context-library. Data at `./data/postgres`.
-- `docker-compose.embeddings.yml` — Adds TEI container (CUDA by default), GPU reservation, healthcheck. Set `EMBEDDING_URL`.
+- `docker-compose.embeddings.yml` — Adds TEI container via `--profile` flag: `embeddings-gpu` (CUDA/NVIDIA) or `embeddings-cpu` (no GPU). Both profiles use network alias `embeddings` so `EMBEDDING_URL` stays the same. With no profile, neither TEI service starts.
 - `docker-compose.auth.yml` — Adds mcp-auth-proxy for OAuth 2.1. No ports published (needs tunnel). Mounts `./proxy-data` and `./proxy-certs`.
 
 **Postgres Dockerfile** (`postgres.Dockerfile`): Single line — `FROM pgvector/pgvector:pg16`. Referenced by `docker-compose.postgres.yml`.
