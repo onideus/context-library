@@ -15,21 +15,23 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# Apply Debian security patches to the base image (e.g. zlib1g)
-RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Upgrade the npm bundled with node:22-slim to pick up fixes in its own
-# transitive deps (brace-expansion, picomatch). The app does not run npm at
-# runtime, but Snyk scans /usr/local/lib/node_modules.
-RUN npm install -g --force npm@11.6.4
-
 RUN groupadd --system appgroup && useradd --system --gid appgroup appuser
 
 COPY --chown=appuser:appgroup package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+
+# Install production deps, then strip npm from the image. The runtime starts
+# `node dist/server.js` and never invokes npm, so shipping npm only adds
+# attack surface — every npm release bundles vulnerable transitive deps
+# (brace-expansion, minimatch, tar, picomatch…) that Snyk flags even though
+# nothing at runtime imports them.
+RUN npm ci --omit=dev && \
+    npm cache clean --force && \
+    rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm \
+           /usr/local/bin/npx \
+           /usr/local/bin/corepack \
+           /root/.npm
 
 COPY --chown=appuser:appgroup --from=builder /app/dist ./dist
 COPY --chown=appuser:appgroup src/db/migrations ./dist/db/migrations
