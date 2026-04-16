@@ -62,5 +62,5 @@ jobs:
             -H "Title: Release ${STATUS}: v${{ steps.version.outputs.tag }}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
-            -d "Context Library v${{ steps.version.outputs.tag }} — image $( [ '$STATUS' = 'success' ] && echo 'published to GHCR' || echo 'FAILED to publish' )" \
+            -d "Context Library v${{ steps.version.outputs.tag }} — image $( [ "$STATUS" = "success" ] && echo 'published to GHCR' || echo 'FAILED to publish' )" \
             "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
