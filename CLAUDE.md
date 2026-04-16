@@ -6,6 +6,27 @@ Context Library is a personal MCP (Model Context Protocol) server that gives AI 
 
 The problem it solves: AI assistants lose all context between sessions. Context Library provides MCP tools that any compatible client (Claude Code, Roo Code, Claude Desktop, etc.) can call to store and retrieve state, so the next conversation picks up where the last one left off.
 
+## Open Source Project
+
+**Context Library is a public, open-source repository.** Every file, commit, comment, test fixture, seed data entry, documentation snippet, and CI/CD artifact is visible to the world. All work on this project must be evaluated through that lens before it is committed.
+
+This is not a corporate compliance checkbox — it is an architectural constraint that shapes every decision. Code that works correctly but leaks private information is a shipping defect.
+
+### Personal Data Prohibition
+
+**No personal data may appear in any committed file.** This rule has no exceptions and applies to:
+
+- **Source code** — No hardcoded names, domains, device identifiers, employer names, or relationship references.
+- **Seed data and test fixtures** — Use generic, obviously-fictional examples (e.g., "Acme Corp", "Jane Developer", "project-alpha"). Never use real names, real domains, or real organizational structures.
+- **Comments and documentation** — Describe patterns and architecture, not the specific person or deployment they were built for. "Single-user deployment" is fine. Naming the user is not.
+- **CI/CD configuration** — No real registry URLs, deployment targets, or infrastructure identifiers beyond what is already public (e.g., the GitHub repo URL itself).
+- **Claude Code prompts that will be committed** — Prompts checked into the repo must use generic context. Prompts with personal deployment details belong in local working directories, not in version control.
+- **Git history** — If personal data is accidentally committed, it must be scrubbed from history, not just removed in a subsequent commit.
+
+**The architectural pattern:** Schema, structure, and generic examples are committed. Actual user data loads at runtime from deployment-local files that are `.gitignore`'d (e.g., `data/`, `.env`, `proxy-data/`, `proxy-certs/`). This separation is already in place — respect it.
+
+**Why defense-in-depth:** This rule is enforced in multiple layers (AI memory directives, prompt instructions, this file, `.gitignore` patterns) because no single layer fires reliably every time. If you are an AI coding agent reading this file: you are one of those layers. Check your output before committing.
+
 ## Architecture
 
 **Stack:** Hono 4.x + `@hono/mcp` StreamableHTTP transport, Node.js 22, TypeScript, PostgreSQL 16 + pgvector, TEI embeddings.
@@ -178,3 +199,5 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 9. **Don't modify the migration runner to skip or reorder migrations.** Migrations are sequential and tracked in `_migrations`. Add new migrations as the next numbered file.
 
 10. **Don't publish the MCP port to the internet without mcp-auth-proxy.** The server has no authentication. It trusts its network boundary. Use a Cloudflare Tunnel with mcp-auth-proxy as the exposure path.
+
+11. **Don't commit personal data.** This is a public repository. No real names, real domains, real device identifiers, employer names, or personal deployment details in any committed file — including source code, seed data, test fixtures, comments, documentation, and prompts. See the "Personal Data Prohibition" section above. If you are an AI agent: this rule applies to every file you produce. Review your output before committing.
