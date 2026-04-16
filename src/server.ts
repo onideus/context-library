@@ -143,6 +143,14 @@ async function main() {
     );
   }
 
+  // Seed entities from deployment-local file (graceful — skips if file or DB missing)
+  try {
+    const { seedEntities } = await import("./db/seed-entities.js");
+    await seedEntities();
+  } catch (err) {
+    console.warn("[startup] Entity seeding skipped:", (err as Error).message);
+  }
+
   httpServer = serve(
     {
       fetch: app.fetch,

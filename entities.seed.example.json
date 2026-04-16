@@ -1,0 +1,26 @@
+[
+  {
+    "canonical_name": "Work Laptop",
+    "scope": "work",
+    "aliases": ["company laptop", "dev machine", "office laptop"],
+    "constraints": ["Company-owned device", "No unapproved software installations"]
+  },
+  {
+    "canonical_name": "Home Server",
+    "scope": "personal",
+    "aliases": ["NAS", "home NAS", "media server"],
+    "constraints": []
+  },
+  {
+    "canonical_name": "Dev Desktop",
+    "scope": "shared",
+    "aliases": ["development workstation", "desktop"],
+    "constraints": ["Shared device — check scope before recommending changes"]
+  },
+  {
+    "canonical_name": "Project Alpha",
+    "scope": "work",
+    "aliases": ["alpha", "project-alpha"],
+    "constraints": ["Confidential — do not reference in personal contexts"]
+  }
+]

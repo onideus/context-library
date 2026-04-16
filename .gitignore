@@ -8,3 +8,4 @@ logs/
 proxy-certs/
 proxy-data/
 .claude/worktrees/
+entities.seed.json

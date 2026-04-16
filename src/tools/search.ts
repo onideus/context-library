@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
 import { generateEmbedding, isEmbeddingAvailable } from "../embeddings/client.js";
 import { indexAllHandoffs, indexAllTasks } from "../embeddings/indexer.js";
+import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 
 /**
  * Normalize text for fingerprinting: lowercase, collapse whitespace, take first 500 chars, then SHA-256.
@@ -70,24 +71,21 @@ export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchRe
   return { deduped, preDedupCount };
 }
 
-const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across indexed content — handoff history, tasks, and documents. Returns results ranked by meaning similarity, not keyword match.
+const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across indexed content — handoffs, tasks, documents. Results ranked by meaning similarity.
 
-Use this when the user asks about past decisions, previous conversations, historical context, or when full-text search (search_tasks) might miss results because exact words don't match.
+WHEN TO SEARCH: Proactively before responding about named people, hardware/devices, career/comp, network infra, medical, financial context, or continuity cues ("last time", "we discussed").
 
-Parameters:
-  - query (required): Natural language search query
-  - content_types (optional): Filter by type. Default: all. Options: 'handoff', 'task', 'document', 'transcript'
-  - limit (optional): Max results. Default: 5, max: 20
-  - similarity_threshold (optional): Minimum cosine similarity (0-1). Default: 0.15
-  - hybrid (optional): Enable hybrid search (vector + full-text with RRF fusion). Default: true
+QUERY TIPS: Natural language, include entity names. People: full name. Devices: user's name for it.
 
-Returns: Array of {content_type, content_id, content_text (truncated), metadata, similarity}
+READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-empty, address constraints before recommendations.
 
-Retrieval guidance: If results appear to reference an event, decision, or incident indirectly (e.g., "the deployment issue was resolved" rather than describing what actually happened), the original source may exist deeper in the index. Reformulate your query with more specific contextual terms (names, locations, actions) and search again with a lower similarity_threshold (try 0.05) and higher limit (try 20). Prefer results from the oldest source_file — the filename timestamp indicates when the content was originally captured.`;
+Returns: {results[], context_envelope, query, total, mode, deduplicated, pre_dedup_count}
 
-const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes or when search results seem stale.
+If results reference events indirectly, reformulate with specific terms, lower threshold (0.05), higher limit (20).`;
 
-WARNING: This operation can take several minutes for large datasets (1000+ handoffs). It re-embeds all content, not just changed items. Inform the user of expected duration before running.
+const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
+
+WARNING: Can take several minutes for large datasets (1000+ handoffs). Re-embeds all content, not just changed items. Inform the user of expected duration before running.
 
 Parameters:
   - content_types (optional): Which to reindex. Default: all. Options: 'handoff', 'task'
@@ -216,6 +214,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
                 mode: useHybrid ? "hybrid" : "vector",
                 deduplicated: true,
                 pre_dedup_count: 0,
+                context_envelope: emptyEnvelope(),
               }),
             }],
           };
@@ -233,28 +232,44 @@ export function registerSearchTools(mcpServer: McpServer): void {
         });
         const finalRows = deduped.slice(0, limit);
 
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({
-              results: finalRows.map((r: SearchResultRow) => ({
-                content_type: r.content_type,
-                content_id: r.content_id,
-                content_text: r.content_text,
-                metadata: r.metadata,
-                similarity: Math.round((r.similarity ?? 0) * 1000) / 1000,
-                ...(r.rrf_score ? { rrf_score: Math.round(r.rrf_score * 10000) / 10000 } : {}),
-                ...(r.metadata?.chunk_index != null ? { chunk_index: r.metadata.chunk_index } : {}),
-                ...(r.metadata?.source_file ? { source_file: r.metadata.source_file } : {}),
-              })),
-              query: args.query,
-              total: finalRows.length,
-              mode: useHybrid ? "hybrid" : "vector",
-              deduplicated: true,
-              pre_dedup_count: preDedupCount,
-            }),
-          }],
+        // Compute context envelope from entity matches (best-effort)
+        const resultTexts = finalRows.map((r) => r.content_text ?? "");
+        let envelope;
+        try {
+          const entities = await lookupEntities(resultTexts);
+          envelope = computeEnvelope(entities);
+        } catch {
+          envelope = emptyEnvelope();
+        }
+
+        const responseData = {
+          results: finalRows.map((r: SearchResultRow) => ({
+            content_type: r.content_type,
+            content_id: r.content_id,
+            content_text: r.content_text,
+            metadata: r.metadata,
+            similarity: Math.round((r.similarity ?? 0) * 1000) / 1000,
+            ...(r.rrf_score ? { rrf_score: Math.round(r.rrf_score * 10000) / 10000 } : {}),
+            ...(r.metadata?.chunk_index != null ? { chunk_index: r.metadata.chunk_index } : {}),
+            ...(r.metadata?.source_file ? { source_file: r.metadata.source_file } : {}),
+          })),
+          query: args.query,
+          total: finalRows.length,
+          mode: useHybrid ? "hybrid" : "vector",
+          deduplicated: true,
+          pre_dedup_count: preDedupCount,
+          context_envelope: envelope,
         };
+
+        // Build MCP content array — prepend boundary notice if detected
+        const contentItems: { type: "text"; text: string }[] = [];
+        const boundaryNotice = generateBoundaryNotice(envelope);
+        if (boundaryNotice) {
+          contentItems.push({ type: "text" as const, text: boundaryNotice });
+        }
+        contentItems.push({ type: "text" as const, text: JSON.stringify(responseData) });
+
+        return { content: contentItems };
       } catch (err) {
         return {
           content: [{

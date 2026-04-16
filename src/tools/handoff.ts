@@ -202,22 +202,11 @@ Returns: {success, stored_at, filename, task_summary, schema_version}`;
 
 const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. Returns operational context, active work, task lists, and tone notes from the last session.
 
-Response includes pre-computed fields to avoid inference overhead:
-- elapsed_seconds: Seconds since handoff was stored. Use this, not timestamp math.
-- same_calendar_day: Whether the handoff is from today (user's timezone). If false, operational_state (mood, energy, sleep) is stale and should be confirmed.
-- task_summary: {open_count, blocked_count, completed_count} — pre-computed.
-- applied_scope / filtered_fields: What was filtered (only when scope != "full").
-- schema_version: Response format version.
-- handoff_count: Total handoff files stored (indicates history depth).
-- stored_at_local: Human-readable local time rendering of stored_at.
+WHEN TO CALL: At session start (always), before any store_handoff or patch_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
 
-Full response shape:
-- operational_state: {sleep_hours, physical_state, energy_level, mood}
-- active_context: {session, surface, conversation_arc, key_decisions, prompts_generated, session_meta?}
-- tasks: {open: string[], blocked: string[], completed: string[]}
-- task_summary: {open_count, blocked_count, completed_count}
-- tone_notes: string — Read this before responding. Guidance for approaching the user.
-- timezone, stored_at (UTC), retrieved_at (local), stored_at_local, elapsed_seconds, same_calendar_day, applied_scope, filtered_fields?, schema_version, handoff_count
+Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local.
+
+Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count.
 
 Parameters:
 - scope (optional, default "full"): "full" | "work" | "personal"
