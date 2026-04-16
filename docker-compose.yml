@@ -1,6 +1,7 @@
 services:
   context-library:
-    build: .
+    # build: .  # Uncomment for local builds, comment out 'image:' below
+    image: ghcr.io/onideus/context-library:latest
     container_name: context-library
     restart: unless-stopped
     ports:
