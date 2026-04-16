@@ -5,6 +5,8 @@ on:
     secrets:
       SNYK_TOKEN:
         required: true
+      NTFY_URL:
+        required: false
 
 jobs:
   ci:
@@ -47,3 +49,21 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           args: --severity-threshold=high
+
+      - name: Notify on completion
+        if: always()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            TITLE="PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          else
+            TITLE="Push to ${{ github.ref_name }}"
+          fi
+          curl -s -o /dev/null \
+            -H "Title: CI ${STATUS}: ${TITLE}" \
+            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
+            -H "Tags: $( [ "$STATUS" = "success" ] && echo "white_check_mark" || echo "x" )" \
+            -d "Build ${STATUS} for context-library" \
+            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true

@@ -14,3 +14,4 @@ jobs:
     uses: ./.github/workflows/ci-checks.yml
     secrets:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}

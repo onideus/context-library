@@ -13,6 +13,7 @@ jobs:
     uses: ./.github/workflows/ci-checks.yml
     secrets:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}
 
   release:
     needs: ci
@@ -50,3 +51,16 @@ jobs:
         run: |
           docker push ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
           docker push ghcr.io/onideus/context-library:latest
+
+      - name: Notify on release
+        if: always()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          curl -s -o /dev/null \
+            -H "Title: Release ${STATUS}: v${{ steps.version.outputs.tag }}" \
+            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
+            -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
+            -d "Context Library v${{ steps.version.outputs.tag }} — image $( [ '$STATUS' = 'success' ] && echo 'published to GHCR' || echo 'FAILED to publish' )" \
+            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
