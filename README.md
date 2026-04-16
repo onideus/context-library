@@ -285,6 +285,89 @@ docker compose \
 
 > **Note:** When using `TUNNEL_TOKEN`, the tunnel configuration is managed in the Cloudflare dashboard, not in a local config file. The dashboard config takes precedence. Point the tunnel's public hostname to `https://mcp-auth-proxy:443`.
 
+## Release Workflow
+
+Every tagged release follows a gated pipeline: **Tag → CI → Snyk dep scan → Docker build → Snyk container scan → GHCR publish**. Images only reach the registry if all gates pass.
+
+**To cut a release:**
+
+```bash
+git tag v0.5.1
+git push origin v0.5.1
+```
+
+Tag format is `vX.Y.Z` (semver with `v` prefix). The release workflow:
+
+1. Runs the full CI suite (install, build, test)
+2. Scans dependencies with Snyk (hard gate — high/critical vulns block the release)
+3. Builds the Docker image from the multi-stage `Dockerfile`
+4. Scans the container image with Snyk (hard gate)
+5. Pushes to `ghcr.io/onideus/context-library:<version>` and `ghcr.io/onideus/context-library:latest`
+
+The version tag is stripped of the `v` prefix for the image tag (e.g., tag `v0.5.1` publishes image `0.5.1`).
+
+PRs and pushes to `main` run the CI workflow (steps 1-2 above) without building or publishing images.
+
+## Pulling Without Cloning
+
+You can run Context Library directly from the published GHCR image without cloning the repository:
+
+```bash
+# Create a minimal docker-compose.yml
+cat > docker-compose.yml << 'EOF'
+services:
+  context-library:
+    image: ghcr.io/onideus/context-library:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+EOF
+
+# Create a .env file (see .env.example in the repo for all options)
+echo "SERVER_NAME=context-library" > .env
+
+# Start
+docker compose up -d
+```
+
+For Tier 2 (Postgres) or Tier 3 (embeddings), download the additional compose files from the repo and stack them as described in [Deployment Tiers](#deployment-tiers).
+
+## Snyk Setup (Maintainer)
+
+The CI and release pipelines require a `SNYK_TOKEN` repository secret for dependency and container vulnerability scanning.
+
+**Setup:**
+
+1. Sign up for a free Snyk account at [snyk.io](https://snyk.io) (free tier covers open-source projects)
+2. Generate an API token from **Account Settings → API Token**
+3. Add it as a repository secret:
+   ```bash
+   gh secret set SNYK_TOKEN --repo onideus/context-library
+   ```
+
+The scan threshold is `high` — only high and critical severity vulnerabilities block the pipeline. Medium and low findings are reported but do not fail the build.
+
+## Maintainer Notes
+
+### Branch Protection
+
+After the CI workflow is live, enable branch protection for `main` to require the `ci` job to pass before merging:
+
+```bash
+gh api -X PUT /repos/onideus/context-library/branches/main/protection \
+  -f required_status_checks.strict=true \
+  -F required_status_checks.contexts[]='ci' \
+  -F enforce_admins=false \
+  -F required_pull_request_reviews.required_approving_review_count=0 \
+  -F restrictions=null
+```
+
+This requires the `ci` job (from `.github/workflows/ci.yml`) to pass on all PRs before they can be merged to `main`.
+
 ## Troubleshooting
 
 **`EACCES: permission denied` when writing handoffs**
