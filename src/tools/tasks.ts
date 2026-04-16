@@ -65,13 +65,17 @@ This is the authoritative task store — do not maintain parallel task lists in 
 
 const GET_TASK_DESC = `Retrieve a single task by its UUID. Returns all fields including timestamps and tags.`;
 
-const LIST_TASKS_DESC = `List tasks with optional filters. Defaults to showing open tasks sorted by creation date (newest first). Use status=null to query across all statuses. Tags filter uses ANY-match (task has at least one of the provided tags). Blocked filter isolates tasks with/without a blocked_reason.
+const LIST_TASKS_DESC = `List tasks with optional filters. Defaults to showing open tasks sorted by creation date (newest first). Use status=null to query across all statuses. Tags filter uses ANY-match. Blocked filter isolates tasks with/without a blocked_reason.
+
+WHEN TO PULL TASKS: Before any evaluative response (performance reviews, weekly check-ins, compensation assessments, progress reports), pull task data to ground your assessment in tracked work — not memory alone.
 
 This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems.`;
 
 const UPDATE_TASK_DESC = `Update a task's fields and/or apply a lifecycle action. Actions are convenience shortcuts: 'complete' marks done with timestamp, 'cancel' marks cancelled, 'defer' parks the task, 'reopen' returns to open. Field updates can accompany any action. Tags are full-replacement (provide complete array). Set blocked_reason to null to unblock.`;
 
-const SEARCH_TASKS_DESC = `Full-text search across task titles and context. Uses PostgreSQL FTS with English stemming. Optionally filter by status and scope. Results ranked by relevance. Useful for finding tasks by keyword when you don't know the exact title.`;
+const SEARCH_TASKS_DESC = `Full-text search across task titles and context. Uses PostgreSQL FTS with English stemming. Filter by status and scope. Results ranked by relevance.
+
+WHEN TO SEARCH TASKS: When a request mentions a task by keyword, when preparing evaluative responses (reviews, assessments), or when you need to verify task status before making recommendations. Use this when exact title is unknown — list_tasks is better when you want filtered browsing.`;
 
 // ── Tool Registration ────────────────────────────────────────────
 

@@ -13,4 +13,5 @@ export const config = {
   embeddingUrl: process.env.EMBEDDING_URL ?? "http://embeddings:80",
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-ai/nomic-embed-text-v2-moe",
   embeddingDimensions: parseInt(process.env.EMBEDDING_DIMENSIONS ?? "768", 10),
+  entitySeedPath: process.env.ENTITY_SEED_PATH ?? "./data/entities.seed.json",
 } as const;
