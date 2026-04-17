@@ -1,12 +1,17 @@
-# OAuth 2.1 authentication via mcp-auth-proxy
+# OAuth 2.1 authentication via mcp-auth-proxy + Cloudflare Tunnel ingress.
 # Required for exposing Context Library to the internet.
-# Requires an OIDC provider (Auth0, Google, etc.)
+# Requires an OIDC provider (Auth0, Google, etc.) and a named Cloudflare
+# Tunnel whose public hostname routes to https://mcp-auth-proxy:443.
 # See README.md for configuration details.
+#
+# Full ingress chain managed by this stack:
+#   Internet → cloudflared → mcp-auth-proxy:443 → context-library:3100
 
 services:
   mcp-auth-proxy:
-    # No ports published — requires a tunnel or reverse proxy for external access.
-    # See README for Cloudflare Tunnel example.
+    # No ports published — cloudflared (same compose network) routes
+    # traffic to this service via its public hostname configured in the
+    # Cloudflare dashboard.
     image: ghcr.io/sigbit/mcp-auth-proxy:latest
     container_name: mcp-auth-proxy
     restart: unless-stopped
@@ -31,6 +36,21 @@ services:
       - ./proxy-certs:/certs:ro
     expose:
       - "443"
+
+  # Cloudflare Tunnel connector. Uses named-tunnel (token) mode —
+  # hostname-to-service routing is configured in the Cloudflare dashboard,
+  # not in a local config file. This keeps domain names and tunnel IDs
+  # out of committed files. depends_on ensures the proxy is up before the
+  # tunnel starts routing traffic.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: context-library-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - mcp-auth-proxy
 
   context-library:
     expose:
