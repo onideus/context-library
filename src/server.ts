@@ -151,6 +151,22 @@ async function main() {
     console.warn("[startup] Entity seeding skipped:", (err as Error).message);
   }
 
+  // Drain any pending embeddings queued during a previous TEI outage (best-effort).
+  try {
+    const { isEmbeddingAvailable } = await import("./embeddings/client.js");
+    if (await isEmbeddingAvailable()) {
+      const { drainPendingEmbeddings } = await import("./embeddings/indexer.js");
+      const result = await drainPendingEmbeddings();
+      if (result.processed > 0 || result.errors > 0) {
+        console.log(
+          `[startup] Drained pending embeddings: processed=${result.processed}, remaining=${result.remaining}, errors=${result.errors}`
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("[startup] Pending embeddings drain skipped:", (err as Error).message);
+  }
+
   httpServer = serve(
     {
       fetch: app.fetch,

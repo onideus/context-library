@@ -5,9 +5,10 @@ import { config } from "../config.js";
 import { read, writeHandoff, getLatestHandoffFilename, getHandoffCount } from "../storage/json-store.js";
 import type { Handoff } from "../storage/schemas.js";
 import { mergeHandoff } from "./merge.js";
-import { indexHandoff } from "../embeddings/indexer.js";
+import { indexHandoff, getPendingEmbeddingsCount } from "../embeddings/indexer.js";
+import { isEmbeddingAvailable, getLastEmbeddingSuccess } from "../embeddings/client.js";
 
-const SCHEMA_VERSION = "1.1";
+const SCHEMA_VERSION = "1.2";
 
 const HANDOFFS_DIR = () => join(config.dataDir, "handoffs");
 
@@ -208,9 +209,11 @@ const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. 
 
 WHEN TO CALL: At session start (always), before any store_handoff or patch_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
 
-Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, evidence_pulled.
+Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled.
 
-Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, evidence_pulled.
+embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
+
+Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled.
 
 SessionEvidence:
 evidence_pulled indicates whether operational context was successfully loaded.
@@ -307,7 +310,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
     },
     async (args) => {
       const storedAt = new Date().toISOString();
-      const handoff: Handoff = { ...args, stored_at: storedAt };
+      const handoff: Handoff = { ...args, stored_at: storedAt, schema_version: SCHEMA_VERSION };
       const filename = await writeHandoff(handoff);
 
       // Fire-and-forget background indexing — MUST NOT block or fail the handoff
@@ -382,6 +385,11 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       const scope = args.scope ?? "full";
       const { result: filtered, filteredFields } = filterByScope(handoff, scope);
       const handoffCount = await getHandoffCount();
+      const embeddingStatus = {
+        available: await isEmbeddingAvailable(),
+        last_success: getLastEmbeddingSuccess(),
+        pending_count: await getPendingEmbeddingsCount(),
+      };
 
       return {
         content: [
@@ -398,6 +406,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               stored_at_local: formatStoredAtLocal(handoff.stored_at ?? "", handoff.timezone),
               schema_version: SCHEMA_VERSION,
               handoff_count: handoffCount,
+              embedding_status: embeddingStatus,
               evidence_pulled: true,
             }),
           },
@@ -476,8 +485,9 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       // Merge
       const { merged, patchedFields } = mergeHandoff(handoff, args);
 
-      // Set new stored_at and patched_from reference
+      // Set new stored_at, schema_version, and patched_from reference
       merged.stored_at = new Date().toISOString();
+      (merged as Record<string, unknown>).schema_version = SCHEMA_VERSION;
       (merged as Record<string, unknown>).patched_from = sourceFilename;
 
       // Write as new handoff file (append-only)

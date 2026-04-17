@@ -10,6 +10,38 @@ function toPgVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
+/**
+ * Classify an embedding failure as TEI connectivity (transient) vs malformed-content (permanent).
+ * Connectivity failures are worth queueing for later retry; malformed-content failures aren't.
+ * Heuristic: TEI 4xx responses indicate bad request content; everything else (5xx, network error,
+ * timeout, missing config) is treated as connectivity.
+ */
+function isTeiConnectivityError(err: unknown): boolean {
+  const msg = (err as Error | undefined)?.message ?? "";
+  if (/Embedding server error \(4\d\d\)/.test(msg)) return false;
+  return true;
+}
+
+/** Insert a pending embedding entry for later drain. Best-effort — tolerates missing table/DB. */
+async function enqueuePending(
+  contentType: "handoff" | "task",
+  contentId: string
+): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO pending_embeddings (content_type, content_id)
+       VALUES ($1, $2)
+       ON CONFLICT (content_type, content_id) DO NOTHING`,
+      [contentType, contentId]
+    );
+    console.log(`[indexer] Queued pending embedding: ${contentType} ${contentId}`);
+  } catch (err) {
+    console.warn(
+      `[indexer] Failed to enqueue pending embedding for ${contentType} ${contentId}: ${(err as Error).message}`
+    );
+  }
+}
+
 /** Index a single piece of content. Upserts by content_type + content_id. */
 export async function indexContent(
   contentType: string,
@@ -35,8 +67,8 @@ export async function indexContent(
 
 // ── Handoff indexing ──────────────────────────────────────────
 
-/** Index a handoff file with chunking. */
-export async function indexHandoff(
+/** Raw handoff indexing — throws on failure. Used by drain path to avoid re-enqueueing. */
+async function indexHandoffRaw(
   filename: string,
   handoff: Record<string, unknown>
 ): Promise<void> {
@@ -65,8 +97,24 @@ export async function indexHandoff(
   }
 }
 
-/** Index a single task. */
-export async function indexTask(
+/** Index a handoff file with chunking. On TEI connectivity failure, queues for later drain. */
+export async function indexHandoff(
+  filename: string,
+  handoff: Record<string, unknown>
+): Promise<void> {
+  try {
+    await indexHandoffRaw(filename, handoff);
+  } catch (err) {
+    if (isTeiConnectivityError(err)) {
+      await enqueuePending("handoff", filename);
+      return;
+    }
+    throw err;
+  }
+}
+
+/** Raw task indexing — throws on failure. Used by drain path to avoid re-enqueueing. */
+async function indexTaskRaw(
   id: string,
   title: string,
   context: string | null,
@@ -76,6 +124,26 @@ export async function indexTask(
 ): Promise<void> {
   const text = [title, context].filter(Boolean).join("\n");
   await indexContent("task", id, text, { scope, tags, status });
+}
+
+/** Index a single task. On TEI connectivity failure, queues for later drain. */
+export async function indexTask(
+  id: string,
+  title: string,
+  context: string | null,
+  scope: string,
+  tags: string[],
+  status: string
+): Promise<void> {
+  try {
+    await indexTaskRaw(id, title, context, scope, tags, status);
+  } catch (err) {
+    if (isTeiConnectivityError(err)) {
+      await enqueuePending("task", id);
+      return;
+    }
+    throw err;
+  }
 }
 
 /** Bulk index all existing handoff files. For initial backfill. */
@@ -154,4 +222,138 @@ export async function indexAllTasks(): Promise<number> {
   }
 
   return indexed;
+}
+
+// ── Pending queue drain ───────────────────────────────────────
+
+interface PendingRow {
+  id: number;
+  content_type: "handoff" | "task";
+  content_id: string;
+}
+
+/**
+ * Count rows currently in the pending_embeddings queue.
+ * Returns 0 if the table doesn't exist yet or Postgres is unavailable.
+ */
+export async function getPendingEmbeddingsCount(): Promise<number> {
+  try {
+    const result = await query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM pending_embeddings`
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Process queued pending embeddings in FIFO order, re-embedding and removing each on success.
+ * On a single failure, stops draining (TEI likely went back down) and bumps retry_count / last_error.
+ * Returns counts of processed, remaining, and errors observed this pass.
+ */
+export async function drainPendingEmbeddings(
+  batchSize = 20
+): Promise<{ processed: number; remaining: number; errors: number }> {
+  let pendingRows: PendingRow[];
+  try {
+    const result = await query<PendingRow>(
+      `SELECT id, content_type, content_id
+       FROM pending_embeddings
+       ORDER BY created_at ASC
+       LIMIT $1`,
+      [batchSize]
+    );
+    pendingRows = result.rows;
+  } catch {
+    // Table doesn't exist yet or DB unavailable — nothing to drain.
+    return { processed: 0, remaining: 0, errors: 0 };
+  }
+
+  if (pendingRows.length === 0) {
+    return { processed: 0, remaining: 0, errors: 0 };
+  }
+
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+
+  let processed = 0;
+  let errors = 0;
+  let stop = false;
+
+  for (const row of pendingRows) {
+    if (stop) break;
+    try {
+      if (row.content_type === "handoff") {
+        const path = join(config.dataDir, "handoffs", row.content_id);
+        let handoff: Record<string, unknown>;
+        try {
+          const raw = await readFile(path, "utf-8");
+          handoff = JSON.parse(raw);
+        } catch (fsErr) {
+          // Source file is gone — drop from queue, count as error, keep draining.
+          await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);
+          errors++;
+          console.warn(
+            `[indexer] Dropped pending handoff ${row.content_id} — source missing: ${(fsErr as Error).message}`
+          );
+          continue;
+        }
+        await indexHandoffRaw(row.content_id, handoff);
+      } else {
+        const taskResult = await query<{
+          id: string;
+          title: string;
+          context: string | null;
+          scope: string;
+          tags: string[];
+          status: string;
+        }>(
+          `SELECT id, title, context, scope, tags, status
+           FROM tasks WHERE id = $1`,
+          [row.content_id]
+        );
+        const task = taskResult.rows[0];
+        if (!task) {
+          await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);
+          errors++;
+          console.warn(
+            `[indexer] Dropped pending task ${row.content_id} — source missing`
+          );
+          continue;
+        }
+        await indexTaskRaw(
+          task.id,
+          task.title,
+          task.context,
+          task.scope,
+          task.tags,
+          task.status
+        );
+      }
+
+      await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);
+      processed++;
+    } catch (err) {
+      errors++;
+      const message = (err as Error).message ?? "unknown error";
+      try {
+        await query(
+          `UPDATE pending_embeddings
+           SET retry_count = retry_count + 1, last_error = $1
+           WHERE id = $2`,
+          [message.slice(0, 1000), row.id]
+        );
+      } catch {
+        // best-effort
+      }
+      // If TEI connectivity failed, stop — no point hammering it this cycle.
+      if (isTeiConnectivityError(err)) {
+        stop = true;
+      }
+    }
+  }
+
+  const remaining = await getPendingEmbeddingsCount();
+  return { processed, remaining, errors };
 }

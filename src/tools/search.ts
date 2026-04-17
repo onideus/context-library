@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
 import { generateEmbedding, isEmbeddingAvailable } from "../embeddings/client.js";
-import { indexAllHandoffs, indexAllTasks } from "../embeddings/indexer.js";
+import { indexAllHandoffs, indexAllTasks, drainPendingEmbeddings } from "../embeddings/indexer.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 
 /**
@@ -143,6 +143,11 @@ export function registerSearchTools(mcpServer: McpServer): void {
         // Prepend nomic search_query prefix
         const queryText = `search_query: ${args.query}`;
         const embedding = await generateEmbedding(queryText);
+
+        // Opportunistic drain — TEI just confirmed working. Fire-and-forget.
+        drainPendingEmbeddings().catch((err) =>
+          console.warn("[search_context] Pending drain failed:", (err as Error).message)
+        );
         const limit = args.limit ?? 5;
         const overFetchLimit = Math.min(limit * 4, 80);
         const threshold = args.similarity_threshold ?? 0.15;
@@ -316,6 +321,10 @@ export function registerSearchTools(mcpServer: McpServer): void {
 
       const types = args.content_types ?? ["handoff", "task"];
       const results: Record<string, unknown> = {};
+
+      // Drain pending queue first so recovered items aren't re-processed by the full reindex below.
+      const drained = await drainPendingEmbeddings();
+      results.pending_drain = drained;
 
       if (types.includes("handoff")) {
         results.handoffs = await indexAllHandoffs();

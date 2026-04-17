@@ -11,6 +11,18 @@ interface EmbeddingResponseItem {
  * Falls back gracefully if embedding server is unavailable.
  */
 
+let lastEmbeddingSuccess: string | null = null;
+
+/** Record that an embedding operation just succeeded. Called from generate* on success. */
+export function recordEmbeddingSuccess(): void {
+  lastEmbeddingSuccess = new Date().toISOString();
+}
+
+/** Returns the ISO timestamp of the most recent successful embedding operation, or null. */
+export function getLastEmbeddingSuccess(): string | null {
+  return lastEmbeddingSuccess;
+}
+
 export async function generateEmbedding(text: string): Promise<number[]> {
   if (!config.embeddingUrl) {
     throw new Error("EMBEDDING_URL not configured — semantic search unavailable");
@@ -34,6 +46,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   if (!data?.data?.[0]?.embedding) {
     throw new Error(`Unexpected embedding response: missing data.data[0].embedding`);
   }
+  recordEmbeddingSuccess();
   return data.data[0].embedding;
 }
 
@@ -62,6 +75,7 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   if (!Array.isArray(data?.data) || data.data.length === 0) {
     throw new Error(`Unexpected embedding response: missing or empty data.data array`);
   }
+  recordEmbeddingSuccess();
   return data.data
     .sort((a: EmbeddingResponseItem, b: EmbeddingResponseItem) => a.index - b.index)
     .map((d: EmbeddingResponseItem) => d.embedding);

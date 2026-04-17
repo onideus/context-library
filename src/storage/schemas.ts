@@ -30,6 +30,7 @@ export const HandoffSchema = z
     tone_notes: z.string().optional(),
     timezone: z.string().optional(),
     stored_at: z.string().optional(),
+    schema_version: z.string().optional(),
   })
   .passthrough();
 
