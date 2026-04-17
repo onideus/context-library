@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -9,7 +9,12 @@ import { join } from "node:path";
  * These tests require a running PostgreSQL instance. Set PG* env vars
  * or run: docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16
  *
- * If Postgres is not available, tests are skipped gracefully.
+ * If Postgres is not available, the entire suite is skipped gracefully
+ * via describe.skipIf at module load (top-level await). Do NOT use
+ * it.skipIf with a flag assigned in beforeAll — Vitest resolves skipIf
+ * predicates during test collection, which runs before beforeAll, so
+ * the flag's initial value is captured and every test gets marked as
+ * skipped unconditionally.
  */
 
 const TEST_PORT = 3197;
@@ -24,7 +29,6 @@ const PG_HOST = process.env.PGHOST ?? "localhost";
 const PG_PORT = process.env.PGPORT ?? "5432";
 
 let serverProcess: ChildProcess;
-let pgAvailable = false;
 
 async function waitForServer(url: string, timeoutMs = 15_000): Promise<void> {
   const start = Date.now();
@@ -96,58 +100,61 @@ async function checkPostgres(): Promise<boolean> {
   }
 }
 
-beforeAll(async () => {
-  pgAvailable = await checkPostgres();
-  if (!pgAvailable) {
-    console.log("\n" + "=".repeat(60));
-    console.log("  NOTICE: PostgreSQL not available");
-    console.log("  ~29 task tests will be SKIPPED");
-    console.log("  See CONTRIBUTING.md for setup instructions");
-    console.log("=".repeat(60) + "\n");
-    return;
-  }
+// Module-level probe — runs once during test collection, BEFORE describe/it
+// predicates are evaluated. Top-level await is required so the probe
+// completes before Vitest resolves skipIf.
+const pgAvailable = await checkPostgres();
 
-  await rm(TEST_DATA_DIR, { recursive: true, force: true });
-  await mkdir(TEST_DATA_DIR, { recursive: true });
+if (!pgAvailable) {
+  console.log("\n" + "=".repeat(60));
+  console.log("  NOTICE: PostgreSQL not available");
+  console.log("  Task Tools suite will be SKIPPED");
+  console.log("  See CONTRIBUTING.md for setup instructions");
+  console.log("=".repeat(60) + "\n");
+}
 
-  serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      MCP_PORT: String(TEST_PORT),
-      DATA_DIR: TEST_DATA_DIR,
-      PGHOST: PG_HOST,
-      PGPORT: PG_PORT,
-      PGUSER: PG_USER,
-      PGPASSWORD: PG_PASSWORD,
-      PGDATABASE: PG_DATABASE,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: true,
+// ─────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────
+
+describe.skipIf(!pgAvailable)("Task Tools", () => {
+  beforeAll(async () => {
+    await rm(TEST_DATA_DIR, { recursive: true, force: true });
+    await mkdir(TEST_DATA_DIR, { recursive: true });
+
+    serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        MCP_PORT: String(TEST_PORT),
+        DATA_DIR: TEST_DATA_DIR,
+        PGHOST: PG_HOST,
+        PGPORT: PG_PORT,
+        PGUSER: PG_USER,
+        PGPASSWORD: PG_PASSWORD,
+        PGDATABASE: PG_DATABASE,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: true,
+    });
+
+    // Uncomment for debugging:
+    // serverProcess.stderr?.on("data", (d) => process.stderr.write(d));
+    // serverProcess.stdout?.on("data", (d) => process.stdout.write(d));
+
+    await waitForServer(BASE_URL);
+  }, 20_000);
+
+  afterAll(async () => {
+    if (serverProcess) {
+      serverProcess.kill("SIGTERM");
+      await new Promise((r) => setTimeout(r, 500));
+      if (!serverProcess.killed) serverProcess.kill("SIGKILL");
+    }
+    await rm(TEST_DATA_DIR, { recursive: true, force: true });
   });
 
-  // Uncomment for debugging:
-  // serverProcess.stderr?.on("data", (d) => process.stderr.write(d));
-  // serverProcess.stdout?.on("data", (d) => process.stdout.write(d));
-
-  await waitForServer(BASE_URL);
-}, 20_000);
-
-afterAll(async () => {
-  if (serverProcess) {
-    serverProcess.kill("SIGTERM");
-    await new Promise((r) => setTimeout(r, 500));
-    if (!serverProcess.killed) serverProcess.kill("SIGKILL");
-  }
-  await rm(TEST_DATA_DIR, { recursive: true, force: true });
-});
-
-// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Tests
-// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-describe("Task Tools", () => {
-  it.skipIf(!pgAvailable)("task tools appear in tools/list", async () => {
+  it("task tools appear in tools/list", async () => {
     const res = await mcpPost(jsonrpc("tools/list"));
     const data = (await parseSseResponse(res)) as any;
     const toolNames: string[] = data.result.tools.map((t: any) => t.name);
@@ -159,7 +166,7 @@ describe("Task Tools", () => {
   });
 
   describe("create_task", () => {
-    it.skipIf(!pgAvailable)("creates a task with all fields and returns it with UUID", async () => {
+    it("creates a task with all fields and returns it with UUID", async () => {
       const result = await callTool("create_task", {
         title: "Test task creation",
         context: "Integration test",
@@ -186,7 +193,7 @@ describe("Task Tools", () => {
       expect(result.updated_at).toBeDefined();
     });
 
-    it.skipIf(!pgAvailable)("creates a minimal task with just title and scope", async () => {
+    it("creates a minimal task with just title and scope", async () => {
       const result = await callTool("create_task", {
         title: "Minimal task",
         scope: "work",
@@ -202,7 +209,7 @@ describe("Task Tools", () => {
       expect(result.blocked_reason).toBeNull();
     });
 
-    it.skipIf(!pgAvailable)("returns validation error for empty title", async () => {
+    it("returns validation error for empty title", async () => {
       const result = await callTool("create_task", {
         title: "",
         scope: "personal",
@@ -213,7 +220,7 @@ describe("Task Tools", () => {
   });
 
   describe("get_task", () => {
-    it.skipIf(!pgAvailable)("retrieves a task by ID", async () => {
+    it("retrieves a task by ID", async () => {
       const created = await callTool("create_task", {
         title: "Task to retrieve",
         scope: "personal",
@@ -225,7 +232,7 @@ describe("Task Tools", () => {
       expect(result.title).toBe("Task to retrieve");
     });
 
-    it.skipIf(!pgAvailable)("returns NOT_FOUND for non-existent ID", async () => {
+    it("returns NOT_FOUND for non-existent ID", async () => {
       const result = await callTool("get_task", {
         id: "00000000-0000-0000-0000-000000000000",
       });
@@ -235,7 +242,7 @@ describe("Task Tools", () => {
   });
 
   describe("list_tasks", () => {
-    it.skipIf(!pgAvailable)("defaults to open tasks", async () => {
+    it("defaults to open tasks", async () => {
       const result = await callTool("list_tasks", {});
       expect(result.tasks).toBeDefined();
       expect(result.total_count).toBeGreaterThan(0);
@@ -247,7 +254,7 @@ describe("Task Tools", () => {
       }
     });
 
-    it.skipIf(!pgAvailable)("returns all statuses when status=null", async () => {
+    it("returns all statuses when status=null", async () => {
       // First create a completed task
       const created = await callTool("create_task", {
         title: "Will complete for list test",
@@ -262,28 +269,28 @@ describe("Task Tools", () => {
       expect(statuses.has("completed")).toBe(true);
     });
 
-    it.skipIf(!pgAvailable)("filters by scope", async () => {
+    it("filters by scope", async () => {
       const result = await callTool("list_tasks", { scope: "work" });
       for (const task of result.tasks) {
         expect(task.scope).toBe("work");
       }
     });
 
-    it.skipIf(!pgAvailable)("filters blocked tasks", async () => {
+    it("filters blocked tasks", async () => {
       const result = await callTool("list_tasks", { blocked: true });
       for (const task of result.tasks) {
         expect(task.blocked_reason).not.toBeNull();
       }
     });
 
-    it.skipIf(!pgAvailable)("filters unblocked tasks", async () => {
+    it("filters unblocked tasks", async () => {
       const result = await callTool("list_tasks", { blocked: false });
       for (const task of result.tasks) {
         expect(task.blocked_reason).toBeNull();
       }
     });
 
-    it.skipIf(!pgAvailable)("filters by tags with ANY-match", async () => {
+    it("filters by tags with ANY-match", async () => {
       await callTool("create_task", {
         title: "Tagged task for filter",
         scope: "personal",
@@ -299,7 +306,7 @@ describe("Task Tools", () => {
       }
     });
 
-    it.skipIf(!pgAvailable)("respects limit and offset", async () => {
+    it("respects limit and offset", async () => {
       const page1 = await callTool("list_tasks", { limit: 2, offset: 0 });
       const page2 = await callTool("list_tasks", { limit: 2, offset: 2 });
       expect(page1.tasks.length).toBeLessThanOrEqual(2);
@@ -310,7 +317,7 @@ describe("Task Tools", () => {
       }
     });
 
-    it.skipIf(!pgAvailable)("filters by due_before and due_after", async () => {
+    it("filters by due_before and due_after", async () => {
       await callTool("create_task", {
         title: "Due date filter test",
         scope: "personal",
@@ -326,7 +333,7 @@ describe("Task Tools", () => {
       expect(foundAfter).toBe(false);
     });
 
-    it.skipIf(!pgAvailable)("filters by scheduled_before and scheduled_after", async () => {
+    it("filters by scheduled_before and scheduled_after", async () => {
       await callTool("create_task", {
         title: "Scheduled date filter test",
         scope: "personal",
@@ -340,7 +347,7 @@ describe("Task Tools", () => {
   });
 
   describe("update_task", () => {
-    it.skipIf(!pgAvailable)("action=complete sets status, completed_at, clears blocked_reason", async () => {
+    it("action=complete sets status, completed_at, clears blocked_reason", async () => {
       const created = await callTool("create_task", {
         title: "Task to complete",
         scope: "personal",
@@ -356,7 +363,7 @@ describe("Task Tools", () => {
       expect(result.blocked_reason).toBeNull();
     });
 
-    it.skipIf(!pgAvailable)("action=cancel sets status, clears blocked_reason", async () => {
+    it("action=cancel sets status, clears blocked_reason", async () => {
       const created = await callTool("create_task", {
         title: "Task to cancel",
         scope: "work",
@@ -371,7 +378,7 @@ describe("Task Tools", () => {
       expect(result.blocked_reason).toBeNull();
     });
 
-    it.skipIf(!pgAvailable)("action=defer sets status to deferred", async () => {
+    it("action=defer sets status to deferred", async () => {
       const created = await callTool("create_task", {
         title: "Task to defer",
         scope: "personal",
@@ -384,7 +391,7 @@ describe("Task Tools", () => {
       expect(result.status).toBe("deferred");
     });
 
-    it.skipIf(!pgAvailable)("action=reopen sets status to open, clears completed_at", async () => {
+    it("action=reopen sets status to open, clears completed_at", async () => {
       const created = await callTool("create_task", {
         title: "Task to reopen",
         scope: "personal",
@@ -399,7 +406,7 @@ describe("Task Tools", () => {
       expect(result.completed_at).toBeNull();
     });
 
-    it.skipIf(!pgAvailable)("updates field-level properties", async () => {
+    it("updates field-level properties", async () => {
       const created = await callTool("create_task", {
         title: "Original title",
         scope: "personal",
@@ -421,7 +428,7 @@ describe("Task Tools", () => {
       expect(result.due_date).toContain("2026-05-01");
     });
 
-    it.skipIf(!pgAvailable)("combines action with field updates", async () => {
+    it("combines action with field updates", async () => {
       const created = await callTool("create_task", {
         title: "Complete with context",
         scope: "personal",
@@ -436,7 +443,7 @@ describe("Task Tools", () => {
       expect(result.context).toBe("Completed with notes");
     });
 
-    it.skipIf(!pgAvailable)("unblocks by setting blocked_reason to null", async () => {
+    it("unblocks by setting blocked_reason to null", async () => {
       const created = await callTool("create_task", {
         title: "Blocked task",
         scope: "personal",
@@ -450,7 +457,7 @@ describe("Task Tools", () => {
       expect(result.blocked_reason).toBeNull();
     });
 
-    it.skipIf(!pgAvailable)("returns NOT_FOUND for non-existent task", async () => {
+    it("returns NOT_FOUND for non-existent task", async () => {
       const result = await callTool("update_task", {
         id: "00000000-0000-0000-0000-000000000000",
         action: "complete",
@@ -461,7 +468,7 @@ describe("Task Tools", () => {
   });
 
   describe("search_tasks", () => {
-    it.skipIf(!pgAvailable)("finds tasks by keyword in title", async () => {
+    it("finds tasks by keyword in title", async () => {
       await callTool("create_task", {
         title: "Federal tax filing deadline",
         context: "Must complete before April",
@@ -476,7 +483,7 @@ describe("Task Tools", () => {
       expect(found).toBe(true);
     });
 
-    it.skipIf(!pgAvailable)("finds tasks by keyword in context", async () => {
+    it("finds tasks by keyword in context", async () => {
       await callTool("create_task", {
         title: "Generic task name",
         context: "This involves xylophone maintenance procedures",
@@ -487,7 +494,7 @@ describe("Task Tools", () => {
       expect(result.tasks.length).toBeGreaterThanOrEqual(1);
     });
 
-    it.skipIf(!pgAvailable)("supports stemming (e.g., 'filing' matches 'file')", async () => {
+    it("supports stemming (e.g., 'filing' matches 'file')", async () => {
       await callTool("create_task", {
         title: "File the quarterly report",
         scope: "work",
@@ -498,7 +505,7 @@ describe("Task Tools", () => {
       expect(found).toBe(true);
     });
 
-    it.skipIf(!pgAvailable)("filters by status", async () => {
+    it("filters by status", async () => {
       const created = await callTool("create_task", {
         title: "Searchable completed task zqwxyz",
         scope: "personal",
@@ -518,7 +525,7 @@ describe("Task Tools", () => {
       expect(completedResults.tasks.length).toBe(1);
     });
 
-    it.skipIf(!pgAvailable)("filters by scope", async () => {
+    it("filters by scope", async () => {
       await callTool("create_task", {
         title: "Work-scoped search target abcdef123",
         scope: "work",
@@ -537,7 +544,7 @@ describe("Task Tools", () => {
       expect(workResult.tasks.length).toBe(1);
     });
 
-    it.skipIf(!pgAvailable)("returns validation error for empty query", async () => {
+    it("returns validation error for empty query", async () => {
       const result = await callTool("search_tasks", { query: "" });
       expect(result.error).toBe(true);
       expect(result.code).toBe("VALIDATION_ERROR");
