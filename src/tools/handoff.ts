@@ -2,10 +2,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { join } from "node:path";
 import { config } from "../config.js";
-import { read, writeHandoff, getLatestHandoffFilename, getHandoffCount } from "../storage/json-store.js";
+import { read, writeHandoff, writeHandoffInPlace, getLatestHandoffFilename, getHandoffCount } from "../storage/json-store.js";
 import type { Handoff } from "../storage/schemas.js";
 import { mergeHandoff } from "./merge.js";
-import { indexHandoff, getPendingEmbeddingsCount } from "../embeddings/indexer.js";
+import { compactHandoff, COMPACTED_FLAG } from "./compaction.js";
+import { indexHandoff, getPendingEmbeddingsCount, hasPendingEmbedding } from "../embeddings/indexer.js";
 import { isEmbeddingAvailable, getLastEmbeddingSuccess } from "../embeddings/client.js";
 import { computeDynamicTaskSummary } from "./task-summary.js";
 import { validatePayloadSize, PayloadTooLargeError, LIMITS } from "./validation.js";
@@ -179,6 +180,45 @@ export function filterByScope(
   };
 }
 
+/**
+ * Compact a previously-stored handoff in place so token cost on the latest
+ * handoff stays bounded as history grows. Non-fatal — never blocks the caller.
+ * Skips handoffs that are already compacted or still have pending embeddings
+ * (content hasn't been indexed yet; archiving would lose it).
+ */
+async function compactPreviousHandoff(previousFilename: string | null): Promise<void> {
+  if (!previousFilename) return;
+  try {
+    const previous = await read<Handoff>(join(HANDOFFS_DIR(), previousFilename));
+    if (!previous) return;
+
+    if ((previous as Record<string, unknown>)[COMPACTED_FLAG] === true) return;
+
+    const pending = await hasPendingEmbedding("handoff", previousFilename);
+    if (pending) {
+      console.log(
+        `[compaction] Skipped ${previousFilename}: embedding still pending`
+      );
+      return;
+    }
+
+    const { compacted, original_size, compacted_size, archived_keys } = compactHandoff(previous);
+    if (original_size === compacted_size) return;
+
+    await writeHandoffInPlace(previousFilename, compacted);
+    const reduction = Math.round((1 - compacted_size / original_size) * 100);
+    console.log(
+      `[compaction] ${previousFilename}: ${original_size} → ${compacted_size} bytes ` +
+        `(${reduction}% reduction, archived: ${archived_keys.join(", ") || "none"})`
+    );
+  } catch (err) {
+    console.warn(
+      "[compaction] Failed to compact previous handoff:",
+      (err as Error).message
+    );
+  }
+}
+
 // ── Tool Descriptions ──────────────────────────────────────────────
 
 const STORE_HANDOFF_DESCRIPTION = `Store the current operational handoff state as a new timestamped file (append-only — previous handoffs are preserved, not overwritten). Use this for full-state captures at session boundaries. For partial updates mid-session, use patch_handoff instead.
@@ -341,12 +381,23 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       const storedAt = new Date().toISOString();
       const handoff: Handoff = { ...args, stored_at: storedAt, schema_version: SCHEMA_VERSION };
+
+      // Capture previous latest BEFORE writing so we know what to compact.
+      const previousFilename = await getLatestHandoffFilename();
+
       const filename = await writeHandoff(handoff);
 
       // Fire-and-forget background indexing — MUST NOT block or fail the handoff
       indexHandoff(filename, handoff).catch(err =>
         console.warn("[store_handoff] Background indexing failed:", err.message)
       );
+
+      // Fire-and-forget compaction of the prior handoff. Non-fatal.
+      if (previousFilename && previousFilename !== filename) {
+        compactPreviousHandoff(previousFilename).catch(err =>
+          console.warn("[store_handoff] Compaction failed:", (err as Error).message)
+        );
+      }
 
       return {
         content: [

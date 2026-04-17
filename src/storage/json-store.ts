@@ -74,6 +74,29 @@ export async function writeHandoff<T>(data: T): Promise<string> {
 }
 
 /**
+ * Overwrite an existing handoff file in place (atomic via temp file + rename).
+ * Unlike writeHandoff, this does NOT create a new timestamped file, does NOT
+ * update the pointer file, and does NOT prune. It is used only by compaction
+ * to rewrite a previously-stored handoff with archived content removed.
+ * Throws ENOENT if the file doesn't exist.
+ */
+export async function writeHandoffInPlace<T>(filename: string, data: T): Promise<void> {
+  const handoffsDir = join(config.dataDir, "handoffs");
+  const filepath = join(handoffsDir, filename);
+
+  const existing = await read<unknown>(filepath);
+  if (existing === null) {
+    const err = new Error(`Handoff file not found: ${filename}`) as Error & { code?: string };
+    err.code = "ENOENT";
+    throw err;
+  }
+
+  const tmpPath = join(handoffsDir, `.tmp-${randomUUID()}.json`);
+  await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
+  await safeRename(tmpPath, filepath);
+}
+
+/**
  * Get the filename of the most recent handoff in the handoffs directory.
  * Returns null if no handoffs exist.
  */

@@ -301,6 +301,29 @@ interface PendingRow {
 }
 
 /**
+ * Check whether a specific (content_type, content_id) pair is queued for
+ * pending embedding. Returns false if the table is missing or Postgres is
+ * unavailable — callers should treat that as "no pending work recorded".
+ */
+export async function hasPendingEmbedding(
+  contentType: "handoff" | "task",
+  contentId: string
+): Promise<boolean> {
+  try {
+    const result = await query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pending_embeddings
+         WHERE content_type = $1 AND content_id = $2
+       ) AS exists`,
+      [contentType, contentId]
+    );
+    return Boolean(result.rows[0]?.exists);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Count rows currently in the pending_embeddings queue.
  * Returns 0 if the table doesn't exist yet or Postgres is unavailable.
  */
