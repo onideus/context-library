@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { config } from "../config.js";
 import { query } from "../db/client.js";
-import { generateEmbedding, isEmbeddingAvailable } from "../embeddings/client.js";
-import { indexAllHandoffs, indexAllTasks } from "../embeddings/indexer.js";
+import { indexAllHandoffs, indexAllTasks, indexAllNotes } from "../embeddings/indexer.js";
+import { generateEmbedding, isEmbeddingAvailable, rerankResults } from "../embeddings/client.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
+import { expandQuery } from "./search-aliases.js";
 
 /**
  * Normalize text for fingerprinting: lowercase, collapse whitespace, take first 500 chars, then SHA-256.
@@ -77,6 +79,10 @@ WHEN TO SEARCH: Proactively before responding about named people, hardware/devic
 
 QUERY TIPS: Natural language, include entity names. People: full name. Devices: user's name for it.
 
+- after (optional): ISO date — only return results stored after this date
+- before (optional): ISO date — only return results stored before this date
+Use these to narrow searches to specific time windows (e.g., "what did I decide about X last week").
+
 READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-empty, address constraints before recommendations.
 
 Returns: {results[], context_envelope, query, total, mode, deduplicated, pre_dedup_count}
@@ -87,14 +93,14 @@ Response Format:
 - Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
 - Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
 
-const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
+const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs, tasks, and notes. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
 
 WARNING: Can take several minutes for large datasets (1000+ handoffs). Re-embeds all content, not just changed items. Inform the user of expected duration before running.
 
 Parameters:
-  - content_types (optional): Which to reindex. Default: all. Options: 'handoff', 'task'
+  - content_types (optional): Which to reindex. Default: all. Options: 'handoff', 'task', 'note'
 
-Returns: {handoffs: {indexed, skipped, errors}, tasks: {indexed}}`;
+Returns: {handoffs: {indexed, skipped, errors}, tasks: {indexed}, notes: {indexed}}`;
 
 export function registerSearchTools(mcpServer: McpServer): void {
   // \u2500\u2500 search_context \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -104,7 +110,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
     {
       query: z.string().describe("Natural language search query"),
       content_types: z
-        .array(z.enum(["handoff", "task", "document", "transcript"]))
+        .array(z.enum(["handoff", "task", "note", "document", "transcript"]))
         .optional()
         .describe("Filter by content type. Default: search all."),
       limit: z
@@ -123,6 +129,14 @@ export function registerSearchTools(mcpServer: McpServer): void {
         .boolean()
         .optional()
         .describe("Enable hybrid search (vector + full-text RRF fusion). Default: true"),
+      after: z
+        .string()
+        .optional()
+        .describe("ISO date — only return results from content stored after this date"),
+      before: z
+        .string()
+        .optional()
+        .describe("ISO date — only return results from content stored before this date"),
     },
     async (args) => {
       const available = await isEmbeddingAvailable();
@@ -140,21 +154,64 @@ export function registerSearchTools(mcpServer: McpServer): void {
       }
 
       try {
+        // Expand known aliases before embedding so abbreviations match corpus text.
+        const expandedQuery = expandQuery(args.query);
         // Prepend nomic search_query prefix
-        const queryText = `search_query: ${args.query}`;
+        const queryText = `search_query: ${expandedQuery}`;
         const embedding = await generateEmbedding(queryText);
         const limit = args.limit ?? 5;
-        const overFetchLimit = Math.min(limit * 4, 80);
+        const rerankerEnabled = Boolean(config.rerankerUrl);
+        // When reranking is enabled we widen the candidate pool so the
+        // cross-encoder has more options to reorder. Otherwise keep the
+        // original small over-fetch for dedup headroom.
+        const overFetchLimit = rerankerEnabled
+          ? Math.min(limit * 10, 100)
+          : Math.min(limit * 4, 80);
         const threshold = args.similarity_threshold ?? 0.15;
         const useHybrid = args.hybrid ?? true;
         const pgVector = `[${embedding.join(",")}]`;
+
+        // Build date-range filter fragment + params. Applies to both the
+        // vector and FTS sides so filtered-out rows don't consume candidate
+        // slots before RRF fusion. Handoffs use stored_at; tasks use
+        // created_at — both live in metadata JSONB.
+        const dateParams: string[] = [];
+        const dateClauses: string[] = [];
+        if (args.after) {
+          dateParams.push(args.after);
+          const p = `$DATE${dateParams.length}`;
+          dateClauses.push(
+            `COALESCE((metadata->>'stored_at')::timestamptz, (metadata->>'created_at')::timestamptz) >= ${p}::timestamptz`
+          );
+        }
+        if (args.before) {
+          dateParams.push(args.before);
+          const p = `$DATE${dateParams.length}`;
+          dateClauses.push(
+            `COALESCE((metadata->>'stored_at')::timestamptz, (metadata->>'created_at')::timestamptz) <= ${p}::timestamptz`
+          );
+        }
+        const dateFilter = dateClauses.length ? ` AND ${dateClauses.join(" AND ")}` : "";
 
         let sql: string;
         let params: unknown[];
 
         if (useHybrid) {
-          // Hybrid search: vector + full-text with RRF fusion (k=60)
-          // Over-fetch on final LIMIT for dedup headroom; CTEs stay at 50
+          // Param layout: $1=vector, $2=threshold, $3=ftsQuery,
+          // then (optionally) content_types, then date params, then final limit.
+          params = [pgVector, threshold, expandedQuery];
+          const contentTypesIdx = args.content_types?.length ? params.length + 1 : null;
+          if (contentTypesIdx) params.push(args.content_types);
+          const dateStartIdx = params.length + 1;
+          params.push(...dateParams);
+          const finalLimitIdx = params.length + 1;
+          params.push(overFetchLimit);
+
+          const contentTypesClause = contentTypesIdx
+            ? `AND content_type = ANY($${contentTypesIdx}::text[])`
+            : "";
+          const resolvedDateFilter = dateFilter.replace(/\$DATE(\d+)/g, (_m, n) => `$${dateStartIdx + parseInt(n, 10) - 1}`);
+
           sql = `
             WITH semantic AS (
               SELECT id, content_type, content_id,
@@ -163,9 +220,10 @@ export function registerSearchTools(mcpServer: McpServer): void {
                      ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
               FROM embeddings
               WHERE 1 - (embedding <=> $1::vector) >= $2
-              ${args.content_types?.length ? `AND content_type = ANY($4::text[])` : ""}
+              ${contentTypesClause}
+              ${resolvedDateFilter}
               ORDER BY embedding <=> $1::vector
-              LIMIT 50
+              LIMIT 100
             ),
             fulltext AS (
               SELECT id,
@@ -175,34 +233,43 @@ export function registerSearchTools(mcpServer: McpServer): void {
                      ) AS rank
               FROM embeddings
               WHERE to_tsvector('english', content_text) @@ websearch_to_tsquery('english', $3)
-              ${args.content_types?.length ? `AND content_type = ANY($4::text[])` : ""}
-              LIMIT 50
+              ${contentTypesClause}
+              ${resolvedDateFilter}
+              LIMIT 100
             )
             SELECT s.content_type, s.content_id, s.content_text, s.metadata, s.similarity,
                    COALESCE(1.0/(60 + s.rank), 0) + COALESCE(1.0/(60 + f.rank), 0) AS rrf_score
             FROM semantic s
             LEFT JOIN fulltext f ON s.id = f.id
             ORDER BY rrf_score DESC
-            LIMIT $${args.content_types?.length ? 5 : 4}
+            LIMIT $${finalLimitIdx}
           `;
-          params = [pgVector, threshold, args.query];
-          if (args.content_types?.length) params.push(args.content_types);
-          params.push(overFetchLimit);
         } else {
-          // Pure vector search \u2014 over-fetch for dedup headroom
+          // Pure vector search — over-fetch for dedup headroom
+          params = [pgVector, threshold];
+          const contentTypesIdx = args.content_types?.length ? params.length + 1 : null;
+          if (contentTypesIdx) params.push(args.content_types);
+          const dateStartIdx = params.length + 1;
+          params.push(...dateParams);
+          const finalLimitIdx = params.length + 1;
+          params.push(overFetchLimit);
+
+          const contentTypesClause = contentTypesIdx
+            ? `AND content_type = ANY($${contentTypesIdx}::text[])`
+            : "";
+          const resolvedDateFilter = dateFilter.replace(/\$DATE(\d+)/g, (_m, n) => `$${dateStartIdx + parseInt(n, 10) - 1}`);
+
           sql = `
             SELECT content_type, content_id,
                    LEFT(content_text, 500) as content_text, metadata,
                    1 - (embedding <=> $1::vector) as similarity
             FROM embeddings
             WHERE 1 - (embedding <=> $1::vector) >= $2
-            ${args.content_types?.length ? `AND content_type = ANY($3::text[])` : ""}
+            ${contentTypesClause}
+            ${resolvedDateFilter}
             ORDER BY embedding <=> $1::vector
-            LIMIT $${args.content_types?.length ? 4 : 3}
+            LIMIT $${finalLimitIdx}
           `;
-          params = [pgVector, threshold];
-          if (args.content_types?.length) params.push(args.content_types);
-          params.push(overFetchLimit);
         }
 
         const result = await query(sql, params);
@@ -234,7 +301,36 @@ export function registerSearchTools(mcpServer: McpServer): void {
           const bVal = sortKey === "rrf_score" ? (b.rrf_score ?? 0) : (b.similarity ?? 0);
           return bVal - aVal;
         });
-        const finalRows = deduped.slice(0, limit);
+
+        // Optional cross-encoder rerank stage. We hand the deduped candidate
+        // pool to the reranker, which rescores every candidate against the
+        // original user query. On success we reorder by reranker score; on
+        // any failure (network, timeout, malformed response) we silently
+        // fall back to the fusion ordering above.
+        let reranked = false;
+        let workingRows = deduped;
+        if (rerankerEnabled && deduped.length > 1) {
+          const texts = deduped.map((r) => r.content_text ?? "");
+          const scores = await rerankResults(args.query, texts);
+          if (scores && scores.length > 0) {
+            const scoreByIndex = new Map<number, number>();
+            for (const s of scores) scoreByIndex.set(s.index, s.score);
+            workingRows = [...deduped].sort((a, b) => {
+              const ai = deduped.indexOf(a);
+              const bi = deduped.indexOf(b);
+              return (scoreByIndex.get(bi) ?? -Infinity) - (scoreByIndex.get(ai) ?? -Infinity);
+            });
+            // Attach rerank_score to each row for response transparency.
+            for (let i = 0; i < deduped.length; i++) {
+              const rr = scoreByIndex.get(i);
+              if (rr !== undefined) {
+                (deduped[i] as SearchResultRow & { rerank_score?: number }).rerank_score = rr;
+              }
+            }
+            reranked = true;
+          }
+        }
+        const finalRows = workingRows.slice(0, limit);
 
         // Compute context envelope from entity matches (best-effort)
         const resultTexts = finalRows.map((r) => r.content_text ?? "");
@@ -247,19 +343,23 @@ export function registerSearchTools(mcpServer: McpServer): void {
         }
 
         const responseData = {
-          results: finalRows.map((r: SearchResultRow) => ({
+          results: finalRows.map((r: SearchResultRow & { rerank_score?: number }) => ({
             content_type: r.content_type,
             content_id: r.content_id,
             content_text: r.content_text,
             metadata: r.metadata,
             similarity: Math.round((r.similarity ?? 0) * 1000) / 1000,
             ...(r.rrf_score ? { rrf_score: Math.round(r.rrf_score * 10000) / 10000 } : {}),
+            ...(r.rerank_score !== undefined
+              ? { rerank_score: Math.round(r.rerank_score * 10000) / 10000 }
+              : {}),
             ...(r.metadata?.chunk_index != null ? { chunk_index: r.metadata.chunk_index } : {}),
             ...(r.metadata?.source_file ? { source_file: r.metadata.source_file } : {}),
           })),
           query: args.query,
           total: finalRows.length,
           mode: useHybrid ? "hybrid" : "vector",
+          reranked,
           deduplicated: true,
           pre_dedup_count: preDedupCount,
           context_envelope: envelope,
@@ -295,7 +395,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
     REINDEX_DESCRIPTION,
     {
       content_types: z
-        .array(z.enum(["handoff", "task"]))
+        .array(z.enum(["handoff", "task", "note"]))
         .optional()
         .describe("Which types to reindex. Default: all."),
     },
@@ -314,7 +414,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
         };
       }
 
-      const types = args.content_types ?? ["handoff", "task"];
+      const types = args.content_types ?? ["handoff", "task", "note"];
       const results: Record<string, unknown> = {};
 
       if (types.includes("handoff")) {
@@ -324,6 +424,11 @@ export function registerSearchTools(mcpServer: McpServer): void {
       if (types.includes("task")) {
         const count = await indexAllTasks();
         results.tasks = { indexed: count };
+      }
+
+      if (types.includes("note")) {
+        const count = await indexAllNotes();
+        results.notes = { indexed: count };
       }
 
       return {

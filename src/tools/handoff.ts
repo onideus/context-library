@@ -7,6 +7,7 @@ import type { Handoff } from "../storage/schemas.js";
 import { mergeHandoff } from "./merge.js";
 import { indexHandoff } from "../embeddings/indexer.js";
 import { computeDynamicTaskSummary } from "./task-summary.js";
+import { validatePayloadSize, PayloadTooLargeError, LIMITS } from "./validation.js";
 
 export const SCHEMA_VERSION = "1.1";
 
@@ -312,6 +313,29 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         ),
     },
     async (args) => {
+      try {
+        validatePayloadSize(args, LIMITS.STORE_HANDOFF_BYTES, "store_handoff payload");
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  error: true,
+                  code: "PAYLOAD_TOO_LARGE",
+                  message: err.message,
+                  field: err.field,
+                  actual: err.actual,
+                  max: err.max,
+                }),
+              },
+            ],
+          };
+        }
+        throw err;
+      }
+
       const storedAt = new Date().toISOString();
       const handoff: Handoff = { ...args, stored_at: storedAt };
       const filename = await writeHandoff(handoff);
@@ -451,6 +475,29 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       timezone: z.string().nullable().optional(),
     },
     async (args) => {
+      try {
+        validatePayloadSize(args, LIMITS.PATCH_HANDOFF_BYTES, "patch_handoff payload");
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  error: true,
+                  code: "PAYLOAD_TOO_LARGE",
+                  message: err.message,
+                  field: err.field,
+                  actual: err.actual,
+                  max: err.max,
+                }),
+              },
+            ],
+          };
+        }
+        throw err;
+      }
+
       // Read latest handoff from directory listing (avoids pointer file race condition)
       const sourceFilename = await getLatestHandoffFilename();
       if (!sourceFilename) {

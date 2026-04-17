@@ -14,4 +14,6 @@ export const config = {
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-ai/nomic-embed-text-v2-moe",
   embeddingDimensions: parseInt(process.env.EMBEDDING_DIMENSIONS ?? "768", 10),
   entitySeedPath: process.env.ENTITY_SEED_PATH ?? "./data/entities.seed.json",
+  searchAliasPath: process.env.SEARCH_ALIAS_PATH ?? "./data/search-aliases.json",
+  rerankerUrl: process.env.RERANKER_URL ?? null,
 } as const;

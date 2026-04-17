@@ -941,6 +941,21 @@ describe("Handoff Navigation", () => {
 // Embedding unavailability tests
 // ────────────────────────────────────────────────
 
+describe("search_context — schema (v0.6)", () => {
+  it("exposes after and before date-range parameters", async () => {
+    const listRes = await mcpPost(jsonrpc("tools/list"));
+    const listData = (await parseSseResponse(listRes)) as any;
+    const searchTool = listData.result.tools.find((t: any) => t.name === "search_context");
+    expect(searchTool).toBeDefined();
+    const props = searchTool.inputSchema?.properties ?? {};
+    expect(props.after).toBeDefined();
+    expect(props.before).toBeDefined();
+    // Descriptions mention the time-window use case
+    expect(searchTool.description).toMatch(/after/i);
+    expect(searchTool.description).toMatch(/before/i);
+  });
+});
+
 describe("search_context — graceful degradation", () => {
   it("returns EMBEDDING_UNAVAILABLE when embedding server is not running", async () => {
     const res = await mcpPost(

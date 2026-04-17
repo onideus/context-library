@@ -4,6 +4,7 @@ import {
   emptyEnvelope,
   generateBoundaryNotice,
   lookupEntities,
+  matchesWordBoundary,
   type EntityInfo,
 } from "../tools/entities.js";
 
@@ -151,6 +152,134 @@ describe("generateBoundaryNotice", () => {
     const notice = generateBoundaryNotice(env)!;
     // personal scope has no constraints — should not appear as "Constraints from personal scope:"
     expect(notice).not.toContain("Constraints from personal scope:");
+  });
+});
+
+// ── matchesWordBoundary (v0.6) ────────────────────────────────────
+
+describe("matchesWordBoundary", () => {
+  it("does NOT match an entity name inside a larger word", () => {
+    // Classic false positive: short name "Ian" appearing inside unrelated words
+    expect(matchesWordBoundary("Kubernetes deployment failed", "Ian")).toBe(false);
+    expect(matchesWordBoundary("The median latency was 200ms", "Ian")).toBe(false);
+    // Two-letter alias inside another token
+    expect(matchesWordBoundary("SCBRS alert fired", "CB")).toBe(false);
+    expect(matchesWordBoundary("subcategory check", "CB")).toBe(false);
+  });
+
+  it("DOES match an entity name as a standalone word", () => {
+    expect(matchesWordBoundary("Ian is available today", "Ian")).toBe(true);
+    expect(matchesWordBoundary("talked to Ian about this", "Ian")).toBe(true);
+    expect(matchesWordBoundary("CB deployment is ready", "CB")).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(matchesWordBoundary("talked to IAN today", "ian")).toBe(true);
+    expect(matchesWordBoundary("Project ALPHA review", "project alpha")).toBe(true);
+  });
+
+  it("handles hyphenated names on word boundaries", () => {
+    expect(matchesWordBoundary("working on project-alpha today", "project-alpha")).toBe(true);
+    // "alpha" should not match the tail of "project-alpha" because
+    // the hyphen is not a word character — it IS a boundary.
+    expect(matchesWordBoundary("working on project-alpha today", "alpha")).toBe(true);
+  });
+
+  it("escapes regex metacharacters in domain-style names", () => {
+    // Generic domain-style example (no personal data).
+    expect(matchesWordBoundary("please ssh into box.example.com for logs", "box.example.com")).toBe(true);
+    // The dots must be literal — "boxXexampleXcom" should NOT match "box.example.com"
+    expect(matchesWordBoundary("boxXexampleXcom is a fake", "box.example.com")).toBe(false);
+  });
+
+  it("handles names with regex metacharacters without throwing", () => {
+    // Exotic keys that would blow up a naive new RegExp(name). The precise
+    // match behavior for keys surrounded by regex metacharacters is
+    // undefined — we only guarantee that escaping keeps us safe from
+    // crashes and from "C++" being interpreted as "Ccc".
+    expect(() => matchesWordBoundary("some text", "a+b")).not.toThrow();
+    expect(() => matchesWordBoundary("some text", "$weird^")).not.toThrow();
+    // A plain "a+b" key should NOT match "aaab" (the plus must be literal).
+    expect(matchesWordBoundary("aaab in text", "a+b")).toBe(false);
+  });
+});
+
+// ── lookupEntities: word-boundary behavior (v0.6) ─────────────────
+
+describe("lookupEntities — word boundary matching", () => {
+  const queryMock2 = vi.fn();
+  // The mock for "../db/client.js" is defined at the top of the file;
+  // we reuse `queryMock` — re-bind it here for local clarity.
+  beforeEach(() => {
+    queryMock2.mockReset();
+  });
+
+  it("does not match when entity name appears only as a substring inside another word", async () => {
+    queryMock.mockImplementation((sql: string) => {
+      if (sql.startsWith("SELECT")) {
+        return Promise.resolve({
+          rows: [
+            {
+              canonical_name: "Ian",
+              scope: "personal",
+              aliases: [],
+              constraints: [],
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    // "Ian" is a substring of "Kubernetes" (letters i-a-n in sequence? no —
+    // but it IS a substring of "median" and "guardian"). Ensure no match.
+    const matched = await lookupEntities(["Investigating Kubernetes and guardian RBAC"]);
+    expect(matched).toEqual([]);
+  });
+
+  it("matches when entity name appears as a standalone word", async () => {
+    queryMock.mockImplementation((sql: string) => {
+      if (sql.startsWith("SELECT")) {
+        return Promise.resolve({
+          rows: [
+            {
+              canonical_name: "Ian",
+              scope: "personal",
+              aliases: [],
+              constraints: [],
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const matched = await lookupEntities(["talked to Ian about the release"]);
+    expect(matched.map((e) => e.canonical_name)).toEqual(["Ian"]);
+  });
+
+  it("skips single-character aliases (too ambiguous)", async () => {
+    queryMock.mockImplementation((sql: string) => {
+      if (sql.startsWith("SELECT")) {
+        return Promise.resolve({
+          rows: [
+            {
+              canonical_name: "Project A",
+              scope: "work",
+              aliases: ["A"],
+              constraints: [],
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    // A single letter "A" appears all over normal English — ensure we don't
+    // false-positive on it. The canonical_name "Project A" should still
+    // work if it appears as a phrase, but a bare "A" alias should not.
+    const matched = await lookupEntities(["A quick test of the system"]);
+    expect(matched).toEqual([]);
   });
 });
 

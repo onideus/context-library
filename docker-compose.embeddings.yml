@@ -76,9 +76,60 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── Cross-encoder reranker (optional) ──────────────────
+  # A second TEI instance running a cross-encoder model that rescores
+  # the top candidates from RRF fusion. Add the --profile reranker-gpu
+  # or --profile reranker-cpu flag to enable. When no reranker profile
+  # is active, search_context falls back to RRF-only ordering.
+  reranker-gpu:
+    image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9
+    container_name: context-library-reranker
+    profiles: [reranker-gpu]
+    restart: always
+    ports: ['8091:80']
+    command: --model-id ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2} --port 80
+    volumes:
+      - ./data/models:/data
+    networks:
+      default:
+        aliases:
+          - reranker
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  reranker-cpu:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: context-library-reranker
+    profiles: [reranker-cpu]
+    restart: always
+    ports: ['8091:80']
+    command: --model-id ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2} --port 80
+    volumes:
+      - ./data/models:/data
+    networks:
+      default:
+        aliases:
+          - reranker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   # ── Context Library overlay ────────────────────────────
   # Both services use network alias "embeddings", so EMBEDDING_URL
   # works identically regardless of which profile is active.
   context-library:
     environment:
       - EMBEDDING_URL=http://embeddings:80
+      - RERANKER_URL=${RERANKER_URL:-}
