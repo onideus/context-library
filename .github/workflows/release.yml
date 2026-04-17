@@ -3,6 +3,15 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'SHA of built image to promote. Leave empty to use latest main HEAD.'
+        required: false
+        default: ''
+      version:
+        description: 'Version to publish, e.g. 0.5.4 or 0.5.4-test.1. Prerelease (contains "-") skips "latest" tag.'
+        required: true
 
 permissions:
   contents: write
@@ -16,40 +25,71 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: Extract version from tag
-        id: version
-        run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Compute short SHA
-        id: sha
-        run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      - name: Resolve source SHA and version
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            INPUT_SHA="${{ inputs.source_sha }}"
+            if [ -n "${INPUT_SHA}" ]; then
+              FULL_SHA=$(git rev-parse "${INPUT_SHA}")
+            else
+              FULL_SHA=$(git rev-parse origin/main)
+            fi
+            VERSION="${{ inputs.version }}"
+            VERSION="${VERSION#v}"
+          else
+            FULL_SHA="${GITHUB_SHA}"
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          SHORT_SHA=$(echo "${FULL_SHA}" | cut -c1-7)
+          echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Verify SHA image exists
         run: |
-          if ! docker pull ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }}; then
-            echo "::error::No validated image found for sha-${{ steps.sha.outputs.short_sha }}. Ensure the commit was merged to main and the image pipeline succeeded before tagging a release."
+          if ! docker pull ghcr.io/onideus/context-library:sha-${{ steps.resolve.outputs.short_sha }}; then
+            echo "::error::No validated image found for sha-${{ steps.resolve.outputs.short_sha }}. Ensure the commit was merged to main and the image pipeline succeeded before promoting."
             exit 1
           fi
 
       - name: Retag and push release tags
         run: |
-          docker tag \
-            ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
-            ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
-          docker tag \
-            ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
-            ghcr.io/onideus/context-library:latest
-          docker push ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
-          docker push ghcr.io/onideus/context-library:latest
+          VERSION="${{ steps.resolve.outputs.version }}"
+          SHA_IMAGE="ghcr.io/onideus/context-library:sha-${{ steps.resolve.outputs.short_sha }}"
+          docker tag "${SHA_IMAGE}" "ghcr.io/onideus/context-library:${VERSION}"
+          docker push "ghcr.io/onideus/context-library:${VERSION}"
+          if [[ "${VERSION}" != *-* ]]; then
+            docker tag "${SHA_IMAGE}" ghcr.io/onideus/context-library:latest
+            docker push ghcr.io/onideus/context-library:latest
+          else
+            echo "Prerelease version detected, skipping latest tag."
+          fi
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+        run: |
+          VERSION="${{ steps.resolve.outputs.version }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PRERELEASE_FLAG=""
+            if [[ "${VERSION}" == *-* ]]; then
+              PRERELEASE_FLAG="--prerelease"
+            fi
+            gh release create "v${VERSION}" \
+              --target "${{ steps.resolve.outputs.full_sha }}" \
+              --generate-notes \
+              ${PRERELEASE_FLAG}
+          else
+            gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+          fi
 
       - name: Notify on release
         if: always()
@@ -58,8 +98,8 @@ jobs:
         run: |
           STATUS="${{ job.status }}"
           curl -s -o /dev/null \
-            -H "Title: Release ${STATUS}: v${{ steps.version.outputs.tag }}" \
+            -H "Title: Release ${STATUS}: v${{ steps.resolve.outputs.version }}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
-            -d "Context Library v${{ steps.version.outputs.tag }} — release $( [ "$STATUS" = "success" ] && echo 'published' || echo 'FAILED' )" \
+            -d "Context Library v${{ steps.resolve.outputs.version }} — release $( [ "$STATUS" = "success" ] && echo 'published' || echo 'FAILED' )" \
             "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
