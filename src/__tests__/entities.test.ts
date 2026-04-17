@@ -1,10 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   computeEnvelope,
   emptyEnvelope,
   generateBoundaryNotice,
+  lookupEntities,
   type EntityInfo,
 } from "../tools/entities.js";
+
+// Mock the DB client to avoid real Postgres for unit tests.
+const queryMock = vi.fn();
+vi.mock("../db/client.js", () => ({
+  query: (...args: unknown[]) => queryMock(...args),
+}));
 
 // ── Test fixtures (generic names only — no personal data) ─────────
 
@@ -144,5 +151,96 @@ describe("generateBoundaryNotice", () => {
     const notice = generateBoundaryNotice(env)!;
     // personal scope has no constraints — should not appear as "Constraints from personal scope:"
     expect(notice).not.toContain("Constraints from personal scope:");
+  });
+});
+
+// ── lookupEntities: last_referenced bookkeeping ───────────────────
+
+describe("lookupEntities — last_referenced update", () => {
+  beforeEach(() => {
+    queryMock.mockReset();
+  });
+
+  it("issues a batched UPDATE on entities.last_referenced when matches are found", async () => {
+    queryMock.mockImplementation((sql: string) => {
+      if (sql.startsWith("SELECT")) {
+        return Promise.resolve({
+          rows: [
+            {
+              canonical_name: "Project Alpha",
+              scope: "work",
+              aliases: ["alpha"],
+              constraints: [],
+            },
+            {
+              canonical_name: "Home Server",
+              scope: "personal",
+              aliases: ["NAS"],
+              constraints: [],
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const matched = await lookupEntities(["Working on Project Alpha today"]);
+    expect(matched.map((e) => e.canonical_name)).toEqual(["Project Alpha"]);
+
+    const updateCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("UPDATE entities")
+    );
+    expect(updateCall).toBeDefined();
+    expect(updateCall![0]).toContain("last_referenced = NOW()");
+    expect(updateCall![0]).toContain("canonical_name = ANY($1)");
+    expect(updateCall![1]).toEqual([["Project Alpha"]]);
+  });
+
+  it("does not issue an UPDATE when no entities match", async () => {
+    queryMock.mockImplementation((sql: string) => {
+      if (sql.startsWith("SELECT")) {
+        return Promise.resolve({
+          rows: [
+            {
+              canonical_name: "Project Alpha",
+              scope: "work",
+              aliases: ["alpha"],
+              constraints: [],
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const matched = await lookupEntities(["Totally unrelated text about cats"]);
+    expect(matched).toEqual([]);
+
+    const updateCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("UPDATE entities")
+    );
+    expect(updateCall).toBeUndefined();
+  });
+
+  it("swallows UPDATE failures (bookkeeping must not break search)", async () => {
+    queryMock.mockImplementation((sql: string) => {
+      if (sql.startsWith("SELECT")) {
+        return Promise.resolve({
+          rows: [
+            {
+              canonical_name: "Project Alpha",
+              scope: "work",
+              aliases: [],
+              constraints: [],
+            },
+          ],
+        });
+      }
+      // UPDATE fails
+      return Promise.reject(new Error("db offline"));
+    });
+
+    const matched = await lookupEntities(["Project Alpha notes"]);
+    expect(matched.map((e) => e.canonical_name)).toEqual(["Project Alpha"]);
   });
 });

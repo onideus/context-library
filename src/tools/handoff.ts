@@ -198,15 +198,25 @@ Parameters:
   - tone_notes (optional): Guidance for the next instance on how to approach the user
   - timezone (optional): IANA timezone identifier (e.g., 'America/New_York')
 
-Returns: {success, stored_at, filename, task_summary, schema_version}`;
+Returns: {success, stored_at, filename, task_summary, schema_version}
+
+Response Format:
+- Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before confirming the store. Evaluate whether the captured state reflects the actual session. Note any gaps in active_context or tasks explicitly.
+- Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly. Confirm the store and summarize task_summary. Flag when captured state seems thin.`;
 
 const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. Returns operational context, active work, task lists, and tone notes from the last session.
 
 WHEN TO CALL: At session start (always), before any store_handoff or patch_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
 
-Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local.
+Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, evidence_pulled.
 
-Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count.
+Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, evidence_pulled.
+
+SessionEvidence:
+evidence_pulled indicates whether operational context was successfully loaded.
+When false, judgment-class responses (career advice, strategic decisions,
+relationship guidance) should note that they lack session history context.
+This is advisory — the model decides how to weight the signal.
 
 Parameters:
 - scope (optional, default "full"): "full" | "work" | "personal"
@@ -238,7 +248,11 @@ Parameters:
   - tone_notes (optional): String to replace, or null to preserve
   - timezone (optional): IANA timezone string to replace, or null to preserve
 
-Returns: {success, patched_fields, stored_at, source_handoff, task_summary, schema_version}`;
+Returns: {success, patched_fields, stored_at, source_handoff, task_summary, schema_version}
+
+Response Format:
+- Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before patching. Evaluate whether the patch is consistent with the loaded state. Note any gaps or conflicts explicitly.
+- Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly. Confirm the patched_fields and updated task_summary. Flag when the patch seems inconsistent with recent context.`;
 
 // ── Zod Schemas for patch_handoff ──────────────────────────────────
 
@@ -266,7 +280,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
           mood: z.string().optional(),
         })
         .optional(),
-      active_context: z.record(z.string(), z.any()).optional(),
+      active_context: z.record(z.string(), z.unknown()).optional(),
       tasks: z
         .object({
           completed: z.array(z.string()).optional(),
@@ -342,6 +356,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 message: "No handoff stored yet",
                 code: "NOT_FOUND",
+                evidence_pulled: false,
               }),
             },
           ],
@@ -357,6 +372,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 message: "No handoff stored yet",
                 code: "NOT_FOUND",
+                evidence_pulled: false,
               }),
             },
           ],
@@ -382,6 +398,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               stored_at_local: formatStoredAtLocal(handoff.stored_at ?? "", handoff.timezone),
               schema_version: SCHEMA_VERSION,
               handoff_count: handoffCount,
+              evidence_pulled: true,
             }),
           },
         ],
@@ -399,7 +416,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .nullable()
         .optional(),
       active_context: z
-        .record(z.string(), z.any())
+        .record(z.string(), z.unknown())
         .nullable()
         .optional(),
       tasks: z

@@ -81,7 +81,11 @@ READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-
 
 Returns: {results[], context_envelope, query, total, mode, deduplicated, pre_dedup_count}
 
-If results reference events indirectly, reformulate with specific terms, lower threshold (0.05), higher limit (20).`;
+If results reference events indirectly, reformulate with specific terms, lower threshold (0.05), higher limit (20).
+
+Response Format:
+- Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
+- Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
 
 const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
 
