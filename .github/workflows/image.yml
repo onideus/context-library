@@ -39,16 +39,24 @@ jobs:
             -t ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
             .
 
+      # snyk/actions/docker passes `args:` as a single quoted string to the CLI,
+      # collapsing "--severity-threshold=high --exclude-base-image-vulns" into
+      # one unparseable token and silently dropping the base-image exclusion.
+      # Install the CLI and invoke it directly so flags word-split correctly.
       # --exclude-base-image-vulns: ignore CVEs inherited from node:22-slim
-      # (e.g. zlib) that we can't patch ourselves. Snyk will still flag any
-      # vulnerability introduced in our own layers.
+      # (e.g. zlib) that we can't patch ourselves. Snyk still flags vulns
+      # introduced in our own layers.
+      - name: Set up Snyk CLI
+        uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
+
       - name: Snyk container scan
-        uses: snyk/actions/docker@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }}
-          args: --severity-threshold=high --exclude-base-image-vulns
+        run: |
+          snyk container test \
+            ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
+            --severity-threshold=high \
+            --exclude-base-image-vulns
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
