@@ -1,10 +1,15 @@
 # Context Library
 
-A personal MCP server that provides persistent operational context, task management, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
+[![CI](https://github.com/onideus/context-library/actions/workflows/ci.yml/badge.svg)](https://github.com/onideus/context-library/actions/workflows/ci.yml)
+[![Image Build](https://github.com/onideus/context-library/actions/workflows/image.yml/badge.svg)](https://github.com/onideus/context-library/actions/workflows/image.yml)
+[![Release](https://img.shields.io/github/v/release/onideus/context-library)](https://github.com/onideus/context-library/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+A personal MCP server that provides persistent operational context, task management, knowledge capture, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
 
 ## What It Does
 
-AI assistants lose all context between conversations. Context Library solves this by providing MCP tools that any compatible assistant can use to store and retrieve operational state, track tasks, and search across accumulated history.
+AI assistants lose all context between conversations. Context Library solves this by providing MCP tools that any compatible assistant can use to store and retrieve operational state, track tasks, capture permanent knowledge, and search across accumulated history.
 
 The server name is configurable via the `SERVER_NAME` environment variable (default: `context-library`). Name it whatever fits your mental model.
 
@@ -20,19 +25,19 @@ The simplest deployment. Stores and retrieves operational context as append-only
 docker compose up -d
 ```
 
-**Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`
+**Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`, `list_handoffs`, `get_handoff`
 
 > Handoff files are retained indefinitely by default. To enable automatic pruning of old handoffs, set `RETENTION_COUNT` to a positive number (e.g., `5000`).
 
-### Tier 2: + PostgreSQL (Tasks + Full-Text Search)
+### Tier 2: + PostgreSQL (Tasks + Knowledge + Full-Text Search)
 
-Adds structured task management with full-text search. Requires PostgreSQL 16 with pgvector.
+Adds structured task management, permanent knowledge capture, and full-text search. Requires PostgreSQL 16 with pgvector.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -53,6 +58,17 @@ With no `--profile` flag, neither TEI service starts — the application degrade
 **Additional tools:** `search_context`, `reindex`
 
 The TEI server can run on a separate machine — just point `EMBEDDING_URL` to its address. This is the recommended setup if your main server doesn't have a GPU.
+
+#### Optional: Cross-Encoder Reranker
+
+For improved retrieval precision, an optional cross-encoder reranker rescores candidates after RRF fusion. It runs as a second TEI instance:
+
+```bash
+# Add to your compose command:
+--profile reranker-gpu   # or reranker-cpu
+```
+
+When the reranker is not configured or unreachable, `search_context` falls back to RRF-only ordering. Set `RERANKER_URL` in your `.env` to enable it.
 
 #### Embedding Server Platform Options
 
@@ -76,10 +92,12 @@ The TEI server can run on a separate machine — just point `EMBEDDING_URL` to i
 - **Server:** Hono 4.x + StreamableHTTP MCP transport (Node.js 22, TypeScript)
 - **Storage (Tier 1):** Append-only JSON files in `./data/handoffs/`
 - **Database (Tier 2):** PostgreSQL 16 with pgvector extension
-- **Embeddings (Tier 3):** Text Embeddings Inference with nomic-embed-text-v2-moe (768 dims)
+- **Content primitives:** Handoffs (ephemeral session state), Tasks (lifecycle-managed action items), Notes (permanent knowledge — decisions, patterns, insights)
+- **Embeddings (Tier 3):** Text Embeddings Inference with nomic-embed-text-v2-moe (768 dims), optional cross-encoder reranker
+- **Search:** Hybrid retrieval (vector + FTS with RRF fusion), optional cross-encoder reranking, entity-aware context envelopes, search alias expansion, date-range filtering
 - **Auth:** Handled externally by [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) — the server itself is unauthenticated and trusts its network boundary
 
-Each component degrades gracefully when unavailable. If Postgres is down, handoffs still work. If the embedding server is unreachable, task search still works via full-text search.
+Each component degrades gracefully when unavailable. If Postgres is down, handoffs still work. If the embedding server is unreachable, task and note search still works via full-text search.
 
 ## MCP Tools
 
@@ -88,13 +106,21 @@ Each component degrades gracefully when unavailable. If Postgres is down, handof
 | `store_handoff` | Core | Full-state capture at session boundaries (append-only) |
 | `get_latest_handoff` | Core | Retrieve most recent handoff with pre-computed fields |
 | `patch_handoff` | Core | Partial update with merge semantics |
+| `list_handoffs` | Core | Browse historical handoffs by date with metadata |
+| `get_handoff` | Core | Retrieve a specific historical handoff by filename |
 | `create_task` | Postgres | Create task with scope, priority, tags, dates |
 | `get_task` | Postgres | Retrieve task by UUID |
 | `list_tasks` | Postgres | Paginated filtering with status, scope, priority, tags |
 | `update_task` | Postgres | Field updates + lifecycle actions (complete/cancel/defer/reopen) |
 | `search_tasks` | Postgres | Full-text search with PostgreSQL FTS |
-| `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) |
-| `reindex` | Embeddings | Rebuild semantic search index |
+| `create_note` | Postgres | Capture permanent knowledge (decisions, patterns, insights) |
+| `get_note` | Postgres | Retrieve note by UUID |
+| `list_notes` | Postgres | Browse notes with scope, domain, and tag filters |
+| `search_notes` | Postgres | Full-text search across note titles and content |
+| `update_note` | Postgres | Update note fields; re-embeds on content change |
+| `delete_note` | Postgres | Permanently delete a note and its embedding |
+| `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types |
+| `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, and notes |
 
 ## Health Checks
 
@@ -107,7 +133,7 @@ Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after 
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.5.0","uptime":42}
+# {"status":"ok","version":"0.5.4","uptime":42}
 
 curl http://localhost:3100/health/ready
 # {"status":"ok","archive":true,"uptime":42}
@@ -222,7 +248,7 @@ After connecting, ask your AI assistant to call `get_latest_handoff`. If it retu
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.5.0","uptime":42}
+# {"status":"ok","version":"0.5.4","uptime":42}
 ```
 
 ## External Access with Auth Proxy
@@ -275,26 +301,28 @@ Because routing lives in the dashboard, domain names and tunnel IDs stay out of 
 
 ## Release Workflow
 
-Every tagged release follows a gated pipeline: **Tag → CI → Snyk dep scan → Docker build → Snyk container scan → GHCR publish**. Images only reach the registry if all gates pass.
+Every push to `main` builds, scans, and publishes a SHA-tagged image. Tagged releases promote a validated image — no rebuild required.
+
+**Image pipeline (on push to main):**
+```
+Push → CI checks → Docker build → Snyk dep scan → Snyk container scan → Push sha-<hash> to GHCR
+```
+
+**Release pipeline (on tag push):**
+```
+Tag v* → Pull validated sha image → Retag as <version> + latest → Push → GitHub Release
+```
+
+Insecure images never reach the registry — Snyk gates the push. By the time a release tag exists, the image it points to has already passed every gate.
 
 **To cut a release:**
 
 ```bash
-git tag v0.5.1
-git push origin v0.5.1
+git tag v0.5.4
+git push origin v0.5.4
 ```
 
-Tag format is `vX.Y.Z` (semver with `v` prefix). The release workflow:
-
-1. Runs the full CI suite (install, build, test)
-2. Scans dependencies with Snyk (hard gate — high/critical vulns block the release)
-3. Builds the Docker image from the multi-stage `Dockerfile`
-4. Scans the container image with Snyk (hard gate)
-5. Pushes to `ghcr.io/onideus/context-library:<version>` and `ghcr.io/onideus/context-library:latest`
-
-The version tag is stripped of the `v` prefix for the image tag (e.g., tag `v0.5.1` publishes image `0.5.1`).
-
-PRs and pushes to `main` run the CI workflow (steps 1-2 above) without building or publishing images.
+Old SHA-tagged images are pruned weekly (90-day retention), preserving any image referenced by a release tag.
 
 ## Pulling Without Cloning
 
@@ -379,7 +407,7 @@ If you see `Postgres migrations skipped — database not available`, the server 
 
 ## Security
 
-This server holds personal operational data — handoff state, tasks, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.**
+This server holds personal operational data — handoff state, tasks, knowledge entries, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.**
 
 > **Note:** When using the auth proxy overlay (`docker-compose.auth.yml`), the MCP server still binds to `127.0.0.1:3100` from the base compose file. This means the unauthenticated server remains accessible on localhost. This is intentional for local debugging but should be considered in your deployment security model. A future release will address this in the overlay.
 
@@ -417,6 +445,9 @@ See `.env.example` for all configuration options.
 | `EMBEDDING_URL` | `http://embeddings:80` | TEI server endpoint |
 | `EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v2-moe` | Embedding model name |
 | `EMBEDDING_DIMENSIONS` | `768` | Embedding vector dimensions |
+| `RERANKER_URL` | — | Cross-encoder reranker endpoint (optional; leave unset to disable) |
+| `SEARCH_ALIAS_PATH` | `./data/search-aliases.json` | Deployment-local search alias expansion file (optional) |
+| `ENTITY_SEED_PATH` | `./data/entities.seed.json` | Entity seed file for context envelopes (optional) |
 
 ### Auth Proxy (External Access)
 
