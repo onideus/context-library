@@ -6,13 +6,14 @@ import { read, writeHandoff, getLatestHandoffFilename, getHandoffCount } from ".
 import type { Handoff } from "../storage/schemas.js";
 import { mergeHandoff } from "./merge.js";
 import { indexHandoff } from "../embeddings/indexer.js";
+import { computeDynamicTaskSummary } from "./task-summary.js";
 
-const SCHEMA_VERSION = "1.1";
+export const SCHEMA_VERSION = "1.1";
 
-const HANDOFFS_DIR = () => join(config.dataDir, "handoffs");
+export const HANDOFFS_DIR = () => join(config.dataDir, "handoffs");
 
 /** Format current time as ISO-8601 with timezone offset. Uses IANA timezone if provided, otherwise server-local. */
-function localIsoTimestamp(tz?: string): string {
+export function localIsoTimestamp(tz?: string): string {
   const now = new Date();
 
   if (tz) {
@@ -57,7 +58,7 @@ function localIsoTimestamp(tz?: string): string {
 }
 
 /** Format a stored_at timestamp in the handoff's timezone for convenience display. */
-function formatStoredAtLocal(storedAt: string, tz?: string): string | null {
+export function formatStoredAtLocal(storedAt: string, tz?: string): string | null {
   if (!storedAt || !tz) return null;
   try {
     const date = new Date(storedAt);
@@ -79,7 +80,7 @@ function formatStoredAtLocal(storedAt: string, tz?: string): string | null {
 }
 
 /** Compute task_summary from handoff data. */
-function computeTaskSummary(handoff: Handoff) {
+export function computeTaskSummary(handoff: Handoff) {
   return {
     open_count: (handoff.tasks?.open || []).length,
     blocked_count: (handoff.tasks?.blocked || []).length,
@@ -88,7 +89,7 @@ function computeTaskSummary(handoff: Handoff) {
 }
 
 /** Compute elapsed_seconds since stored_at. Returns null if stored_at is missing/unparseable. */
-function computeElapsedSeconds(storedAt?: string): number | null {
+export function computeElapsedSeconds(storedAt?: string): number | null {
   if (!storedAt) return null;
   const parsed = Date.parse(storedAt);
   if (isNaN(parsed)) return null;
@@ -96,7 +97,7 @@ function computeElapsedSeconds(storedAt?: string): number | null {
 }
 
 /** Compute same_calendar_day using the handoff's timezone. */
-function computeSameCalendarDay(storedAt?: string, tz?: string): boolean {
+export function computeSameCalendarDay(storedAt?: string, tz?: string): boolean {
   if (!storedAt) return false;
   const timezone = tz || "UTC";
   try {
@@ -109,7 +110,7 @@ function computeSameCalendarDay(storedAt?: string, tz?: string): boolean {
 }
 
 /** Filter a handoff payload by scope, tracking which fields were removed. */
-function filterByScope(
+export function filterByScope(
   handoff: Handoff,
   scope: "full" | "work" | "personal"
 ): { result: Record<string, unknown>; filteredFields: string[] } {
@@ -211,6 +212,11 @@ WHEN TO CALL: At session start (always), before any store_handoff or patch_hando
 Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, evidence_pulled.
 
 Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, evidence_pulled.
+
+task_summary shape:
+When Postgres is available, task_summary is computed live from the authoritative tasks table and returns:
+{open_count, blocked_count, completed_count, critical_items: [{id, title, due_date}], due_this_week: [{id, title, due_date}], recently_completed: [{id, title, completed_at}], blocked_items: [{id, title, blocked_reason}]}
+When Postgres is unavailable, task_summary falls back to counts derived from the handoff's own tasks arrays: {open_count, blocked_count, completed_count}.
 
 SessionEvidence:
 evidence_pulled indicates whether operational context was successfully loaded.
@@ -383,6 +389,10 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       const { result: filtered, filteredFields } = filterByScope(handoff, scope);
       const handoffCount = await getHandoffCount();
 
+      // Prefer enriched task summary from Postgres; fall back to handoff-array counts when unavailable
+      const dynamicSummary = await computeDynamicTaskSummary();
+      const taskSummary = dynamicSummary ?? computeTaskSummary(handoff);
+
       return {
         content: [
           {
@@ -392,7 +402,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               retrieved_at: localIsoTimestamp(handoff.timezone),
               elapsed_seconds: computeElapsedSeconds(handoff.stored_at),
               same_calendar_day: computeSameCalendarDay(handoff.stored_at, handoff.timezone),
-              task_summary: computeTaskSummary(handoff),
+              task_summary: taskSummary,
               applied_scope: scope,
               ...(scope !== "full" ? { filtered_fields: filteredFields } : {}),
               stored_at_local: formatStoredAtLocal(handoff.stored_at ?? "", handoff.timezone),
