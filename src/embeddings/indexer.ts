@@ -301,6 +301,34 @@ interface PendingRow {
 }
 
 /**
+ * Check whether a specific (content_type, content_id) pair is queued for
+ * pending embedding. Returns true on query failure — callers (compaction,
+ * backfill) should treat an unknown state as "still pending" and skip,
+ * rather than archive content whose embedding we can't confirm.
+ */
+export async function hasPendingEmbedding(
+  contentType: "handoff" | "task",
+  contentId: string
+): Promise<boolean> {
+  try {
+    const result = await query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pending_embeddings
+         WHERE content_type = $1 AND content_id = $2
+       ) AS exists`,
+      [contentType, contentId]
+    );
+    return Boolean(result.rows[0]?.exists);
+  } catch (err) {
+    console.warn(
+      "[hasPendingEmbedding] Postgres check failed — assuming pending (conservative):",
+      (err as Error).message
+    );
+    return true;
+  }
+}
+
+/**
  * Count rows currently in the pending_embeddings queue.
  * Returns 0 if the table doesn't exist yet or Postgres is unavailable.
  */

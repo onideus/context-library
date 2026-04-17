@@ -12,7 +12,8 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "extract-entities": "tsx scripts/extract-entities.ts"
+    "extract-entities": "tsx scripts/extract-entities.ts",
+    "compact-history": "tsx scripts/compact-history.ts"
   },
   "dependencies": {
     "@hono/mcp": "^0.2.4",
