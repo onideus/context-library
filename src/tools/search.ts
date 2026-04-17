@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { config } from "../config.js";
 import { query } from "../db/client.js";
-import { indexAllHandoffs, indexAllTasks, indexAllNotes } from "../embeddings/indexer.js";
 import { generateEmbedding, isEmbeddingAvailable, rerankResults } from "../embeddings/client.js";
+import { indexAllHandoffs, indexAllTasks, indexAllNotes, drainPendingEmbeddings } from "../embeddings/indexer.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 import { expandQuery } from "./search-aliases.js";
 
@@ -159,6 +159,11 @@ export function registerSearchTools(mcpServer: McpServer): void {
         // Prepend nomic search_query prefix
         const queryText = `search_query: ${expandedQuery}`;
         const embedding = await generateEmbedding(queryText);
+
+        // Opportunistic drain — TEI just confirmed working. Fire-and-forget.
+        drainPendingEmbeddings().catch((err) =>
+          console.warn("[search_context] Pending drain failed:", (err as Error).message)
+        );
         const limit = args.limit ?? 5;
         const rerankerEnabled = Boolean(config.rerankerUrl);
         // When reranking is enabled we widen the candidate pool so the
@@ -416,6 +421,10 @@ export function registerSearchTools(mcpServer: McpServer): void {
 
       const types = args.content_types ?? ["handoff", "task", "note"];
       const results: Record<string, unknown> = {};
+
+      // Drain pending queue first so recovered items aren't re-processed by the full reindex below.
+      const drained = await drainPendingEmbeddings();
+      results.pending_drain = drained;
 
       if (types.includes("handoff")) {
         results.handoffs = await indexAllHandoffs();

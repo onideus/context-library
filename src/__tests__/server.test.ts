@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { rm, mkdir, readdir } from "node:fs/promises";
+import { rm, mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const TEST_PORT = 3199;
@@ -66,7 +66,6 @@ beforeAll(async () => {
   await rm(TEST_DATA_DIR, { recursive: true, force: true });
   await mkdir(TEST_DATA_DIR, { recursive: true });
 
-  // Spawn the server as a child process with test-specific env
   serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
     cwd: process.cwd(),
     env: {
@@ -78,8 +77,10 @@ beforeAll(async () => {
     shell: true,
   });
 
-  // Forward stderr for debugging (optional — uncomment if needed)
-  // serverProcess.stderr?.on("data", (d) => process.stderr.write(d));
+  // Continuously drain child stdio so pipe buffers don't fill and block the
+  // child process when this suite runs alongside other parallel workers.
+  serverProcess.stderr?.on("data", () => {});
+  serverProcess.stdout?.on("data", () => {});
 
   await waitForServer(BASE_URL);
 }, 45_000);
@@ -637,13 +638,13 @@ describe("MCP Tools", () => {
       expect(retrieved.applied_scope).toBe("work");
     });
 
-    it("schema_version is present and is '1.1'", async () => {
+    it("schema_version is present and is '1.2'", async () => {
       const getRes = await mcpPost(
         jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
       );
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
-      expect(retrieved.schema_version).toBe("1.1");
+      expect(retrieved.schema_version).toBe("1.2");
     });
 
     it("handoff_count is a positive integer", async () => {
@@ -666,6 +667,62 @@ describe("MCP Tools", () => {
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
       expect(retrieved.evidence_pulled).toBe(true);
+    });
+
+    it("embedding_status is present with expected shape", async () => {
+      await storeAndVerify({ tone_notes: "embedding_status shape test" });
+
+      const getRes = await mcpPost(
+        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+      );
+      const getData = (await parseSseResponse(getRes)) as any;
+      const retrieved = JSON.parse(getData.result.content[0].text);
+      expect(retrieved.embedding_status).toBeDefined();
+      expect(typeof retrieved.embedding_status.available).toBe("boolean");
+      expect(
+        retrieved.embedding_status.last_success === null ||
+          typeof retrieved.embedding_status.last_success === "string"
+      ).toBe(true);
+      expect(typeof retrieved.embedding_status.pending_count).toBe("number");
+      // pending_count is non-negative; actual value depends on prior test state
+      // (0 when Postgres/table absent, possibly >0 in CI where earlier suites queued items).
+      expect(retrieved.embedding_status.pending_count).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // ────────────────────────────────────────────────
+  // schema_version on stored handoff files
+  // ────────────────────────────────────────────────
+
+  describe("schema_version — stored file contents", () => {
+    it("stored handoff file contains schema_version '1.2'", async () => {
+      const result = await storeAndVerify({ tone_notes: "schema_version file test" });
+      const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
+      const raw = await readFile(filepath, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.schema_version).toBe("1.2");
+    });
+
+    it("patch preserves schema_version on the merged result file", async () => {
+      await storeAndVerify({ tone_notes: "schema pre-patch" });
+
+      const patchRes = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "patch_handoff",
+          arguments: { tone_notes: "schema post-patch" },
+        })
+      );
+      const patchData = (await parseSseResponse(patchRes)) as any;
+      const patchResult = JSON.parse(patchData.result.content[0].text);
+      expect(patchResult.schema_version).toBe("1.2");
+
+      const handoffsDir = join(TEST_DATA_DIR, "handoffs");
+      const files = (await readdir(handoffsDir))
+        .filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-"))
+        .sort();
+      const latestPath = join(handoffsDir, files[files.length - 1]);
+      const parsed = JSON.parse(await readFile(latestPath, "utf-8"));
+      expect(parsed.schema_version).toBe("1.2");
     });
   });
 
@@ -695,7 +752,7 @@ describe("MCP Tools", () => {
         blocked_count: 0,
         completed_count: 2,
       });
-      expect(result.schema_version).toBe("1.1");
+      expect(result.schema_version).toBe("1.2");
     });
 
     it("tool description does not contain 'Overwrites' or 'overwrites'", async () => {
@@ -872,7 +929,7 @@ describe("Handoff Navigation", () => {
       expect(result.tone_notes).toBe("get_handoff target");
       expect(result.active_context.session_meta.label).toBe("get-handoff-test");
       expect(result.applied_scope).toBe("full");
-      expect(result.schema_version).toBe("1.1");
+      expect(result.schema_version).toBe("1.2");
       expect(result.task_summary).toBeDefined();
       expect(typeof result.elapsed_seconds).toBe("number");
     });
