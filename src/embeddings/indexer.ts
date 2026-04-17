@@ -84,6 +84,30 @@ export async function indexTask(
   await indexContent("task", id, text, metadata);
 }
 
+/** Index a single note. */
+export async function indexNote(
+  id: string,
+  note: {
+    title: string;
+    content: string;
+    domain?: string | null;
+    tags?: string[] | null;
+    scope?: string;
+    created_at?: string;
+  }
+): Promise<void> {
+  const tagLine = note.tags?.length ? note.tags.join(", ") : "";
+  const parts = [note.title, note.content, note.domain ?? "", tagLine];
+  const text = parts.filter((p) => p && p.trim()).join("\n");
+  await indexContent("note", id, text, {
+    note_id: id,
+    domain: note.domain ?? null,
+    tags: note.tags ?? [],
+    scope: note.scope ?? null,
+    created_at: note.created_at ?? null,
+  });
+}
+
 /** Bulk index all existing handoff files. For initial backfill. */
 export async function indexAllHandoffs(): Promise<{
   indexed: number;
@@ -156,6 +180,41 @@ export async function indexAllTasks(): Promise<number> {
     } catch (err) {
       console.error(
         `[indexer] Failed to index task ${row.id}:`,
+        (err as Error).message
+      );
+    }
+  }
+
+  return indexed;
+}
+
+/** Bulk index all notes from the notes table. */
+export async function indexAllNotes(): Promise<number> {
+  const result = await query<{
+    id: string;
+    title: string;
+    content: string;
+    domain: string | null;
+    tags: string[];
+    scope: string;
+    created_at: string;
+  }>("SELECT id, title, content, domain, tags, scope, created_at FROM notes");
+
+  let indexed = 0;
+  for (const row of result.rows) {
+    try {
+      await indexNote(row.id, {
+        title: row.title,
+        content: row.content,
+        domain: row.domain,
+        tags: row.tags,
+        scope: row.scope,
+        created_at: row.created_at,
+      });
+      indexed++;
+    } catch (err) {
+      console.error(
+        `[indexer] Failed to index note ${row.id}:`,
         (err as Error).message
       );
     }
