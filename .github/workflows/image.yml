@@ -1,0 +1,70 @@
+name: image
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci-checks.yml
+    secrets:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}
+
+  image:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Read version from package.json
+        id: version
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg APP_VERSION=${{ steps.version.outputs.version }} \
+            -t ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
+            .
+
+      # --exclude-base-image-vulns: ignore CVEs inherited from node:22-slim
+      # (e.g. zlib) that we can't patch ourselves. Snyk will still flag any
+      # vulnerability introduced in our own layers.
+      - name: Snyk container scan
+        uses: snyk/actions/docker@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }}
+          args: --severity-threshold=high --exclude-base-image-vulns
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push SHA-tagged image to GHCR
+        run: docker push ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }}
+
+      - name: Notify on completion
+        if: always()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          curl -s -o /dev/null \
+            -H "Title: Image ${STATUS}: sha-${{ steps.sha.outputs.short_sha }}" \
+            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
+            -H "Tags: $( [ "$STATUS" = "success" ] && echo "white_check_mark" || echo "x" )" \
+            -d "Image build ${STATUS} for sha-${{ steps.sha.outputs.short_sha }}" \
+            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true

@@ -5,21 +5,14 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci-checks.yml
-    secrets:
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      NTFY_URL: ${{ secrets.NTFY_URL }}
-
   release:
-    needs: ci
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -28,32 +21,35 @@ jobs:
         id: version
         run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --build-arg APP_VERSION=${{ steps.version.outputs.tag }} \
-            -t ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }} \
-            -t ghcr.io/onideus/context-library:latest \
-            .
-
-      # --exclude-base-image-vulns: ignore CVEs inherited from node:22-slim
-      # (e.g. zlib) that we can't patch ourselves. Snyk will still flag any
-      # vulnerability introduced in our own layers.
-      - name: Snyk container scan
-        uses: snyk/actions/docker@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
-          args: --severity-threshold=high --exclude-base-image-vulns
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Push to GHCR
+      - name: Verify SHA image exists
         run: |
+          if ! docker pull ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }}; then
+            echo "::error::No validated image found for sha-${{ steps.sha.outputs.short_sha }}. Ensure the commit was merged to main and the image pipeline succeeded before tagging a release."
+            exit 1
+          fi
+
+      - name: Retag and push release tags
+        run: |
+          docker tag \
+            ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
+            ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
+          docker tag \
+            ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
+            ghcr.io/onideus/context-library:latest
           docker push ghcr.io/onideus/context-library:${{ steps.version.outputs.tag }}
           docker push ghcr.io/onideus/context-library:latest
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
 
       - name: Notify on release
         if: always()
@@ -65,5 +61,5 @@ jobs:
             -H "Title: Release ${STATUS}: v${{ steps.version.outputs.tag }}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
-            -d "Context Library v${{ steps.version.outputs.tag }} — image $( [ "$STATUS" = "success" ] && echo 'published to GHCR' || echo 'FAILED to publish' )" \
+            -d "Context Library v${{ steps.version.outputs.tag }} — release $( [ "$STATUS" = "success" ] && echo 'published' || echo 'FAILED' )" \
             "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true

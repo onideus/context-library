@@ -1,0 +1,92 @@
+name: cleanup
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+env:
+  OWNER: onideus
+  PACKAGE: context-library
+  RETENTION_DAYS: 90
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Prune old SHA-tagged images
+        id: prune
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cutoff_epoch=$(date -u -d "${RETENTION_DAYS} days ago" +%s)
+          pruned=0
+          preserved=0
+
+          gh api --paginate \
+            "/users/${OWNER}/packages/container/${PACKAGE}/versions" \
+            > versions.json
+
+          while read -r version; do
+            id=$(echo "$version" | jq -r '.id')
+            updated=$(echo "$version" | jq -r '.updated_at')
+            tags_csv=$(echo "$version" | jq -r '[.metadata.container.tags[]?] | join(",")')
+
+            if [ -z "$tags_csv" ]; then
+              echo "SKIP id=$id — untagged version"
+              continue
+            fi
+
+            has_release_tag=false
+            while IFS= read -r t; do
+              [ -z "$t" ] && continue
+              case "$t" in
+                sha-*) : ;;
+                *) has_release_tag=true ;;
+              esac
+            done < <(echo "$version" | jq -r '.metadata.container.tags[]?')
+
+            if $has_release_tag; then
+              echo "PRESERVE id=$id tags=[$tags_csv] — referenced by release"
+              preserved=$((preserved + 1))
+              continue
+            fi
+
+            updated_epoch=$(date -u -d "$updated" +%s)
+            if [ "$updated_epoch" -ge "$cutoff_epoch" ]; then
+              echo "PRESERVE id=$id tags=[$tags_csv] — within ${RETENTION_DAYS}-day retention window"
+              preserved=$((preserved + 1))
+              continue
+            fi
+
+            echo "PRUNE id=$id tags=[$tags_csv] updated=$updated"
+            gh api --method DELETE \
+              "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}"
+            pruned=$((pruned + 1))
+          done < <(jq -c '.[]' versions.json)
+
+          echo "Summary: pruned=${pruned}, preserved=${preserved}"
+          echo "pruned=${pruned}" >> "$GITHUB_OUTPUT"
+          echo "preserved=${preserved}" >> "$GITHUB_OUTPUT"
+
+      - name: Notify on completion
+        if: always()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          PRUNED="${{ steps.prune.outputs.pruned || '?' }}"
+          PRESERVED="${{ steps.prune.outputs.preserved || '?' }}"
+          curl -s -o /dev/null \
+            -H "Title: GHCR cleanup ${STATUS}" \
+            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
+            -H "Tags: $( [ "$STATUS" = "success" ] && echo "broom" || echo "x" )" \
+            -d "Pruned ${PRUNED}, preserved ${PRESERVED}" \
+            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
