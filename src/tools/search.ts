@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
 import { generateEmbedding, isEmbeddingAvailable } from "../embeddings/client.js";
-import { indexAllHandoffs, indexAllTasks } from "../embeddings/indexer.js";
+import { indexAllHandoffs, indexAllTasks, indexAllNotes } from "../embeddings/indexer.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 
 /**
@@ -87,14 +87,14 @@ Response Format:
 - Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
 - Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
 
-const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs and tasks. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
+const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs, tasks, and notes. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
 
 WARNING: Can take several minutes for large datasets (1000+ handoffs). Re-embeds all content, not just changed items. Inform the user of expected duration before running.
 
 Parameters:
-  - content_types (optional): Which to reindex. Default: all. Options: 'handoff', 'task'
+  - content_types (optional): Which to reindex. Default: all. Options: 'handoff', 'task', 'note'
 
-Returns: {handoffs: {indexed, skipped, errors}, tasks: {indexed}}`;
+Returns: {handoffs: {indexed, skipped, errors}, tasks: {indexed}, notes: {indexed}}`;
 
 export function registerSearchTools(mcpServer: McpServer): void {
   // \u2500\u2500 search_context \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -104,7 +104,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
     {
       query: z.string().describe("Natural language search query"),
       content_types: z
-        .array(z.enum(["handoff", "task", "document", "transcript"]))
+        .array(z.enum(["handoff", "task", "note", "document", "transcript"]))
         .optional()
         .describe("Filter by content type. Default: search all."),
       limit: z
@@ -295,7 +295,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
     REINDEX_DESCRIPTION,
     {
       content_types: z
-        .array(z.enum(["handoff", "task"]))
+        .array(z.enum(["handoff", "task", "note"]))
         .optional()
         .describe("Which types to reindex. Default: all."),
     },
@@ -314,7 +314,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
         };
       }
 
-      const types = args.content_types ?? ["handoff", "task"];
+      const types = args.content_types ?? ["handoff", "task", "note"];
       const results: Record<string, unknown> = {};
 
       if (types.includes("handoff")) {
@@ -324,6 +324,11 @@ export function registerSearchTools(mcpServer: McpServer): void {
       if (types.includes("task")) {
         const count = await indexAllTasks();
         results.tasks = { indexed: count };
+      }
+
+      if (types.includes("note")) {
+        const count = await indexAllNotes();
+        results.notes = { indexed: count };
       }
 
       return {
