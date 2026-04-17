@@ -227,15 +227,23 @@ curl http://localhost:3100/health
 
 ## External Access with Auth Proxy
 
-To expose Context Library to the internet (required for Claude.ai and other hosted MCP clients), you need two things: an OAuth proxy and a tunnel or reverse proxy.
+To expose Context Library to the internet (required for Claude.ai and other hosted MCP clients), use the auth compose overlay. It bundles [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) (OAuth 2.1 gateway) and a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) connector so the full ingress chain is managed as a single stack:
+
+```
+Internet → cloudflared → mcp-auth-proxy:443 → context-library:3100
+```
 
 ### Auth Proxy Setup
 
-The included `docker-compose.auth.yml` adds [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) as an OAuth 2.1 gateway.
-
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.auth.yml up -d
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.postgres.yml \
+  -f docker-compose.auth.yml \
+  up -d
 ```
+
+For deployments that also need embeddings, add `-f docker-compose.embeddings.yml --profile embeddings-cpu` (or `embeddings-gpu`).
 
 **Required setup:**
 
@@ -255,35 +263,15 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 3. **Client Registration Data:**
    Once MCP clients (Claude.ai, Claude Desktop, etc.) authenticate through the proxy, their OAuth client registrations are stored in `./proxy-data/`. This directory must be preserved across deployments — losing it means all connected clients will need to re-register.
 
-### Tunnel / Reverse Proxy
+### Cloudflare Tunnel
 
-Context Library does not include a tunnel in the public compose files — tunnel configuration is deployment-specific. Here's an example using Cloudflare Tunnel:
+The `cloudflared` service in `docker-compose.auth.yml` uses named-tunnel (token) mode — routing is configured in the Cloudflare dashboard, not in local files. To wire up a deployment:
 
-```yaml
-# docker-compose.cloudflared.yml (deployment-specific, not committed)
-services:
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: context-library-tunnel
-    restart: unless-stopped
-    command: tunnel run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    depends_on:
-      - mcp-auth-proxy
-```
+1. In the Cloudflare dashboard, go to **Zero Trust → Networks → Tunnels** and create a new tunnel.
+2. Configure the tunnel's public hostname to point to `https://mcp-auth-proxy:443` — this works because `cloudflared` runs on the same Docker network as the proxy and resolves the service name directly (no host IP needed).
+3. Copy the tunnel token from the dashboard into `TUNNEL_TOKEN` in your `.env`.
 
-Start with:
-```bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.postgres.yml \
-  -f docker-compose.auth.yml \
-  -f docker-compose.cloudflared.yml \
-  up -d
-```
-
-> **Note:** When using `TUNNEL_TOKEN`, the tunnel configuration is managed in the Cloudflare dashboard, not in a local config file. The dashboard config takes precedence. Point the tunnel's public hostname to `https://mcp-auth-proxy:443`.
+Because routing lives in the dashboard, domain names and tunnel IDs stay out of the repo. `cloudflared` makes outbound-only connections to Cloudflare's edge, so no inbound ports need to be published on the host.
 
 ## Release Workflow
 
@@ -439,6 +427,7 @@ See `.env.example` for all configuration options.
 | `AUTH0_CLIENT_SECRET` | OAuth client secret |
 | `ALLOWED_USERS` | Comma-separated list of authorized email addresses |
 | `EXTERNAL_URL` | Public-facing URL (e.g., `https://your-domain.com`) |
+| `TUNNEL_TOKEN` | Cloudflare named-tunnel token (routing configured in the Cloudflare dashboard) |
 
 ## License
 
