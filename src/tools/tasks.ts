@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
 import { indexTask } from "../embeddings/indexer.js";
+import { validateStringLength, PayloadTooLargeError, LIMITS } from "./validation.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -49,6 +50,31 @@ function errorResponse(message: string, code: string) {
   return jsonResponse({ error: true, message, code });
 }
 
+function payloadTooLargeResponse(err: PayloadTooLargeError) {
+  return jsonResponse({
+    error: true,
+    code: "PAYLOAD_TOO_LARGE",
+    message: err.message,
+    field: err.field,
+    actual: err.actual,
+    max: err.max,
+  });
+}
+
+function validateTaskFields(args: {
+  title?: string;
+  context?: string | null;
+  blocked_reason?: string | null;
+}): void {
+  validateStringLength(args.title, LIMITS.TASK_TITLE_CHARS, "title");
+  validateStringLength(args.context, LIMITS.TASK_CONTEXT_CHARS, "context");
+  validateStringLength(
+    args.blocked_reason,
+    LIMITS.TASK_BLOCKED_REASON_CHARS,
+    "blocked_reason"
+  );
+}
+
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const statusEnum = z.enum(["open", "completed", "deferred", "cancelled"]);
@@ -69,13 +95,17 @@ const LIST_TASKS_DESC = `List tasks with optional filters. Defaults to showing o
 
 WHEN TO PULL TASKS: Before any evaluative response (performance reviews, weekly check-ins, compensation assessments, progress reports), pull task data to ground your assessment in tracked work — not memory alone.
 
+SCOPE AWARENESS: If you called get_latest_handoff with a scope filter (work or personal), apply the same scope here unless the user explicitly asks for cross-scope results. Staying inside the session's scope prevents leaking personal items into a work-scoped response (and vice versa).
+
 This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems.`;
 
 const UPDATE_TASK_DESC = `Update a task's fields and/or apply a lifecycle action. Actions are convenience shortcuts: 'complete' marks done with timestamp, 'cancel' marks cancelled, 'defer' parks the task, 'reopen' returns to open. Field updates can accompany any action. Tags are full-replacement (provide complete array). Set blocked_reason to null to unblock.`;
 
 const SEARCH_TASKS_DESC = `Full-text search across task titles and context. Uses PostgreSQL FTS with English stemming. Filter by status and scope. Results ranked by relevance.
 
-WHEN TO SEARCH TASKS: When a request mentions a task by keyword, when preparing evaluative responses (reviews, assessments), or when you need to verify task status before making recommendations. Use this when exact title is unknown — list_tasks is better when you want filtered browsing.`;
+WHEN TO SEARCH TASKS: When a request mentions a task by keyword, when preparing evaluative responses (reviews, assessments), or when you need to verify task status before making recommendations. Use this when exact title is unknown — list_tasks is better when you want filtered browsing.
+
+SCOPE AWARENESS: If you called get_latest_handoff with a scope filter (work or personal), apply the same scope here unless the user explicitly asks for cross-scope results. Staying inside the session's scope prevents leaking personal items into a work-scoped response (and vice versa).`;
 
 // ── Tool Registration ────────────────────────────────────────────
 
@@ -97,6 +127,13 @@ export function registerTaskTools(mcpServer: McpServer): void {
     async (args) => {
       if (!args.title?.trim()) {
         return errorResponse("title is required", "VALIDATION_ERROR");
+      }
+
+      try {
+        validateTaskFields(args);
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) return payloadTooLargeResponse(err);
+        throw err;
       }
 
       try {
@@ -284,6 +321,13 @@ export function registerTaskTools(mcpServer: McpServer): void {
       due_date: z.string().nullable().optional().describe("New due date, or null to clear"),
     },
     async (args) => {
+      try {
+        validateTaskFields(args);
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) return payloadTooLargeResponse(err);
+        throw err;
+      }
+
       try {
         // Check task exists
         const existing = await query<TaskRow>(
