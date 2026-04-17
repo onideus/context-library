@@ -43,6 +43,10 @@ jobs:
       # collapsing "--severity-threshold=high --exclude-base-image-vulns" into
       # one unparseable token and silently dropping the base-image exclusion.
       # Install the CLI and invoke it directly so flags word-split correctly.
+      # --file: Snyk can't identify the base image from a registry image alone,
+      # so --exclude-base-image-vulns has nothing to exclude against. Pointing
+      # at the Dockerfile lets Snyk resolve the FROM line and attribute vulns
+      # correctly. Without this, the zlib CVE from node:22-slim fails the scan.
       # --exclude-base-image-vulns: ignore CVEs inherited from node:22-slim
       # (e.g. zlib) that we can't patch ourselves. Snyk still flags vulns
       # introduced in our own layers.
@@ -55,6 +59,7 @@ jobs:
         run: |
           snyk container test \
             ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
+            --file=Dockerfile \
             --severity-threshold=high \
             --exclude-base-image-vulns
 
