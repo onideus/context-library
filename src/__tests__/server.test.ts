@@ -653,6 +653,17 @@ describe("MCP Tools", () => {
       expect(retrieved.handoff_count).toBeGreaterThan(0);
       expect(Number.isInteger(retrieved.handoff_count)).toBe(true);
     });
+
+    it("evidence_pulled is true when a handoff is successfully loaded", async () => {
+      await storeAndVerify({ tone_notes: "evidence_pulled test" });
+
+      const getRes = await mcpPost(
+        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+      );
+      const getData = (await parseSseResponse(getRes)) as any;
+      const retrieved = JSON.parse(getData.result.content[0].text);
+      expect(retrieved.evidence_pulled).toBe(true);
+    });
   });
 
   // ────────────────────────────────────────────────

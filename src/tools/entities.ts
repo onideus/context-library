@@ -49,6 +49,10 @@ export function emptyEnvelope(): ContextEnvelope {
  * Look up entities that appear in the given texts.
  * Matches case-insensitively against canonical_name and aliases.
  * Returns empty array if DB is unavailable (graceful degradation).
+ *
+ * Side effect: when entities are matched, their `last_referenced` column is
+ * updated to NOW() via a single batched UPDATE. Failures are swallowed —
+ * bookkeeping must never fail an active search.
  */
 export async function lookupEntities(texts: string[]): Promise<EntityInfo[]> {
   if (texts.length === 0) return [];
@@ -85,6 +89,17 @@ export async function lookupEntities(texts: string[]): Promise<EntityInfo[]> {
           aliases: row.aliases || [],
           constraints: row.constraints || [],
         });
+      }
+    }
+
+    if (matched.length > 0) {
+      try {
+        await queryFn(
+          "UPDATE entities SET last_referenced = NOW() WHERE canonical_name = ANY($1)",
+          [matched.map((e) => e.canonical_name)]
+        );
+      } catch {
+        // Non-fatal — bookkeeping failure must not break search
       }
     }
 

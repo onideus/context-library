@@ -10,7 +10,7 @@ export const HandoffSchema = z
         mood: z.string().optional(),
       })
       .optional(),
-    active_context: z.record(z.string(), z.any()).optional(),
+    active_context: z.record(z.string(), z.unknown()).optional(),
     tasks: z
       .object({
         completed: z.array(z.string()).optional(),
