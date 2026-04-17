@@ -72,10 +72,16 @@ export async function indexTask(
   context: string | null,
   scope: string,
   tags: string[],
-  status: string
+  status: string,
+  createdAt?: Date | string | null
 ): Promise<void> {
   const text = [title, context].filter(Boolean).join("\n");
-  await indexContent("task", id, text, { scope, tags, status });
+  const metadata: Record<string, unknown> = { scope, tags, status };
+  if (createdAt) {
+    metadata.created_at =
+      createdAt instanceof Date ? createdAt.toISOString() : createdAt;
+  }
+  await indexContent("task", id, text, metadata);
 }
 
 /** Index a single note. */
@@ -155,7 +161,8 @@ export async function indexAllTasks(): Promise<number> {
     scope: string;
     tags: string[];
     status: string;
-  }>("SELECT id, title, context, scope, tags, status FROM tasks");
+    created_at: Date;
+  }>("SELECT id, title, context, scope, tags, status, created_at FROM tasks");
 
   let indexed = 0;
   for (const row of result.rows) {
@@ -166,7 +173,8 @@ export async function indexAllTasks(): Promise<number> {
         row.context,
         row.scope,
         row.tags,
-        row.status
+        row.status,
+        row.created_at
       );
       indexed++;
     } catch (err) {
