@@ -5,7 +5,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { config } from "./config.js";
 import { registerHandoffTools } from "./tools/handoff.js";
+import { registerHandoffNavTools } from "./tools/handoff-nav.js";
 import { registerTaskTools } from "./tools/tasks.js";
+import { registerNoteTools } from "./tools/notes.js";
 import { registerSearchTools } from "./tools/search.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
@@ -79,7 +81,9 @@ function createMcpServer(): McpServer {
     version,
   });
   registerHandoffTools(server);
+  registerHandoffNavTools(server);
   registerTaskTools(server);
+  registerNoteTools(server);
   registerSearchTools(server);
   return server;
 }

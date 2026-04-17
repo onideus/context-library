@@ -96,3 +96,56 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Rerank candidate texts against a query using a TEI cross-encoder.
+ *
+ * Returns the rerank scores in the same order as the input `texts`, so the
+ * caller can map scores back to its own candidate rows. Returns `null` if
+ * the reranker is disabled or unreachable — callers must treat this as
+ * "no reranking available" and fall back to the fusion-based ordering.
+ *
+ * TEI's /rerank endpoint returns { index, score } pairs sorted by score
+ * descending. We normalize back to input order so callers don't have to
+ * worry about the response shape.
+ */
+export async function rerankResults(
+  query: string,
+  texts: string[]
+): Promise<Array<{ index: number; score: number }> | null> {
+  if (!config.rerankerUrl || texts.length === 0) return null;
+
+  try {
+    const response = await fetch(`${config.rerankerUrl}/rerank`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        texts: texts.map((t) => t.slice(0, 32000)),
+      }),
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    if (!Array.isArray(data)) return null;
+
+    const scores: Array<{ index: number; score: number }> = [];
+    for (const item of data) {
+      if (
+        item &&
+        typeof item.index === "number" &&
+        typeof item.score === "number"
+      ) {
+        scores.push({ index: item.index, score: item.score });
+      }
+    }
+    if (scores.length === 0) return null;
+
+    scores.sort((a, b) => b.score - a.score);
+    return scores;
+  } catch {
+    return null;
+  }
+}

@@ -53,10 +53,11 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - Tool description updates for new capabilities
 - Version bump to 0.5.4
 
-## Next: v0.6 — Resilience & Retrieval
+## Next: v0.6 — Resilience, Retrieval & Knowledge
 
-Focus: make the system self-healing, observable, and harder to misuse.
+Focus: make the system self-healing, observable, harder to misuse — and introduce the third primitive.
 
+- **Knowledge layer (third primitive):** `notes` table in PostgreSQL with MCP tools (`create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`); embedded into pgvector for unified semantic search; `'note'` added to `search_context` `content_types`; distinct from artifacts — knowledge is interpretation, not output
 - **Embedding resilience:** `embedding_status` field in `get_latest_handoff` response (TEI health + pending count); pending embeddings queue with dead-letter pattern for TEI outage recovery (O(k) recovery vs O(n) full reindex)
 - **Handoff navigation:** `list_handoffs` and `get_handoff` MCP tools for historical handoff browsing and retrieval
 - **Dynamic task summary:** Server-side computed task summary in `get_latest_handoff` — critical items, due this week, recently completed, blocked chains (replaces basic counts)
@@ -67,9 +68,8 @@ Focus: make the system self-healing, observable, and harder to misuse.
 
 ## Future: v0.7 — New Primitives
 
-Focus: expand beyond handoffs and tasks into permanent knowledge and richer structure.
+Focus: expand beyond the three primitives into richer structure and artifact storage.
 
-- **Knowledge layer (third primitive):** `notes` table in PostgreSQL with MCP tools (`create_note`, `search_notes`, `list_notes`, `get_note`); embedded into pgvector for unified semantic search; distinct from artifacts — knowledge is interpretation, not output
 - **Artifact storage:** File/content tracking with metadata, SHA-256 hashing, and versioning; prompt library via tagging convention
 - **Task schema evolution:** Subtasks (parent_id), relations (blocks/blocked-by/related), custom fields (JSONB UDAs); hierarchy is opt-in, flat tasks remain the default
 - **Bitemporal entity constraints:** `valid_from`/`valid_until` on entities to prevent stale constraint application

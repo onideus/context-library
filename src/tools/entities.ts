@@ -31,6 +31,19 @@ interface EntityRow {
   constraints: string[];
 }
 
+// ── Matching helpers ─────────────────────────────────────────────
+
+/**
+ * Word-boundary-aware case-insensitive match. Avoids substring false
+ * positives like "Ian" matching "Kubernetes" or "CB" matching "SCBRS".
+ * Exported for unit testing.
+ */
+export function matchesWordBoundary(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`\\b${escaped}\\b`, "i");
+  return pattern.test(text);
+}
+
 // ── Empty Envelope ───────────────────────────────────────────────
 
 export function emptyEnvelope(): ContextEnvelope {
@@ -73,15 +86,17 @@ export async function lookupEntities(texts: string[]): Promise<EntityInfo[]> {
 
     if (result.rows.length === 0) return [];
 
-    // Combine all texts into one searchable blob for matching
-    const combined = texts.join("\n").toLowerCase();
+    // Combine all texts into one searchable blob for matching.
+    // We keep original case since matchesWordBoundary is case-insensitive;
+    // lowercasing throws away boundary info for things like "CamelCase".
+    const combined = texts.join("\n");
 
     const matched: EntityInfo[] = [];
     for (const row of result.rows) {
-      const names = [row.canonical_name, ...(row.aliases || [])];
-      const found = names.some(
-        (name) => combined.includes(name.toLowerCase())
-      );
+      const names = [row.canonical_name, ...(row.aliases || [])]
+        // Single-character names are too ambiguous — too many false positives.
+        .filter((n) => typeof n === "string" && n.length > 1);
+      const found = names.some((name) => matchesWordBoundary(combined, name));
       if (found) {
         matched.push({
           canonical_name: row.canonical_name,

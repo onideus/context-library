@@ -606,7 +606,12 @@ describe("MCP Tools", () => {
       expect(retrieved.same_calendar_day).toBe(true);
     });
 
-    it("task_summary counts match actual array lengths", async () => {
+    it("task_summary exposes numeric counts (shape is stable across fallback and dynamic sources)", async () => {
+      // When Postgres is unavailable, task_summary is the fallback shape derived from handoff
+      // arrays: {open_count, blocked_count, completed_count}. When Postgres is available, counts
+      // come from the tasks table and the shape is enriched with item arrays. This test asserts
+      // the minimum contract both paths share. Exact-count fallback behavior is covered by the
+      // patch_handoff "task_summary counts in response" test, which stays on handoff arrays.
       await storeAndVerify({
         tasks: { open: ["x", "y"], completed: ["z"], blocked: [] },
       });
@@ -616,11 +621,9 @@ describe("MCP Tools", () => {
       );
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
-      expect(retrieved.task_summary).toEqual({
-        open_count: 2,
-        blocked_count: 0,
-        completed_count: 1,
-      });
+      expect(typeof retrieved.task_summary.open_count).toBe("number");
+      expect(typeof retrieved.task_summary.blocked_count).toBe("number");
+      expect(typeof retrieved.task_summary.completed_count).toBe("number");
     });
 
     it("applied_scope matches requested scope", async () => {
@@ -764,8 +767,250 @@ describe("MCP Tools", () => {
 });
 
 // ────────────────────────────────────────────────
+// list_handoffs / get_handoff tests
+// ────────────────────────────────────────────────
+
+describe("Handoff Navigation", () => {
+  describe("list_handoffs", () => {
+    it("appears in tools/list", async () => {
+      const res = await mcpPost(jsonrpc("tools/list"));
+      const data = (await parseSseResponse(res)) as any;
+      const toolNames: string[] = data.result.tools.map((t: any) => t.name);
+      expect(toolNames).toContain("list_handoffs");
+      expect(toolNames).toContain("get_handoff");
+    });
+
+    it("returns metadata array (not full content) sorted newest first", async () => {
+      // Store two handoffs with distinct content
+      await storeAndVerify({
+        tone_notes: "older",
+        active_context: { session_meta: { label: "list-test-older" } },
+        tasks: { open: ["a"], completed: [], blocked: [] },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      await storeAndVerify({
+        tone_notes: "newer",
+        active_context: { session_meta: { label: "list-test-newer" } },
+      });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "list_handoffs", arguments: { limit: 5 } })
+      );
+      expect(res.status).toBe(200);
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+
+      expect(Array.isArray(result.handoffs)).toBe(true);
+      expect(result.handoffs.length).toBeGreaterThan(0);
+      expect(typeof result.total_count).toBe("number");
+      expect(result.limit).toBe(5);
+      expect(result.offset).toBe(0);
+
+      // Metadata-only shape — no tone_notes or operational_state
+      const entry = result.handoffs[0];
+      expect(entry).toHaveProperty("filename");
+      expect(entry).toHaveProperty("stored_at");
+      expect(entry).toHaveProperty("session_label");
+      expect(entry).toHaveProperty("size_bytes");
+      expect(entry).toHaveProperty("has_tasks");
+      expect(entry).toHaveProperty("schema_version");
+      expect(entry).not.toHaveProperty("tone_notes");
+      expect(entry).not.toHaveProperty("operational_state");
+
+      // Newest-first ordering — find both known labels and confirm newer precedes older
+      const labels = result.handoffs.map((h: any) => h.session_label);
+      const newerIdx = labels.indexOf("list-test-newer");
+      const olderIdx = labels.indexOf("list-test-older");
+      expect(newerIdx).toBeGreaterThanOrEqual(0);
+      expect(olderIdx).toBeGreaterThanOrEqual(0);
+      expect(newerIdx).toBeLessThan(olderIdx);
+    });
+
+    it("extracts session_label and has_tasks correctly", async () => {
+      await storeAndVerify({
+        active_context: { session_meta: { label: "meta-label-test" } },
+        tasks: { open: ["x"], completed: [], blocked: [] },
+      });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "list_handoffs",
+          arguments: { limit: 10 },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      const match = result.handoffs.find(
+        (h: any) => h.session_label === "meta-label-test"
+      );
+      expect(match).toBeDefined();
+      expect(match.has_tasks).toBe(true);
+      expect(match.size_bytes).toBeGreaterThan(0);
+    });
+
+    it("applies pagination with limit and offset", async () => {
+      const resPage1 = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "list_handoffs",
+          arguments: { limit: 1, offset: 0 },
+        })
+      );
+      const dataPage1 = (await parseSseResponse(resPage1)) as any;
+      const page1 = JSON.parse(dataPage1.result.content[0].text);
+      expect(page1.handoffs.length).toBe(1);
+      expect(page1.limit).toBe(1);
+      expect(page1.offset).toBe(0);
+
+      const resPage2 = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "list_handoffs",
+          arguments: { limit: 1, offset: 1 },
+        })
+      );
+      const dataPage2 = (await parseSseResponse(resPage2)) as any;
+      const page2 = JSON.parse(dataPage2.result.content[0].text);
+      expect(page2.offset).toBe(1);
+
+      if (page1.total_count > 1) {
+        expect(page1.handoffs[0].filename).not.toBe(page2.handoffs[0].filename);
+      }
+    });
+
+    it("filters by after date", async () => {
+      // Everything stored is "after the epoch" — verify filter excludes handoffs before a future date
+      const future = new Date(Date.now() + 1000 * 60 * 60).toISOString();
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "list_handoffs",
+          arguments: { after: future },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.handoffs.length).toBe(0);
+      expect(result.total_count).toBe(0);
+    });
+
+    it("filters by before date", async () => {
+      const past = new Date(0).toISOString();
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "list_handoffs",
+          arguments: { before: past },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.handoffs.length).toBe(0);
+      expect(result.total_count).toBe(0);
+    });
+  });
+
+  describe("get_handoff", () => {
+    it("retrieves a specific handoff by filename", async () => {
+      const stored = await storeAndVerify({
+        tone_notes: "get_handoff target",
+        active_context: { session_meta: { label: "get-handoff-test" } },
+        tasks: { open: ["foo"], completed: [], blocked: [] },
+      });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "get_handoff",
+          arguments: { filename: stored.filename },
+        })
+      );
+      expect(res.status).toBe(200);
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+
+      expect(result.error).toBeUndefined();
+      expect(result.tone_notes).toBe("get_handoff target");
+      expect(result.active_context.session_meta.label).toBe("get-handoff-test");
+      expect(result.applied_scope).toBe("full");
+      expect(result.schema_version).toBe("1.2");
+      expect(result.task_summary).toBeDefined();
+      expect(typeof result.elapsed_seconds).toBe("number");
+    });
+
+    it("applies scope filtering", async () => {
+      const stored = await storeAndVerify({
+        operational_state: { sleep_hours: "7", mood: "ok" },
+        tone_notes: "scope filter",
+        tasks: { open: ["t"], completed: [], blocked: [] },
+      });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "get_handoff",
+          arguments: { filename: stored.filename, scope: "work" },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.applied_scope).toBe("work");
+      expect(result.filtered_fields).toBeDefined();
+      // sleep_hours is personal — should be filtered out under 'work' scope
+      expect(result.filtered_fields).toContain("operational_state.sleep_hours");
+    });
+
+    it("returns NOT_FOUND for unknown filename", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "get_handoff",
+          arguments: {
+            filename: "2099-01-01T00-00-00-000Z-deadbeef.json",
+          },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NOT_FOUND");
+    });
+
+    it("rejects path traversal attempts", async () => {
+      const attempts = [
+        "../../../etc/passwd",
+        "../secret.json",
+        "sub/dir.json",
+        "..\\windows\\file.json",
+        "not-a-valid-handoff.json",
+      ];
+      for (const filename of attempts) {
+        const res = await mcpPost(
+          jsonrpc("tools/call", {
+            name: "get_handoff",
+            arguments: { filename },
+          })
+        );
+        const data = (await parseSseResponse(res)) as any;
+        const result = JSON.parse(data.result.content[0].text);
+        expect(result.error).toBe(true);
+        expect(result.code).toBe("NOT_FOUND");
+      }
+    });
+  });
+});
+
+// ────────────────────────────────────────────────
 // Embedding unavailability tests
 // ────────────────────────────────────────────────
+
+describe("search_context — schema (v0.6)", () => {
+  it("exposes after and before date-range parameters", async () => {
+    const listRes = await mcpPost(jsonrpc("tools/list"));
+    const listData = (await parseSseResponse(listRes)) as any;
+    const searchTool = listData.result.tools.find((t: any) => t.name === "search_context");
+    expect(searchTool).toBeDefined();
+    const props = searchTool.inputSchema?.properties ?? {};
+    expect(props.after).toBeDefined();
+    expect(props.before).toBeDefined();
+    // Descriptions mention the time-window use case
+    expect(searchTool.description).toMatch(/after/i);
+    expect(searchTool.description).toMatch(/before/i);
+  });
+});
 
 describe("search_context — graceful degradation", () => {
   it("returns EMBEDDING_UNAVAILABLE when embedding server is not running", async () => {

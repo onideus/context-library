@@ -550,4 +550,116 @@ describe.skipIf(!pgAvailable)("Task Tools", () => {
       expect(result.code).toBe("VALIDATION_ERROR");
     });
   });
+
+  describe("dynamic task_summary in get_latest_handoff", () => {
+    it("returns enriched task_summary from Postgres (counts + item arrays)", async () => {
+      // Seed a known mix of tasks
+      const critical = await callTool("create_task", {
+        title: "Critical task summary test",
+        scope: "work",
+        priority: "critical",
+        due_date: "2099-01-15",
+      });
+      const blocked = await callTool("create_task", {
+        title: "Blocked task summary test",
+        scope: "work",
+        blocked_reason: "Waiting for upstream",
+      });
+      const toComplete = await callTool("create_task", {
+        title: "Recently completed summary test",
+        scope: "work",
+      });
+      await callTool("update_task", { id: toComplete.id, action: "complete" });
+
+      // Due this week — use a date 3 days out
+      const threeDaysOut = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      await callTool("create_task", {
+        title: "Due this week summary test",
+        scope: "work",
+        due_date: threeDaysOut,
+      });
+
+      // Store a handoff so get_latest_handoff has something to return
+      await callTool("store_handoff", {
+        tone_notes: "dynamic summary test",
+      });
+
+      const result = await callTool("get_latest_handoff", {});
+      const ts = result.task_summary;
+
+      // Enriched shape present
+      expect(Array.isArray(ts.critical_items)).toBe(true);
+      expect(Array.isArray(ts.due_this_week)).toBe(true);
+      expect(Array.isArray(ts.recently_completed)).toBe(true);
+      expect(Array.isArray(ts.blocked_items)).toBe(true);
+      expect(typeof ts.open_count).toBe("number");
+      expect(typeof ts.blocked_count).toBe("number");
+      expect(typeof ts.completed_count).toBe("number");
+
+      // Counts reflect Postgres, not handoff arrays (which were empty)
+      expect(ts.open_count).toBeGreaterThan(0);
+      expect(ts.completed_count).toBeGreaterThan(0);
+      expect(ts.blocked_count).toBeGreaterThan(0);
+
+      // Critical item surfaced
+      expect(ts.critical_items.some((i: any) => i.id === critical.id)).toBe(true);
+      // Blocked item surfaced with reason
+      const blockedItem = ts.blocked_items.find((i: any) => i.id === blocked.id);
+      expect(blockedItem).toBeDefined();
+      expect(blockedItem.blocked_reason).toBe("Waiting for upstream");
+      // Recently completed surfaced
+      expect(
+        ts.recently_completed.some((i: any) => i.id === toComplete.id)
+      ).toBe(true);
+      // Due this week surfaced
+      expect(
+        ts.due_this_week.some((i: any) => i.title === "Due this week summary test")
+      ).toBe(true);
+    });
+
+    it("due_this_week excludes tasks due beyond 7 days", async () => {
+      const farOut = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const created = await callTool("create_task", {
+        title: "Far future due date test xyz987",
+        scope: "work",
+        due_date: farOut,
+      });
+
+      await callTool("store_handoff", {});
+      const result = await callTool("get_latest_handoff", {});
+      const ts = result.task_summary;
+
+      expect(ts.due_this_week.every((i: any) => i.id !== created.id)).toBe(true);
+    });
+
+    it("recently_completed is ordered newest first", async () => {
+      const first = await callTool("create_task", {
+        title: "Complete-order-first",
+        scope: "work",
+      });
+      await callTool("update_task", { id: first.id, action: "complete" });
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      const second = await callTool("create_task", {
+        title: "Complete-order-second",
+        scope: "work",
+      });
+      await callTool("update_task", { id: second.id, action: "complete" });
+
+      await callTool("store_handoff", {});
+      const result = await callTool("get_latest_handoff", {});
+      const rc = result.task_summary.recently_completed;
+
+      const firstIdx = rc.findIndex((i: any) => i.id === first.id);
+      const secondIdx = rc.findIndex((i: any) => i.id === second.id);
+      expect(secondIdx).toBeGreaterThanOrEqual(0);
+      expect(firstIdx).toBeGreaterThanOrEqual(0);
+      expect(secondIdx).toBeLessThan(firstIdx);
+    });
+  });
 });
