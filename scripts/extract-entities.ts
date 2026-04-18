@@ -28,21 +28,14 @@ import { readdir, readFile, writeFile, access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
+import { mergeEntities, type EntitySeed, type Scope } from "./merge-entities.js";
+
+export { mergeEntities, type EntitySeed, type Scope } from "./merge-entities.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const BATCH_SIZE = 8;
 
 // ── Types ─────────────────────────────────────────────────────────
-
-type Scope = "work" | "personal" | "shared";
-
-interface EntitySeed {
-  canonical_name: string;
-  scope: Scope;
-  aliases: string[];
-  constraints: string[];
-  confidence?: number;
-}
 
 interface Summary {
   handoffs_read: number;
@@ -121,77 +114,8 @@ async function readExistingSeed(path: string): Promise<EntitySeed[]> {
 }
 
 // ── Merge logic (pure, testable) ──────────────────────────────────
-
-/**
- * Idempotent merge of freshly extracted entities into an existing seed list.
- * - New entities are added.
- * - Existing entities preserve human-edited constraints (constraints are not
- *   overwritten). Aliases are union-merged. Scope is preserved from the
- *   existing entry unless the existing entry has no scope set.
- * - No entry is ever deleted.
- *
- * Comparison is case-insensitive on canonical_name.
- */
-export function mergeEntities(
-  existing: EntitySeed[],
-  fresh: EntitySeed[]
-): { merged: EntitySeed[]; added: number; updated: number; aliasesAdded: number } {
-  const byKey = new Map<string, EntitySeed>();
-  const order: string[] = [];
-
-  for (const e of existing) {
-    const key = e.canonical_name.toLowerCase();
-    byKey.set(key, {
-      canonical_name: e.canonical_name,
-      scope: e.scope,
-      aliases: Array.isArray(e.aliases) ? [...e.aliases] : [],
-      constraints: Array.isArray(e.constraints) ? [...e.constraints] : [],
-      ...(typeof e.confidence === "number" ? { confidence: e.confidence } : {}),
-    });
-    order.push(key);
-  }
-
-  let added = 0;
-  let updated = 0;
-  let aliasesAdded = 0;
-
-  for (const f of fresh) {
-    const key = f.canonical_name.toLowerCase();
-    const current = byKey.get(key);
-    if (!current) {
-      byKey.set(key, {
-        canonical_name: f.canonical_name,
-        scope: f.scope,
-        aliases: Array.isArray(f.aliases) ? [...new Set(f.aliases)] : [],
-        constraints: Array.isArray(f.constraints) ? [...f.constraints] : [],
-        ...(typeof f.confidence === "number" ? { confidence: f.confidence } : {}),
-      });
-      order.push(key);
-      added++;
-      continue;
-    }
-
-    // Union-merge aliases (case-insensitive dedupe, preserve existing casing)
-    const seen = new Set(current.aliases.map((a) => a.toLowerCase()));
-    let changed = false;
-    for (const alias of f.aliases ?? []) {
-      if (!seen.has(alias.toLowerCase())) {
-        current.aliases.push(alias);
-        seen.add(alias.toLowerCase());
-        aliasesAdded++;
-        changed = true;
-      }
-    }
-
-    // Preserve existing constraints. Never overwrite or append fresh
-    // constraints — humans curate those. (New entities get fresh constraints
-    // because there is nothing to preserve yet.)
-    if (changed) updated++;
-  }
-
-  const merged = order.map((k) => byKey.get(k)!);
-  return { merged, added, updated, aliasesAdded };
-}
+// Extracted into ./merge-entities.ts so tests can exercise it without
+// loading the Anthropic SDK. Re-exported at the top of this file.
 
 // ── Prompting ─────────────────────────────────────────────────────
 

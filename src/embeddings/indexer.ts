@@ -24,7 +24,7 @@ function isTeiConnectivityError(err: unknown): boolean {
 
 /** Insert a pending embedding entry for later drain. Best-effort — tolerates missing table/DB. */
 async function enqueuePending(
-  contentType: "handoff" | "task",
+  contentType: "handoff" | "task" | "note" | "artifact",
   contentId: string
 ): Promise<void> {
   try {
@@ -132,8 +132,8 @@ async function indexTaskRaw(
   await indexContent("task", id, text, metadata);
 }
 
-/** Index a single note. */
-export async function indexNote(
+/** Raw note indexing — throws on failure. Used by drain path to avoid re-enqueueing. */
+async function indexNoteRaw(
   id: string,
   note: {
     title: string;
@@ -154,6 +154,80 @@ export async function indexNote(
     scope: note.scope ?? null,
     created_at: note.created_at ?? null,
   });
+}
+
+/** Index a single note. On TEI connectivity failure, queues for later drain. */
+export async function indexNote(
+  id: string,
+  note: {
+    title: string;
+    content: string;
+    domain?: string | null;
+    tags?: string[] | null;
+    scope?: string;
+    created_at?: string;
+  }
+): Promise<void> {
+  try {
+    await indexNoteRaw(id, note);
+  } catch (err) {
+    if (isTeiConnectivityError(err)) {
+      await enqueuePending("note", id);
+      return;
+    }
+    throw err;
+  }
+}
+
+/** Raw artifact indexing — throws on failure. Used by drain path to avoid re-enqueueing. */
+async function indexArtifactRaw(
+  id: string,
+  artifact: {
+    title: string;
+    content: string | null;
+    artifact_type: string;
+    tags?: string[] | null;
+    status?: string;
+    scope?: string;
+    created_at?: string;
+  }
+): Promise<void> {
+  const tagLine = artifact.tags?.length ? artifact.tags.join(", ") : "";
+  const parts = [artifact.title, artifact.content ?? "", artifact.artifact_type, tagLine];
+  const text = parts.filter((p) => p && p.trim()).join("\n");
+  if (!text.trim()) return;
+  await indexContent("artifact", id, text, {
+    artifact_id: id,
+    artifact_type: artifact.artifact_type,
+    tags: artifact.tags ?? [],
+    status: artifact.status ?? null,
+    scope: artifact.scope ?? null,
+    created_at: artifact.created_at ?? null,
+  });
+}
+
+/** Index a single artifact. On TEI connectivity failure, queues for later drain. */
+export async function indexArtifact(
+  id: string,
+  artifact: {
+    title: string;
+    content: string | null;
+    artifact_type: string;
+    tags?: string[] | null;
+    status?: string;
+    scope?: string;
+    created_at?: string;
+  }
+): Promise<void> {
+  try {
+    await indexArtifactRaw(id, artifact);
+  } catch (err) {
+    if (isTeiConnectivityError(err)) {
+      await enqueuePending("artifact", id);
+      return;
+    }
+    throw err;
+  }
 }
 
 /** Index a single task. On TEI connectivity failure, queues for later drain. */
@@ -292,11 +366,50 @@ export async function indexAllNotes(): Promise<number> {
   return indexed;
 }
 
+/** Bulk index all artifacts from the artifacts table. */
+export async function indexAllArtifacts(): Promise<number> {
+  const result = await query<{
+    id: string;
+    title: string;
+    content: string | null;
+    artifact_type: string;
+    tags: string[];
+    status: string;
+    scope: string;
+    created_at: string;
+  }>(
+    "SELECT id, title, content, artifact_type, tags, status, scope, created_at FROM artifacts"
+  );
+
+  let indexed = 0;
+  for (const row of result.rows) {
+    try {
+      await indexArtifact(row.id, {
+        title: row.title,
+        content: row.content,
+        artifact_type: row.artifact_type,
+        tags: row.tags,
+        status: row.status,
+        scope: row.scope,
+        created_at: row.created_at,
+      });
+      indexed++;
+    } catch (err) {
+      console.error(
+        `[indexer] Failed to index artifact ${row.id}:`,
+        (err as Error).message
+      );
+    }
+  }
+
+  return indexed;
+}
+
 // ── Pending queue drain ───────────────────────────────────────
 
 interface PendingRow {
   id: number;
-  content_type: "handoff" | "task";
+  content_type: "handoff" | "task" | "note" | "artifact";
   content_id: string;
 }
 
@@ -307,7 +420,7 @@ interface PendingRow {
  * rather than archive content whose embedding we can't confirm.
  */
 export async function hasPendingEmbedding(
-  contentType: "handoff" | "task",
+  contentType: "handoff" | "task" | "note" | "artifact",
   contentId: string
 ): Promise<boolean> {
   try {
@@ -396,7 +509,7 @@ export async function drainPendingEmbeddings(
           continue;
         }
         await indexHandoffRaw(row.content_id, handoff);
-      } else {
+      } else if (row.content_type === "task") {
         const taskResult = await query<{
           id: string;
           title: string;
@@ -428,6 +541,78 @@ export async function drainPendingEmbeddings(
           task.status,
           task.created_at
         );
+      } else if (row.content_type === "note") {
+        const noteResult = await query<{
+          id: string;
+          title: string;
+          content: string;
+          domain: string | null;
+          tags: string[];
+          scope: string;
+          created_at: string;
+        }>(
+          `SELECT id, title, content, domain, tags, scope, created_at
+           FROM notes WHERE id = $1`,
+          [row.content_id]
+        );
+        const note = noteResult.rows[0];
+        if (!note) {
+          await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);
+          errors++;
+          console.warn(
+            `[indexer] Dropped pending note ${row.content_id} — source missing`
+          );
+          continue;
+        }
+        await indexNoteRaw(note.id, {
+          title: note.title,
+          content: note.content,
+          domain: note.domain,
+          tags: note.tags,
+          scope: note.scope,
+          created_at: note.created_at,
+        });
+      } else if (row.content_type === "artifact") {
+        const artifactResult = await query<{
+          id: string;
+          title: string;
+          content: string | null;
+          artifact_type: string;
+          tags: string[];
+          status: string;
+          scope: string;
+          created_at: string;
+        }>(
+          `SELECT id, title, content, artifact_type, tags, status, scope, created_at
+           FROM artifacts WHERE id = $1`,
+          [row.content_id]
+        );
+        const artifact = artifactResult.rows[0];
+        if (!artifact) {
+          await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);
+          errors++;
+          console.warn(
+            `[indexer] Dropped pending artifact ${row.content_id} — source missing`
+          );
+          continue;
+        }
+        await indexArtifactRaw(artifact.id, {
+          title: artifact.title,
+          content: artifact.content,
+          artifact_type: artifact.artifact_type,
+          tags: artifact.tags,
+          status: artifact.status,
+          scope: artifact.scope,
+          created_at: artifact.created_at,
+        });
+      } else {
+        // Unknown content_type — drop and move on so the queue can drain.
+        await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);
+        errors++;
+        console.warn(
+          `[indexer] Dropped pending ${row.content_type} ${row.content_id} — unsupported content_type`
+        );
+        continue;
       }
 
       await query(`DELETE FROM pending_embeddings WHERE id = $1`, [row.id]);

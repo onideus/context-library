@@ -1,14 +1,15 @@
 # Context Library — Roadmap
 
-## Design Philosophy: Three Primitives
+## Design Philosophy: Four Primitives
 
-Context Library is built around three distinct data types that map to three questions:
+Context Library is built around four distinct data types that map to four questions:
 
 - **Handoffs** → *Where am I?* — Operational state captured at session boundaries. Ephemeral, append-only, scoped by time.
 - **Tasks** → *What do I need to do?* — Action items with lifecycles (open → completed/cancelled/deferred). Queryable, filterable, finite.
-- **Knowledge** *(planned)* → *What do I know?* — Captured thinking, article takeaways, pattern recognition, connections between ideas. Accrues indefinitely. No status lifecycle. Retrieved by meaning, not by deadline.
+- **Knowledge** → *What do I know?* — Captured thinking, article takeaways, pattern recognition, connections between ideas. Accrues indefinitely. No status lifecycle. Retrieved by meaning, not by deadline.
+- **Artifacts** → *What have I produced?* — Generated outputs (CC prompts, research, blog posts, templates) with a lifecycle (draft → ready → executing → completed) and execution ordering. Bridges planning and execution sessions.
 
-All three primitives share a unified semantic search index (pgvector + FTS with RRF fusion), enabling cross-type retrieval: a search for "authentication architecture" returns relevant handoff context, open tasks, and accumulated knowledge together.
+All four primitives share a unified semantic search index (pgvector + FTS with RRF fusion), enabling cross-type retrieval: a search for "authentication architecture" returns relevant handoff context, open tasks, accumulated knowledge, and related artifacts together.
 
 ## Completed
 
@@ -40,9 +41,9 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - CLAUDE.md Personal Data Prohibition section for OSS safety
 - TEI compose profiles for GPU (NVIDIA CUDA) and CPU deployment
 
-> **Note on version gaps:** Tags v0.5.2 and v0.5.3 were consumed during release pipeline testing (Snyk container scan failures). v0.5.4-rc.0 and v0.5.4-test.1 verified the new promotion model. The next release is v0.5.4.
+> **Note on version gaps:** Tags v0.5.2 and v0.5.3 were consumed during release pipeline testing (Snyk container scan failures). v0.5.4-rc.0 and v0.5.4-test.1 verified the new promotion model.
 
-## Current: v0.5.4 — Server-Side Enforcement & Cleanup
+### v0.5.4 — Server-Side Enforcement & Cleanup
 
 - `evidence_pulled` field for judgment-class request gating (advisory, not blocking)
 - Per-model response format tuning in tool descriptions
@@ -51,26 +52,31 @@ All three primitives share a unified semantic search index (pgvector + FTS with 
 - `z.any()` → `z.unknown()` migration in handoff schemas and tool parameters
 - Docker Compose embeddings port mapping for externalized TEI deployments
 - Tool description updates for new capabilities
-- Version bump to 0.5.4
 
-## Next: v0.6 — Resilience, Retrieval & Knowledge
+### v0.6 — Resilience, Retrieval & Knowledge
 
-Focus: make the system self-healing, observable, harder to misuse — and introduce the third primitive.
-
-- **Knowledge layer (third primitive):** `notes` table in PostgreSQL with MCP tools (`create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`); embedded into pgvector for unified semantic search; `'note'` added to `search_context` `content_types`; distinct from artifacts — knowledge is interpretation, not output
+- **Knowledge layer (third primitive):** `notes` table in PostgreSQL with MCP tools (`create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`); embedded into pgvector for unified semantic search; `'note'` added to `search_context` `content_types`
 - **Embedding resilience:** `embedding_status` field in `get_latest_handoff` response (TEI health + pending count); pending embeddings queue with dead-letter pattern for TEI outage recovery (O(k) recovery vs O(n) full reindex)
 - **Handoff navigation:** `list_handoffs` and `get_handoff` MCP tools for historical handoff browsing and retrieval
 - **Dynamic task summary:** Server-side computed task summary in `get_latest_handoff` — critical items, due this week, recently completed, blocked chains (replaces basic counts)
 - **Security hardening:** Scope enforcement on task tools (propagate handoff scope as session default); input size limits on store/patch/create operations
-- **Retrieval quality:** Cross-encoder rerank stage after RRF fusion (TEI with MiniLM, ~30-50 lines in search.ts); search alias expansion table for abbreviation/term mapping; entity word-boundary matching; date-range filtering on `search_context`
+- **Retrieval quality:** Cross-encoder rerank stage after RRF fusion (TEI with MiniLM); search alias expansion table for abbreviation/term mapping; entity word-boundary matching; date-range filtering on `search_context`
 - **Automated handoff compaction:** Session-boundary pruning with vector archival — keeps handoffs small, history searchable
 - **Schema hygiene:** `schema_version` field on handoffs for forward/backward compatibility
 
-## Future: v0.7 — New Primitives
+## Current: v0.7.0 — Artifact Layer & Embedding Resilience Fix
 
-Focus: expand beyond the three primitives into richer structure and artifact storage.
+Focus: introduce the fourth primitive and close the last gap in pending-queue resilience.
 
-- **Artifact storage:** File/content tracking with metadata, SHA-256 hashing, and versioning; prompt library via tagging convention
+- **Artifact layer (fourth primitive):** `artifacts` table in PostgreSQL with MCP tools (`store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`); lifecycle state (draft → ready → executing → completed → superseded) with enforced transitions; `execution_order` for sequenced prompt chains; inline content or external pointer (git/local/url); `'artifact'` added to `search_context` and `reindex` `content_types`
+- **Embedding resilience (bug fix #37):** `indexNote` and `indexArtifact` now use the same TEI-connectivity → pending-queue fallback as `indexHandoff`/`indexTask`; `drainPendingEmbeddings` handles all four content types; `pending_embeddings` CHECK constraint expanded in migration `007`
+- **Tooling hygiene:** `mergeEntities` split out of `scripts/extract-entities.ts` into `scripts/merge-entities.ts` so its tests no longer require the `@anthropic-ai/sdk` devDependency to load
+
+## Future: v0.8 — Primitive Evolution
+
+Focus: deepen the four primitives with richer structure and cross-primitive linking.
+
+- **Artifact versioning & hashing:** SHA-256 content hashing and version chains for artifacts (supersedes relationships beyond the flat `superseded` status)
 - **Task schema evolution:** Subtasks (parent_id), relations (blocks/blocked-by/related), custom fields (JSONB UDAs); hierarchy is opt-in, flat tasks remain the default
 - **Bitemporal entity constraints:** `valid_from`/`valid_until` on entities to prevent stale constraint application
 
