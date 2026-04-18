@@ -64,7 +64,11 @@ jobs:
             --exclude-base-image-vulns
 
       - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push SHA-tagged image to GHCR
         run: docker push ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }}
