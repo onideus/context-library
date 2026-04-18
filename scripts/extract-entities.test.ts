@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mergeEntities } from "./extract-entities.js";
+import { mergeEntities } from "./merge-entities.js";
 
 // ── mergeEntities: idempotent merge logic ─────────────────────────
 

@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/onideus/context-library)](https://github.com/onideus/context-library/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A personal MCP server that provides persistent operational context, task management, knowledge capture, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
+A personal MCP server that provides persistent operational context, task management, knowledge capture, artifact tracking, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
 
 ## What It Does
 
@@ -29,15 +29,15 @@ docker compose up -d
 
 > Handoff files are retained indefinitely by default. To enable automatic pruning of old handoffs, set `RETENTION_COUNT` to a positive number (e.g., `5000`).
 
-### Tier 2: + PostgreSQL (Tasks + Knowledge + Full-Text Search)
+### Tier 2: + PostgreSQL (Tasks + Knowledge + Artifacts + Full-Text Search)
 
-Adds structured task management, permanent knowledge capture, and full-text search. Requires PostgreSQL 16 with pgvector.
+Adds structured task management, permanent knowledge capture, generated-output tracking, and full-text search. Requires PostgreSQL 16 with pgvector.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -92,12 +92,12 @@ When the reranker is not configured or unreachable, `search_context` falls back 
 - **Server:** Hono 4.x + StreamableHTTP MCP transport (Node.js 22, TypeScript)
 - **Storage (Tier 1):** Append-only JSON files in `./data/handoffs/`
 - **Database (Tier 2):** PostgreSQL 16 with pgvector extension
-- **Content primitives:** Handoffs (ephemeral session state), Tasks (lifecycle-managed action items), Notes (permanent knowledge — decisions, patterns, insights)
+- **Content primitives:** Handoffs (ephemeral session state), Tasks (lifecycle-managed action items), Notes (permanent knowledge — decisions, patterns, insights), Artifacts (generated outputs with lifecycle state and execution ordering)
 - **Embeddings (Tier 3):** Text Embeddings Inference with nomic-embed-text-v2-moe (768 dims), optional cross-encoder reranker
 - **Search:** Hybrid retrieval (vector + FTS with RRF fusion), optional cross-encoder reranking, entity-aware context envelopes, search alias expansion, date-range filtering
 - **Auth:** Handled externally by [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy) — the server itself is unauthenticated and trusts its network boundary
 
-Each component degrades gracefully when unavailable. If Postgres is down, handoffs still work. If the embedding server is unreachable, task and note search still works via full-text search.
+Each component degrades gracefully when unavailable. If Postgres is down, handoffs still work. If the embedding server is unreachable, task, note, and artifact search still works via full-text search; failed embeddings are queued for automatic retry when TEI comes back.
 
 ## MCP Tools
 
@@ -119,8 +119,13 @@ Each component degrades gracefully when unavailable. If Postgres is down, handof
 | `search_notes` | Postgres | Full-text search across note titles and content |
 | `update_note` | Postgres | Update note fields; re-embeds on content change |
 | `delete_note` | Postgres | Permanently delete a note and its embedding |
+| `store_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
+| `get_artifact` | Postgres | Retrieve artifact by UUID (full content + pointer + metadata) |
+| `list_artifacts` | Postgres | Browse artifacts with type, status, scope, and tag filters; execution_order-aware sort |
+| `search_artifacts` | Postgres | Full-text search across artifact titles and content |
+| `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types |
-| `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, and notes |
+| `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, notes, and artifacts |
 
 ## Health Checks
 
@@ -133,7 +138,7 @@ Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after 
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.5.4","uptime":42}
+# {"status":"ok","version":"0.7.0","uptime":42}
 
 curl http://localhost:3100/health/ready
 # {"status":"ok","archive":true,"uptime":42}
@@ -248,7 +253,7 @@ After connecting, ask your AI assistant to call `get_latest_handoff`. If it retu
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.5.4","uptime":42}
+# {"status":"ok","version":"0.7.0","uptime":42}
 ```
 
 ## External Access with Auth Proxy
@@ -318,8 +323,8 @@ Insecure images never reach the registry — Snyk gates the push. By the time a 
 **To cut a release:**
 
 ```bash
-git tag v0.5.4
-git push origin v0.5.4
+git tag v0.7.0
+git push origin v0.7.0
 ```
 
 Old SHA-tagged images are pruned weekly (90-day retention), preserving any image referenced by a release tag.
@@ -407,7 +412,7 @@ If you see `Postgres migrations skipped — database not available`, the server 
 
 ## Security
 
-This server holds personal operational data — handoff state, tasks, knowledge entries, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.**
+This server holds personal operational data — handoff state, tasks, knowledge entries, artifacts, execution logs. It is designed to run behind a reverse proxy that handles authentication. **Never expose the MCP server directly to the internet.**
 
 > **Note:** When using the auth proxy overlay (`docker-compose.auth.yml`), the MCP server still binds to `127.0.0.1:3100` from the base compose file. This means the unauthenticated server remains accessible on localhost. This is intentional for local debugging but should be considered in your deployment security model. A future release will address this in the overlay.
 
