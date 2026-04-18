@@ -734,6 +734,42 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(result.code).toBe("VALIDATION_ERROR");
     });
 
+    it("accepts uppercase/mixed-case UUID in dependencies", async () => {
+      // Postgres uuid type is case-insensitive and returns canonical lowercase.
+      // Regression: validateDependenciesExist must compare case-insensitively
+      // so an uppercase input (still a valid UUID) is not falsely reported
+      // as missing.
+      const a = await callTool("store_artifact", {
+        title: "dep-target",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "target",
+      });
+      const upper = (a.id as string).toUpperCase();
+      const b = await callTool("store_artifact", {
+        title: "dep-consumer",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "consumer",
+        dependencies: [upper],
+      });
+      expect(b.error).toBeUndefined();
+      expect(b.id).toBeDefined();
+
+      // Same check on update_artifact.
+      const c = await callTool("store_artifact", {
+        title: "dep-updater",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "updater",
+      });
+      const updated = await callTool("update_artifact", {
+        id: c.id,
+        dependencies: [upper],
+      });
+      expect(updated.error).toBeUndefined();
+    });
+
     it("accepts update_artifact clearing dependencies with an empty array", async () => {
       const a = await callTool("store_artifact", {
         title: "a",

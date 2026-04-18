@@ -101,8 +101,11 @@ async function validateDependenciesExist(
     "SELECT id FROM artifacts WHERE id = ANY($1::uuid[])",
     [deps]
   );
-  const found = new Set(result.rows.map((r) => r.id));
-  const missing = deps.filter((d) => !found.has(d));
+  // Postgres returns uuid values in canonical lowercase regardless of input
+  // casing. Compare case-insensitively so an uppercase or mixed-case input
+  // (still a valid UUID) is not falsely reported as missing.
+  const found = new Set(result.rows.map((r) => r.id.toLowerCase()));
+  const missing = deps.filter((d) => !found.has(d.toLowerCase()));
   return missing.length === 0 ? { valid: true } : { valid: false, missing };
 }
 
