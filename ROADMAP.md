@@ -64,19 +64,26 @@ All four primitives share a unified semantic search index (pgvector + FTS with R
 - **Automated handoff compaction:** Session-boundary pruning with vector archival — keeps handoffs small, history searchable
 - **Schema hygiene:** `schema_version` field on handoffs for forward/backward compatibility
 
-## Current: v0.7.0 — Artifact Layer & Embedding Resilience Fix
-
-Focus: introduce the fourth primitive and close the last gap in pending-queue resilience.
+### v0.7.0 — Artifact Layer & Embedding Resilience Fix
 
 - **Artifact layer (fourth primitive):** `artifacts` table in PostgreSQL with MCP tools (`store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`); lifecycle state (draft → ready → executing → completed → superseded) with enforced transitions; `execution_order` for sequenced prompt chains; inline content or external pointer (git/local/url); `'artifact'` added to `search_context` and `reindex` `content_types`
 - **Embedding resilience (bug fix #37):** `indexNote` and `indexArtifact` now use the same TEI-connectivity → pending-queue fallback as `indexHandoff`/`indexTask`; `drainPendingEmbeddings` handles all four content types; `pending_embeddings` CHECK constraint expanded in migration `007`
 - **Tooling hygiene:** `mergeEntities` split out of `scripts/extract-entities.ts` into `scripts/merge-entities.ts` so its tests no longer require the `@anthropic-ai/sdk` devDependency to load
+
+## Current: v0.7.1 — Artifact Integrity Fixes
+
+Follow-up fixes surfaced during PR #39 review.
+
+- **execution_order uniqueness (closes #40):** Partial unique index on `(artifact_type, execution_order)` where `execution_order IS NOT NULL`. `store_artifact` and `update_artifact` surface the conflict as `EXECUTION_ORDER_CONFLICT` instead of a raw `DB_ERROR`. Null slots remain unconstrained so existing v0.7.0 rows keep working.
+- **dependencies validation (closes #44):** Write-time existence check on `dependencies` UUIDs in both `store_artifact` and `update_artifact`. Non-existent references return `VALIDATION_ERROR`; malformed UUIDs are caught before the database cast. Adds a GIN index on `dependencies` for efficient reverse-lookup queries. Full referential integrity (junction table with FKs) deferred to v0.8.
+- Migration `008_artifact_integrity.sql` combines both index additions; idempotent and safe on top of v0.7.0 data.
 
 ## Future: v0.8 — Primitive Evolution
 
 Focus: deepen the four primitives with richer structure and cross-primitive linking.
 
 - **Artifact versioning & hashing:** SHA-256 content hashing and version chains for artifacts (supersedes relationships beyond the flat `superseded` status)
+- **Artifact dependency referential integrity:** Junction table with foreign keys to replace the `dependencies UUID[]` column, giving true FK enforcement and cascade behavior on delete (v0.7.1 adds write-time validation as an interim fix)
 - **Task schema evolution:** Subtasks (parent_id), relations (blocks/blocked-by/related), custom fields (JSONB UDAs); hierarchy is opt-in, flat tasks remain the default
 - **Bitemporal entity constraints:** `valid_from`/`valid_until` on entities to prevent stale constraint application
 

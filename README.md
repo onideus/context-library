@@ -138,7 +138,7 @@ Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after 
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.7.0","uptime":42}
+# {"status":"ok","version":"0.7.1","uptime":42}
 
 curl http://localhost:3100/health/ready
 # {"status":"ok","archive":true,"uptime":42}
@@ -253,7 +253,7 @@ After connecting, ask your AI assistant to call `get_latest_handoff`. If it retu
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.7.0","uptime":42}
+# {"status":"ok","version":"0.7.1","uptime":42}
 ```
 
 ## External Access with Auth Proxy
@@ -323,8 +323,8 @@ Insecure images never reach the registry — Snyk gates the push. By the time a 
 **To cut a release:**
 
 ```bash
-git tag v0.7.0
-git push origin v0.7.0
+git tag v0.7.1
+git push origin v0.7.1
 ```
 
 Old SHA-tagged images are pruned weekly (90-day retention), preserving any image referenced by a release tag.
