@@ -81,6 +81,49 @@ function isValidStatusTransition(from: string, to: string): boolean {
   return Boolean(allowed && allowed.includes(to));
 }
 
+// Basic RFC-4122 UUID shape check. Postgres will reject anything else when
+// casting to uuid[], but catching it here gives us a clean VALIDATION_ERROR
+// instead of a raw DB_ERROR with a driver-level message.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Verify all UUIDs in a dependencies array exist as artifact rows. Returns
+ * an object indicating whether validation passed or listing the offending
+ * UUIDs. Caller is responsible for only invoking this when the array is
+ * non-empty and well-formed.
+ */
+async function validateDependenciesExist(
+  deps: string[]
+): Promise<{ valid: true } | { valid: false; missing: string[] }> {
+  if (deps.length === 0) return { valid: true };
+  const result = await query<{ id: string }>(
+    "SELECT id FROM artifacts WHERE id = ANY($1::uuid[])",
+    [deps]
+  );
+  const found = new Set(result.rows.map((r) => r.id));
+  const missing = deps.filter((d) => !found.has(d));
+  return missing.length === 0 ? { valid: true } : { valid: false, missing };
+}
+
+interface PgErrorShape {
+  code?: string;
+  constraint?: string;
+}
+
+/**
+ * Detect the execution_order uniqueness constraint violation so we can
+ * surface a clean EXECUTION_ORDER_CONFLICT instead of a raw DB_ERROR. All
+ * other 23505 scenarios still fall through to DB_ERROR.
+ */
+function isExecutionOrderConflict(err: unknown): boolean {
+  const pg = err as PgErrorShape;
+  return (
+    pg?.code === "23505" &&
+    pg?.constraint === "idx_artifacts_type_exec_order_unique"
+  );
+}
+
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const scopeEnum = z.enum(["work", "personal", "shared"]);
@@ -116,6 +159,10 @@ Status lifecycle:
 
 Use 'execution_order' to sequence artifacts within a batch (e.g., a chain of CC prompts where 1 builds infrastructure, 2 adds tests, 3 updates docs). Use 'dependencies' for explicit cross-artifact ordering when execution_order is not enough. Use 'metadata' for flexible fields like branch_target, model, surface, batch_label.
 
+Integrity:
+- 'execution_order' must be unique within an 'artifact_type'. Attempting to store a duplicate returns EXECUTION_ORDER_CONFLICT. Leave execution_order unset (null) if you do not need a fixed slot.
+- 'dependencies' UUIDs are validated at write time — all referenced artifacts must exist. Orphaned references return VALIDATION_ERROR.
+
 Returns {id, title, artifact_type, status, created_at}. Re-embeds on create; falls back to the pending queue if the embedding server is offline.`;
 
 const GET_ARTIFACT_DESC = `Retrieve a single artifact by its UUID. Returns the full artifact record including content, pointer, dependencies, and metadata.`;
@@ -138,6 +185,10 @@ Status transitions are enforced:
 - executing → completed, ready, superseded
 - completed → superseded
 - Any state → superseded (retirement)
+
+Integrity:
+- 'execution_order' must be unique within an 'artifact_type'. Moving an artifact onto an already-used slot returns EXECUTION_ORDER_CONFLICT.
+- 'dependencies' UUIDs are validated at write time. Pass an empty array to clear; any non-empty array must reference existing artifacts or returns VALIDATION_ERROR.
 
 Re-embeds when title, content, tags, or artifact_type change.`;
 
@@ -183,6 +234,30 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         );
       }
 
+      if (args.dependencies && args.dependencies.length > 0) {
+        const malformed = args.dependencies.filter((d) => !UUID_RE.test(d));
+        if (malformed.length > 0) {
+          return errorResponse(
+            `Malformed UUID in dependencies: ${malformed.join(", ")}`,
+            "VALIDATION_ERROR"
+          );
+        }
+        try {
+          const check = await validateDependenciesExist(args.dependencies);
+          if (!check.valid) {
+            return errorResponse(
+              `Dependency artifact IDs do not exist: ${check.missing.join(", ")}`,
+              "VALIDATION_ERROR"
+            );
+          }
+        } catch (err) {
+          return errorResponse(
+            `Failed to validate dependencies: ${(err as Error).message}`,
+            "DB_ERROR"
+          );
+        }
+      }
+
       try {
         const result = await query<ArtifactRow>(
           `INSERT INTO artifacts (
@@ -225,6 +300,12 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           created_at: row.created_at,
         });
       } catch (err) {
+        if (isExecutionOrderConflict(err)) {
+          return errorResponse(
+            `execution_order ${args.execution_order} is already used for artifact_type '${args.artifact_type}'`,
+            "EXECUTION_ORDER_CONFLICT"
+          );
+        }
         return errorResponse((err as Error).message, "DB_ERROR");
       }
     }
@@ -411,6 +492,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       metadata: z.record(z.unknown()).optional().describe("Metadata to merge (top-level keys)"),
     },
     async (args) => {
+      let current: ArtifactRow;
       try {
         const existing = await query<ArtifactRow>(
           "SELECT * FROM artifacts WHERE id = $1",
@@ -419,29 +501,57 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         if (existing.rows.length === 0) {
           return errorResponse(`Artifact not found: ${args.id}`, "NOT_FOUND");
         }
-        const current = existing.rows[0];
+        current = existing.rows[0];
+      } catch (err) {
+        return errorResponse((err as Error).message, "DB_ERROR");
+      }
 
-        if (args.status !== undefined && !isValidStatusTransition(current.status, args.status)) {
-          return errorResponse(
-            `Invalid status transition: ${current.status} → ${args.status}`,
-            "INVALID_STATUS_TRANSITION"
-          );
-        }
+      if (args.status !== undefined && !isValidStatusTransition(current.status, args.status)) {
+        return errorResponse(
+          `Invalid status transition: ${current.status} → ${args.status}`,
+          "INVALID_STATUS_TRANSITION"
+        );
+      }
 
-        // Ensure post-update we still have content or pointer.
-        const nextContent =
-          args.content !== undefined ? args.content : current.content;
-        const nextPointer =
-          args.pointer !== undefined ? args.pointer : current.pointer;
-        const hasContent = typeof nextContent === "string" && nextContent.trim().length > 0;
-        const hasPointer = nextPointer && typeof nextPointer === "object";
-        if (!hasContent && !hasPointer) {
+      // Ensure post-update we still have content or pointer.
+      const nextContent =
+        args.content !== undefined ? args.content : current.content;
+      const nextPointer =
+        args.pointer !== undefined ? args.pointer : current.pointer;
+      const hasContent = typeof nextContent === "string" && nextContent.trim().length > 0;
+      const hasPointer = nextPointer && typeof nextPointer === "object";
+      if (!hasContent && !hasPointer) {
+        return errorResponse(
+          "Artifact must retain either 'content' or 'pointer' after update",
+          "VALIDATION_ERROR"
+        );
+      }
+
+      if (args.dependencies !== undefined && args.dependencies.length > 0) {
+        const malformed = args.dependencies.filter((d) => !UUID_RE.test(d));
+        if (malformed.length > 0) {
           return errorResponse(
-            "Artifact must retain either 'content' or 'pointer' after update",
+            `Malformed UUID in dependencies: ${malformed.join(", ")}`,
             "VALIDATION_ERROR"
           );
         }
+        try {
+          const check = await validateDependenciesExist(args.dependencies);
+          if (!check.valid) {
+            return errorResponse(
+              `Dependency artifact IDs do not exist: ${check.missing.join(", ")}`,
+              "VALIDATION_ERROR"
+            );
+          }
+        } catch (err) {
+          return errorResponse(
+            `Failed to validate dependencies: ${(err as Error).message}`,
+            "DB_ERROR"
+          );
+        }
+      }
 
+      try {
         const sets: string[] = [];
         const params: unknown[] = [];
         let paramIdx = 1;
@@ -523,6 +633,17 @@ export function registerArtifactTools(mcpServer: McpServer): void {
 
         return jsonResponse(formatArtifact(row));
       } catch (err) {
+        if (isExecutionOrderConflict(err)) {
+          const effectiveType = args.artifact_type ?? current.artifact_type;
+          const effectiveOrder =
+            args.execution_order !== undefined
+              ? args.execution_order
+              : current.execution_order;
+          return errorResponse(
+            `execution_order ${effectiveOrder} is already used for artifact_type '${effectiveType}'`,
+            "EXECUTION_ORDER_CONFLICT"
+          );
+        }
         return errorResponse((err as Error).message, "DB_ERROR");
       }
     }

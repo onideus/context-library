@@ -619,4 +619,150 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(found).toBeFalsy();
     });
   });
+
+  describe("execution_order uniqueness", () => {
+    it("rejects duplicate execution_order within the same artifact_type", async () => {
+      const typeName = "dup-order-" + Date.now();
+      await callTool("store_artifact", {
+        title: "first",
+        artifact_type: typeName,
+        scope: "work",
+        content: "a",
+        execution_order: 1,
+      });
+      const dup = await callTool("store_artifact", {
+        title: "second",
+        artifact_type: typeName,
+        scope: "work",
+        content: "b",
+        execution_order: 1,
+      });
+      expect(dup.error).toBe(true);
+      expect(dup.code).toBe("EXECUTION_ORDER_CONFLICT");
+      expect(dup.message).toContain(typeName);
+    });
+
+    it("allows the same execution_order across different artifact_types", async () => {
+      const stamp = Date.now();
+      const typeA = "type-a-" + stamp;
+      const typeB = "type-b-" + stamp;
+      const a = await callTool("store_artifact", {
+        title: "a1",
+        artifact_type: typeA,
+        scope: "work",
+        content: "a",
+        execution_order: 1,
+      });
+      const b = await callTool("store_artifact", {
+        title: "b1",
+        artifact_type: typeB,
+        scope: "work",
+        content: "b",
+        execution_order: 1,
+      });
+      expect(a.error).toBeUndefined();
+      expect(b.error).toBeUndefined();
+    });
+
+    it("allows multiple artifacts with null execution_order in the same type", async () => {
+      const typeName = "null-order-" + Date.now();
+      const a = await callTool("store_artifact", {
+        title: "a",
+        artifact_type: typeName,
+        scope: "work",
+        content: "a",
+      });
+      const b = await callTool("store_artifact", {
+        title: "b",
+        artifact_type: typeName,
+        scope: "work",
+        content: "b",
+      });
+      expect(a.error).toBeUndefined();
+      expect(b.error).toBeUndefined();
+    });
+
+    it("update_artifact rejects moving to a duplicate execution_order", async () => {
+      const typeName = "update-dup-" + Date.now();
+      await callTool("store_artifact", {
+        title: "a",
+        artifact_type: typeName,
+        scope: "work",
+        content: "a",
+        execution_order: 1,
+      });
+      const b = await callTool("store_artifact", {
+        title: "b",
+        artifact_type: typeName,
+        scope: "work",
+        content: "b",
+        execution_order: 2,
+      });
+      const result = await callTool("update_artifact", { id: b.id, execution_order: 1 });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EXECUTION_ORDER_CONFLICT");
+      expect(result.message).toContain(typeName);
+    });
+  });
+
+  describe("dependencies validation", () => {
+    it("rejects store_artifact with non-existent dependency UUID", async () => {
+      const result = await callTool("store_artifact", {
+        title: "bad-dep",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "x",
+        dependencies: ["00000000-0000-0000-0000-000000000000"],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+      expect(result.message).toContain("00000000-0000-0000-0000-000000000000");
+    });
+
+    it("rejects update_artifact adding a non-existent dependency UUID", async () => {
+      const a = await callTool("store_artifact", {
+        title: "a",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "x",
+      });
+      const result = await callTool("update_artifact", {
+        id: a.id,
+        dependencies: ["00000000-0000-0000-0000-000000000000"],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+    });
+
+    it("accepts update_artifact clearing dependencies with an empty array", async () => {
+      const a = await callTool("store_artifact", {
+        title: "a",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "x",
+      });
+      const b = await callTool("store_artifact", {
+        title: "b",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "y",
+        dependencies: [a.id],
+      });
+      const cleared = await callTool("update_artifact", { id: b.id, dependencies: [] });
+      expect(cleared.error).toBeUndefined();
+      expect(cleared.dependencies).toEqual([]);
+    });
+
+    it("rejects malformed UUID in dependencies", async () => {
+      const result = await callTool("store_artifact", {
+        title: "bad-uuid",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "x",
+        dependencies: ["not-a-uuid"],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+    });
+  });
 });
