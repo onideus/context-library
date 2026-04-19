@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir, readdir, readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+
+// Resolve package.json the same way the server does (relative to this file,
+// not process.cwd()) so the version comparison stays correct regardless of
+// the working directory from which tests are run.
+const PKG_VERSION: string = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf-8")
+).version;
 
 const TEST_PORT = 3199;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
@@ -68,11 +77,19 @@ beforeAll(async () => {
 
   serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      MCP_PORT: String(TEST_PORT),
-      DATA_DIR: TEST_DATA_DIR,
-    },
+    env: (() => {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        MCP_PORT: String(TEST_PORT),
+        DATA_DIR: TEST_DATA_DIR,
+      };
+      // Remove APP_VERSION so getVersion() falls back to package.json, keeping
+      // the version test valid in CI where Docker may have injected APP_VERSION.
+      // Deleting is safer than setting undefined, which some Node versions coerce
+      // to the string "undefined".
+      delete env.APP_VERSION;
+      return env;
+    })(),
     stdio: ["pipe", "pipe", "pipe"],
     shell: true,
   });
@@ -101,11 +118,54 @@ afterAll(async () => {
 // ────────────────────────────────────────────────
 
 describe("Health", () => {
-  it("GET /health returns 200 with {status: 'ok'}", async () => {
+  it("GET /health returns 200 without auth headers", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     expect(res.status).toBe(200);
-    const body = await res.json();
+  });
+
+  it("response includes status, version, and uptime fields", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).toHaveProperty("status");
+    expect(body).toHaveProperty("version");
+    expect(body).toHaveProperty("uptime");
+  });
+
+  it("status is 'ok'", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
     expect(body.status).toBe("ok");
+  });
+
+  it("version matches package.json", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.version).toBe(PKG_VERSION);
+  });
+
+  it("uptime is a positive number", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    expect(typeof body.uptime).toBe("number");
+    expect(body.uptime as number).toBeGreaterThan(0);
+  });
+
+  it("response contains ONLY status, version, and uptime", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    const keys = Object.keys(body).sort();
+    expect(keys).toEqual(["status", "uptime", "version"].sort());
+  });
+
+  // Negative test (proxy-side): verifies the auth bypass is scoped to /health.
+  // Auth is enforced externally by mcp-auth-proxy — there is no in-process
+  // auth middleware to configure or mock. A meaningful 401/403 assertion
+  // requires the proxy to be running, which is outside the scope of this
+  // integration suite. That coverage lives in mcp-auth-proxy's own test suite.
+  // Skipped here rather than replaced with a tautological status ≥ 200 check.
+  it.skip("MCP POST endpoint returns 401/403 without auth when proxy is configured", () => {
+    // To add real coverage: start mcp-auth-proxy in test setup, send a request
+    // to /mcp without Authorization, and assert res.status === 401 || 403.
   });
 });
 
