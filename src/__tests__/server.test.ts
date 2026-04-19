@@ -2,10 +2,14 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir, readdir, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
+// Resolve package.json the same way the server does (relative to this file,
+// not process.cwd()) so the version comparison stays correct regardless of
+// the working directory from which tests are run.
 const PKG_VERSION: string = JSON.parse(
-  readFileSync(join(process.cwd(), "package.json"), "utf-8")
+  readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf-8")
 ).version;
 
 const TEST_PORT = 3199;
@@ -77,6 +81,9 @@ beforeAll(async () => {
       ...process.env,
       MCP_PORT: String(TEST_PORT),
       DATA_DIR: TEST_DATA_DIR,
+      // Unset APP_VERSION so getVersion() falls back to package.json, keeping
+      // the version test valid in CI where Docker may have injected APP_VERSION.
+      APP_VERSION: undefined,
     },
     stdio: ["pipe", "pipe", "pipe"],
     shell: true,
@@ -145,22 +152,15 @@ describe("Health", () => {
     expect(keys).toEqual(["status", "uptime", "version"].sort());
   });
 
-  // Negative test: verifies the auth bypass is scoped to /health only.
-  // In this server, authentication is enforced externally by mcp-auth-proxy
-  // (not in-process). When auth IS configured at the proxy layer, MCP endpoints
-  // return 401/403 while /health remains accessible. The test below verifies
-  // that MCP endpoints process requests (i.e. are reachable) — confirming the
-  // bypass does NOT extend beyond /health. Auth rejection is covered by
-  // mcp-auth-proxy integration tests in its own repo.
-  it("MCP POST endpoint is reachable (auth bypass does not extend beyond /health)", async () => {
-    const res = await fetch(`${BASE_URL}/mcp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
-    });
-    // Reachable means HTTP-level response (any status ≥ 200). If auth proxy is
-    // in front, this would be 401/403. Without proxy, it's 200 (test environment).
-    expect(res.status).toBeGreaterThanOrEqual(200);
+  // Negative test (proxy-side): verifies the auth bypass is scoped to /health.
+  // Auth is enforced externally by mcp-auth-proxy — there is no in-process
+  // auth middleware to configure or mock. A meaningful 401/403 assertion
+  // requires the proxy to be running, which is outside the scope of this
+  // integration suite. That coverage lives in mcp-auth-proxy's own test suite.
+  // Skipped here rather than replaced with a tautological status ≥ 200 check.
+  it.skip("MCP POST endpoint returns 401/403 without auth when proxy is configured", () => {
+    // To add real coverage: start mcp-auth-proxy in test setup, send a request
+    // to /mcp without Authorization, and assert res.status === 401 || 403.
   });
 });
 

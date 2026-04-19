@@ -13,7 +13,6 @@ import { registerSearchTools } from "./tools/search.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
-import { access, constants } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 
 // Read version: prefer APP_VERSION env var, fall back to package.json
@@ -50,10 +49,11 @@ app.use("/*", async (c, next) => {
 });
 
 // ── Health endpoint — intentional auth bypass ──────────────────────────────
-// Registered BEFORE any auth middleware so it is never subject to
-// authentication checks. This is the ONLY unauthenticated route. Response is
-// intentionally minimal — no user data, no system state, no infrastructure
-// topology — to limit exposure on this unauthenticated surface.
+// Authentication is enforced upstream by mcp-auth-proxy; there is no
+// in-process auth middleware. This is the only route that must remain
+// reachable without going through that proxy. Response is intentionally
+// minimal — no user data, no system state, no infrastructure topology —
+// to limit exposure on this unauthenticated surface.
 app.get("/health", (c) =>
   c.json({
     status: "ok",
@@ -61,22 +61,6 @@ app.get("/health", (c) =>
     uptime: Math.floor(process.uptime()),
   })
 );
-
-// Health readiness check
-app.get("/health/ready", async (c) => {
-  let archiveWritable = false;
-  try {
-    await access(config.dataDir, constants.W_OK);
-    archiveWritable = true;
-  } catch {
-    archiveWritable = false;
-  }
-  return c.json({
-    status: archiveWritable ? "ok" : "degraded",
-    archive: archiveWritable,
-    uptime: Math.floor(process.uptime()),
-  });
-});
 
 // ── MCP transport route (authenticated) ─────────────────────
 // Factory for stateless MCP server instances (one per request, per SDK pattern)
