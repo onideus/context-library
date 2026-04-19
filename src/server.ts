@@ -49,7 +49,11 @@ app.use("/*", async (c, next) => {
   console.log(`[${new Date().toISOString()}] [req] ${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`);
 });
 
-// Health check
+// ── Health endpoint — intentional auth bypass ──────────────────────────────
+// Registered BEFORE any auth middleware so it is never subject to
+// authentication checks. This is the ONLY unauthenticated route. Response is
+// intentionally minimal — no user data, no system state, no infrastructure
+// topology — to limit exposure on this unauthenticated surface.
 app.get("/health", (c) =>
   c.json({
     status: "ok",
