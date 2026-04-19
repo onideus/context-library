@@ -77,14 +77,15 @@ beforeAll(async () => {
 
   serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      MCP_PORT: String(TEST_PORT),
-      DATA_DIR: TEST_DATA_DIR,
-      // Unset APP_VERSION so getVersion() falls back to package.json, keeping
+    env: (() => {
+      const env = { ...process.env, MCP_PORT: String(TEST_PORT), DATA_DIR: TEST_DATA_DIR };
+      // Remove APP_VERSION so getVersion() falls back to package.json, keeping
       // the version test valid in CI where Docker may have injected APP_VERSION.
-      APP_VERSION: undefined,
-    },
+      // Deleting is safer than setting undefined, which some Node versions coerce
+      // to the string "undefined".
+      delete env.APP_VERSION;
+      return env;
+    })(),
     stdio: ["pipe", "pipe", "pipe"],
     shell: true,
   });
