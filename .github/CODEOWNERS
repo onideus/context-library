@@ -1,0 +1,4 @@
+# Default code owner for all files in this repository.
+# Automatically requests review on every PR, which surfaces
+# PRs in the GitHub mobile app review queue.
+* @onideus
