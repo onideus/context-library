@@ -83,6 +83,10 @@ Context Library is built around a few core principles:
 - Functional style where practical, classes where the SDK requires them
 - No linter configured yet — match the style of surrounding code
 
+## Guidelines
+
+- Do not commit secrets, personal data, or environment-specific configuration
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
