@@ -261,6 +261,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         }
       }
 
+      const normalizedType = args.artifact_type.trim().toLowerCase();
       try {
         const result = await query<ArtifactRow>(
           `INSERT INTO artifacts (
@@ -271,7 +272,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
            RETURNING *`,
           [
             args.title,
-            args.artifact_type,
+            normalizedType,
             args.content ?? null,
             args.pointer ? JSON.stringify(args.pointer) : null,
             args.status ?? "draft",
@@ -305,7 +306,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       } catch (err) {
         if (isExecutionOrderConflict(err)) {
           return errorResponse(
-            `execution_order ${args.execution_order} is already used for artifact_type '${args.artifact_type}'`,
+            `execution_order ${args.execution_order} is already used for artifact_type '${normalizedType}'`,
             "EXECUTION_ORDER_CONFLICT"
           );
         }
@@ -358,8 +359,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         let paramIdx = 1;
 
         if (args.artifact_type) {
+          const filterType = args.artifact_type.trim().toLowerCase();
           conditions.push(`artifact_type = $${paramIdx++}`);
-          params.push(args.artifact_type);
+          params.push(filterType);
         }
         if (args.status) {
           conditions.push(`status = $${paramIdx++}`);
@@ -431,8 +433,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         let paramIdx = 2;
 
         if (args.artifact_type) {
+          const filterType = args.artifact_type.trim().toLowerCase();
           conditions.push(`artifact_type = $${paramIdx++}`);
-          params.push(args.artifact_type);
+          params.push(filterType);
         }
         if (args.status) {
           conditions.push(`status = $${paramIdx++}`);
@@ -564,8 +567,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           params.push(args.title);
         }
         if (args.artifact_type !== undefined) {
+          const normalizedType = args.artifact_type.trim().toLowerCase();
           sets.push(`artifact_type = $${paramIdx++}`);
-          params.push(args.artifact_type);
+          params.push(normalizedType);
         }
         if (args.content !== undefined) {
           sets.push(`content = $${paramIdx++}`);
@@ -637,7 +641,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         return jsonResponse(formatArtifact(row));
       } catch (err) {
         if (isExecutionOrderConflict(err)) {
-          const effectiveType = args.artifact_type ?? current.artifact_type;
+          const effectiveType = args.artifact_type !== undefined
+            ? args.artifact_type.trim().toLowerCase()
+            : current.artifact_type;
           const effectiveOrder =
             args.execution_order !== undefined
               ? args.execution_order
