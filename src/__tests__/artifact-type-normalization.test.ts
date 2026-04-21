@@ -13,10 +13,12 @@ vi.mock("../embeddings/indexer.js", () => ({
 
 import { registerArtifactTools } from "../tools/artifacts.js";
 
-function buildHandlers(): Record<string, Function> {
-  const handlers: Record<string, Function> = {};
+type ToolHandler = (args: unknown) => Promise<{ content: Array<{ text: string }> }>;
+
+function buildHandlers(): Record<string, ToolHandler> {
+  const handlers: Record<string, ToolHandler> = {};
   const server = {
-    tool: (name: string, _desc: string, _schema: unknown, handler: Function) => {
+    tool: (name: string, _desc: string, _schema: unknown, handler: ToolHandler) => {
       handlers[name] = handler;
     },
   } as unknown as McpServer;
@@ -46,7 +48,7 @@ const FAKE_ROW = {
 };
 
 describe("artifact_type normalization", () => {
-  let handlers: Record<string, Function>;
+  let handlers: Record<string, ToolHandler>;
 
   beforeEach(() => {
     vi.clearAllMocks();
