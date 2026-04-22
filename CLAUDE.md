@@ -218,7 +218,15 @@ npm start            # node dist/server.js (production)
 npx tsx src/db/seed.ts  # seed dev database with example tasks
 ```
 
-Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/health` (response shape: `{"status": "ok", "version": "0.7.1", "uptime": 42}`).
+Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/health`:
+
+```json
+{
+  "status": "ok",       // string — always "ok" when the server is up
+  "version": "0.7.1",  // string — semver from package.json / APP_VERSION env var
+  "uptime": 42          // integer — seconds since process start
+}
+```
 
 ## What NOT To Do
 
