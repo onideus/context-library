@@ -75,13 +75,15 @@ When the reranker is not configured or unreachable, `search_context` falls back 
 | Platform | Profile / Method | GPU Acceleration |
 |---|---|---|
 | **Linux/Windows (NVIDIA GPU)** | `--profile embeddings-gpu` | CUDA (compute capability 7.5+) |
-| **Linux/Windows (no GPU)** | `--profile embeddings-cpu` | None (CPU only, slower) |
-| **macOS Apple Silicon** | Native: `brew install huggingface/tap/tei` | Metal (via native binary only) |
+| **Linux/Windows (no GPU)** | `--profile embeddings-cpu` | None (CPU only, x86_64) |
+| **Apple Silicon / ARM servers (Docker)** | `--profile embeddings-arm64` | None (CPU only, native ARM) |
+| **macOS Apple Silicon (native)** | Homebrew: `text-embeddings-inference` | Metal (via native binary only) |
 
-> **Apple Silicon note:** macOS does not support GPU passthrough into Docker containers. Running TEI in Docker on M-series Macs will be CPU-bound and slow. For GPU acceleration, install TEI natively via Homebrew and run it outside of Docker:
+> **Apple Silicon note:** macOS does not support GPU passthrough into Docker containers. Running TEI in Docker on M-series Macs will be CPU-bound and slow. For CPU-only Docker deployment on Apple Silicon, use `--profile embeddings-arm64`. For Metal GPU acceleration, install TEI natively via Homebrew and run it outside of Docker:
 >
 > ```bash
-> brew install huggingface/tap/tei
+> brew tap huggingface/tap
+> brew install huggingface/tap/text-embeddings-inference
 > text-embeddings-router --model-id nomic-ai/nomic-embed-text-v2-moe --port 8090
 > ```
 >
@@ -409,6 +411,9 @@ This is expected graceful degradation. Check that your embedding server is runni
 
 **Postgres migrations skipped on startup**
 If you see `Postgres migrations skipped — database not available`, the server is running in Tier 1 mode (handoffs only). This is normal if you didn't include `docker-compose.postgres.yml`.
+
+**`npm install` fails with missing tarball (e.g., `zod-to-json-schema`)**
+Corporate npm registries (Artifactory, Nexus) may not proxy all transitive dependencies from the public npm registry. Either run `npm install` on a non-corporate network, configure your registry to proxy the missing package, or request the package be added to your organization's allowlist.
 
 ## Security
 
