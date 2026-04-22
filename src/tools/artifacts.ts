@@ -558,6 +558,11 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         }
       }
 
+      const normalizedType =
+        args.artifact_type !== undefined
+          ? args.artifact_type.trim().toLowerCase()
+          : undefined;
+
       try {
         const sets: string[] = [];
         const params: unknown[] = [];
@@ -567,8 +572,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           sets.push(`title = $${paramIdx++}`);
           params.push(args.title);
         }
-        if (args.artifact_type !== undefined) {
-          const normalizedType = args.artifact_type.trim().toLowerCase();
+        if (normalizedType !== undefined) {
           sets.push(`artifact_type = $${paramIdx++}`);
           params.push(normalizedType);
         }
@@ -642,9 +646,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         return jsonResponse(formatArtifact(row));
       } catch (err) {
         if (isExecutionOrderConflict(err)) {
-          const effectiveType = args.artifact_type !== undefined
-            ? args.artifact_type.trim().toLowerCase()
-            : current.artifact_type;
+          const effectiveType = normalizedType ?? current.artifact_type;
           const effectiveOrder =
             args.execution_order !== undefined
               ? args.execution_order
