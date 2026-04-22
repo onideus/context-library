@@ -1,8 +1,8 @@
 # Embedding server for semantic search (Tier 3)
 #
 # Uses Docker Compose profiles to select GPU or CPU runtime.
-# Only one profile can be active at a time (all services share
-# the same container_name, so Compose will refuse to start both).
+# Only one profile per category can be active at a time (services within
+# each category share a container_name, so Compose will refuse to start both).
 #
 # Start with:
 #   GPU:  docker compose ... -f docker-compose.embeddings.yml --profile embeddings-gpu up -d
