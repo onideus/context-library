@@ -114,8 +114,6 @@ DO NOT CALL WHEN:
 
 CONSEQUENCE OF SKIPPING: Duplicate tasks will be created or completed work will be re-opened.
 
-WHEN TO SEARCH TASKS: When a request mentions a task by keyword, when preparing evaluative responses (reviews, assessments), or when you need to verify task status before making recommendations. Use this when exact title is unknown — list_tasks is better when you want filtered browsing.
-
 SCOPE AWARENESS: If you called get_latest_handoff with a scope filter (work or personal), apply the same scope here unless the user explicitly asks for cross-scope results. Staying inside the session's scope prevents leaking personal items into a work-scoped response (and vice versa).`;
 
 // ── Tool Registration ────────────────────────────────────────────
