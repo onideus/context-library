@@ -251,6 +251,8 @@ const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. 
 
 WHEN TO CALL: At session start (always), before any store_handoff or patch_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
 
+CONSEQUENCE OF SKIPPING: You will operate without session context, miss open tasks, duplicate completed work, or contradict the conversation arc documented in the handoff.
+
 Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled.
 
 embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.

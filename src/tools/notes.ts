@@ -82,6 +82,18 @@ Defaults to newest-first by created_at. Filter by scope, domain, or tags (ANY-ma
 
 const SEARCH_NOTES_DESC = `Full-text search across note titles and content. Uses PostgreSQL FTS with English stemming, ranked by relevance. Returns matching notes WITH full content (unlike list_notes).
 
+CALL THIS WHEN:
+- You need to verify a prior decision before making a recommendation
+- The topic touches a domain where decisions have been documented (architecture, security, career, health)
+- You are about to create or update an artifact and need to check for related decisions
+- The user asks "what did we decide about X" or "is there a rule for Y"
+
+DO NOT CALL WHEN:
+- search_context already returned relevant notes in this turn
+- The question is about ephemeral session state (use get_latest_handoff)
+
+CONSEQUENCE OF SKIPPING: You will re-derive decisions that were already made, potentially reaching different conclusions.
+
 Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
 
 const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified. Tags and related_task_ids are full-replacement (provide complete arrays). Re-embeds on content change.`;

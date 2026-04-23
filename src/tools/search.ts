@@ -73,9 +73,22 @@ export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchRe
   return { deduped, preDedupCount };
 }
 
-const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across indexed content — handoffs, tasks, notes, artifacts, documents. Results ranked by meaning similarity.
+const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across all indexed content — handoffs, tasks, notes, artifacts, documents.
 
-WHEN TO SEARCH: Proactively before responding about named people, hardware/devices, career/comp, network infra, medical, financial context, or continuity cues ("last time", "we discussed").
+CALL THIS WHEN:
+- The conversation touches architecture, strategy, infrastructure, pipeline, deployment, or design decisions
+- The user references a prior decision, pattern, or constraint ("we decided", "the rule is", "last time")
+- The user mentions a named person, device, project, or system by name
+- The topic involves career, compensation, hardware, network, medical, or financial context
+- You are about to recommend an approach and existing decisions may constrain the answer
+- You are about to update an artifact status, create a task, or modify any CB primitive (check existing state first)
+
+DO NOT CALL WHEN:
+- The question is general knowledge with no project-specific dimension
+- You already retrieved relevant results earlier in this same conversation turn
+- The user explicitly says "don't search" or "from memory"
+
+CONSEQUENCE OF SKIPPING: Recommendations will contradict documented decisions. Duplicate work will be created. The user will catch the error and lose trust in the system.
 
 QUERY TIPS: Natural language, include entity names. People: full name. Devices: user's name for it.
 

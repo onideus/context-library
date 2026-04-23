@@ -103,7 +103,16 @@ const UPDATE_TASK_DESC = `Update a task's fields and/or apply a lifecycle action
 
 const SEARCH_TASKS_DESC = `Full-text search across task titles and context. Uses PostgreSQL FTS with English stemming. Filter by status and scope. Results ranked by relevance.
 
-WHEN TO SEARCH TASKS: When a request mentions a task by keyword, when preparing evaluative responses (reviews, assessments), or when you need to verify task status before making recommendations. Use this when exact title is unknown — list_tasks is better when you want filtered browsing.
+CALL THIS WHEN:
+- The user asks about task status, progress, or what's open/blocked
+- You are about to create a new task (check for duplicates first)
+- The conversation references work items by keyword
+
+DO NOT CALL WHEN:
+- task_summary from get_latest_handoff already answered the question
+- The user is asking about general concepts, not tracked work items
+
+CONSEQUENCE OF SKIPPING: Duplicate tasks will be created or completed work will be re-opened.
 
 SCOPE AWARENESS: If you called get_latest_handoff with a scope filter (work or personal), apply the same scope here unless the user explicitly asks for cross-scope results. Staying inside the session's scope prevents leaking personal items into a work-scoped response (and vice versa).`;
 
