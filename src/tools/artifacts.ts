@@ -197,6 +197,16 @@ Re-embeds when title, content, tags, or artifact_type change.`;
 
 const SEARCH_ARTIFACTS_DESC = `Full-text search across artifact titles and content using PostgreSQL FTS with English stemming. Returns matching artifacts WITH full content (unlike list_artifacts), ranked by relevance.
 
+CALL THIS WHEN:
+- The user references a CC prompt, research document, or generated output
+- You are about to create a new artifact (check for duplicates or superseded versions)
+- The conversation involves pipeline execution status
+
+DO NOT CALL WHEN:
+- list_artifacts with status filter already answered the question in this turn
+
+CONSEQUENCE OF SKIPPING: Duplicate or superseded artifacts will be recreated.
+
 For cross-type semantic search that finds artifacts alongside handoffs, tasks, and notes, use search_context with content_types: ['artifact'] instead — this tool only searches within the artifacts table.
 
 Filters: artifact_type, status, scope.`;
