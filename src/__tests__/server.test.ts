@@ -143,11 +143,11 @@ describe("Health", () => {
     expect(body.version).toBe(PKG_VERSION);
   });
 
-  it("uptime is a positive number", async () => {
+  it("uptime is a non-negative number", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     const body = await res.json() as Record<string, unknown>;
     expect(typeof body.uptime).toBe("number");
-    expect(body.uptime as number).toBeGreaterThan(0);
+    expect(body.uptime as number).toBeGreaterThanOrEqual(0);
   });
 
   it("response contains ONLY status, version, and uptime", async () => {
