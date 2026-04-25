@@ -592,6 +592,184 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
   });
 
+  describe("content_hash locking", () => {
+    it("store_artifact with status 'ready' sets content_hash in metadata", async () => {
+      const result = await callTool("store_artifact", {
+        title: "Hash-on-ready",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "some deterministic content",
+        status: "ready",
+      });
+      expect(result.error).toBeUndefined();
+
+      const fetched = await callTool("get_artifact", { id: result.id });
+      expect(fetched.metadata.content_hash).toBeDefined();
+      expect(typeof fetched.metadata.content_hash).toBe("string");
+      expect(fetched.metadata.content_hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("store_artifact with status 'draft' does NOT set content_hash", async () => {
+      const result = await callTool("store_artifact", {
+        title: "No-hash-on-draft",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "draft content",
+      });
+      expect(result.error).toBeUndefined();
+
+      const fetched = await callTool("get_artifact", { id: result.id });
+      expect(fetched.metadata.content_hash).toBeUndefined();
+    });
+
+    it("update_artifact transitioning to 'ready' computes content_hash", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-on-transition",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "content to hash",
+      });
+      expect(created.status).toBe("draft");
+
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        status: "ready",
+      });
+      expect(updated.status).toBe("ready");
+      expect(updated.metadata.content_hash).toBeDefined();
+      expect(updated.metadata.content_hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("content_hash is deterministic for the same content", async () => {
+      const content = "deterministic-content-xyz";
+      const a = await callTool("store_artifact", {
+        title: "Hash-det-a",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content,
+        status: "ready",
+      });
+      const b = await callTool("store_artifact", {
+        title: "Hash-det-b",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content,
+        status: "ready",
+      });
+      const fetchedA = await callTool("get_artifact", { id: a.id });
+      const fetchedB = await callTool("get_artifact", { id: b.id });
+      expect(fetchedA.metadata.content_hash).toBe(fetchedB.metadata.content_hash);
+    });
+
+    it("update_artifact rejects content modification when status is 'ready'", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Locked-ready",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "locked content",
+        status: "ready",
+      });
+
+      const result = await callTool("update_artifact", {
+        id: created.id,
+        content: "attempted mutation",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("cannot_modify_locked_artifact");
+    });
+
+    it("update_artifact rejects content modification when status is 'executing'", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Locked-executing",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "executing content",
+        status: "ready",
+      });
+      await callTool("update_artifact", { id: created.id, status: "executing" });
+
+      const result = await callTool("update_artifact", {
+        id: created.id,
+        content: "attempted mutation",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("cannot_modify_locked_artifact");
+    });
+
+    it("update_artifact rejects content modification when status is 'completed'", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Locked-completed",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "completed content",
+        status: "ready",
+      });
+      await callTool("update_artifact", { id: created.id, status: "executing" });
+      await callTool("update_artifact", { id: created.id, status: "completed" });
+
+      const result = await callTool("update_artifact", {
+        id: created.id,
+        content: "attempted mutation",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("cannot_modify_locked_artifact");
+    });
+
+    it("update_artifact clears content_hash when reverting 'ready' → 'draft'", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Revert-to-draft",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "content before lock",
+        status: "ready",
+      });
+      const locked = await callTool("get_artifact", { id: created.id });
+      expect(locked.metadata.content_hash).toBeDefined();
+
+      const reverted = await callTool("update_artifact", {
+        id: created.id,
+        status: "draft",
+      });
+      expect(reverted.status).toBe("draft");
+      expect(reverted.metadata.content_hash).toBeUndefined();
+    });
+
+    it("update_artifact preserves existing metadata keys when setting content_hash", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-preserves-meta",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "body",
+        metadata: { existing_key: "keep-me" },
+      });
+
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        status: "ready",
+      });
+      expect(updated.metadata.content_hash).toBeDefined();
+      expect(updated.metadata.existing_key).toBe("keep-me");
+    });
+
+    it("pointer-only artifact gets content_hash of empty string when stored as ready", async () => {
+      const result = await callTool("store_artifact", {
+        title: "Pointer-hash",
+        artifact_type: "research",
+        scope: "work",
+        pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.pdf" },
+        status: "ready",
+      });
+      expect(result.error).toBeUndefined();
+
+      const fetched = await callTool("get_artifact", { id: result.id });
+      expect(fetched.metadata.content_hash).toBeDefined();
+      // sha256 of empty string
+      expect(fetched.metadata.content_hash).toBe(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      );
+    });
+  });
+
   describe("cross-tool isolation", () => {
     it("artifacts do NOT appear in list_notes", async () => {
       const a = await callTool("store_artifact", {
