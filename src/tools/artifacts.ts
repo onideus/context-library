@@ -657,8 +657,15 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           }
         } else if (args.metadata !== undefined) {
           // Top-level merge — provided keys overwrite, existing preserved.
+          // Strip content_hash from caller-supplied metadata on locked artifacts
+          // so a caller cannot overwrite the cryptographic lock guarantee.
+          let safeMeta: Record<string, unknown> = args.metadata as Record<string, unknown>;
+          if (LOCKED_STATUSES.has(current.status)) {
+            const { content_hash: _stripped, ...rest } = safeMeta;
+            safeMeta = rest;
+          }
           sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
-          params.push(JSON.stringify(args.metadata));
+          params.push(JSON.stringify(safeMeta));
         }
 
         if (sets.length === 0) {

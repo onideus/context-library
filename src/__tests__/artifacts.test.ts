@@ -768,6 +768,29 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       );
     });
+
+    it("update_artifact silently ignores content_hash supplied in metadata on a locked artifact", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Tamper-guard",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "immutable content",
+        status: "ready",
+      });
+      const legitimateHash = created.metadata.content_hash;
+      expect(legitimateHash).toBeDefined();
+
+      // Attempt to overwrite the hash via a metadata update
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        metadata: { content_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", extra: "ok" },
+      });
+      expect(updated.error).toBeUndefined();
+      // Legitimate hash is preserved; caller-supplied value was stripped
+      expect(updated.metadata.content_hash).toBe(legitimateHash);
+      // Other metadata keys are still merged
+      expect(updated.metadata.extra).toBe("ok");
+    });
   });
 
   describe("cross-tool isolation", () => {

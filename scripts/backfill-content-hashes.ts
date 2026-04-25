@@ -41,7 +41,7 @@ async function backfill(): Promise<void> {
 
   for (const row of result.rows) {
     const metadata = row.metadata ?? {};
-    if (metadata.content_hash) {
+    if (Object.prototype.hasOwnProperty.call(metadata, "content_hash")) {
       skipped++;
       continue;
     }
@@ -64,9 +64,9 @@ async function backfill(): Promise<void> {
     `\nBackfill complete: ${updated} updated, ${skipped} skipped (already had hash), ${errors} errors`
   );
 
-  if (errors > 0) {
-    process.exit(1);
-  }
+  // Per spec: "Logs gaps but does not fail" — errors are counted and logged
+  // above but do not produce a failing exit code so CI/operator workflows can
+  // distinguish between a complete failure and a partial backfill.
 }
 
 backfill().catch((err) => {
