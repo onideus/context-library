@@ -777,7 +777,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         content: "immutable content",
         status: "ready",
       });
-      const legitimateHash = created.metadata.content_hash;
+      const fetched = await callTool("get_artifact", { id: created.id });
+      const legitimateHash = fetched.metadata.content_hash;
       expect(legitimateHash).toBeDefined();
 
       // Attempt to overwrite the hash via a metadata update
