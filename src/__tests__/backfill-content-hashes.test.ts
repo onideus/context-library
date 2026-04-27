@@ -158,6 +158,10 @@ describe.skipIf(!pgAvailable)("backfill-content-hashes script", () => {
     await client.end();
   });
 
+  // Each case spawns `npx tsx` against a real DB, which can exceed the
+  // 5-second default in CI. Bump the per-test timeout to 30s.
+  const SCRIPT_TIMEOUT_MS = 30_000;
+
   describe("population", () => {
     it("adds content_hash to locked artifacts that are missing it", async () => {
       const content1 = "ready artifact content";
@@ -191,7 +195,7 @@ describe.skipIf(!pgAvailable)("backfill-content-hashes script", () => {
         "SELECT metadata FROM artifacts WHERE status = 'draft'"
       );
       expect(draft.rows[0].metadata.content_hash).toBeUndefined();
-    });
+    }, SCRIPT_TIMEOUT_MS);
 
     it("handles pointer-only artifacts (null content) by hashing empty string", async () => {
       await client.query(`
@@ -206,7 +210,7 @@ describe.skipIf(!pgAvailable)("backfill-content-hashes script", () => {
         "SELECT metadata FROM artifacts WHERE title = 'Pointer-only'"
       );
       expect(row.rows[0].metadata.content_hash).toBe(sha256(""));
-    });
+    }, SCRIPT_TIMEOUT_MS);
   });
 
   describe("idempotency", () => {
@@ -232,7 +236,7 @@ describe.skipIf(!pgAvailable)("backfill-content-hashes script", () => {
           before.rows[i].metadata.content_hash
         );
       }
-    });
+    }, SCRIPT_TIMEOUT_MS);
 
     it("exits 0 even when no locked artifacts exist", async () => {
       // Use a fresh table with only draft artifacts
@@ -240,6 +244,6 @@ describe.skipIf(!pgAvailable)("backfill-content-hashes script", () => {
       const result = runBackfill();
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("0 updated");
-    });
+    }, SCRIPT_TIMEOUT_MS);
   });
 });

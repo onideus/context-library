@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { query } from "../src/db/client.js";
+import { pool, query } from "../src/db/client.js";
 
 function computeContentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -69,7 +69,9 @@ async function backfill(): Promise<void> {
   // distinguish between a complete failure and a partial backfill.
 }
 
-backfill().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+backfill()
+  .catch((err) => {
+    console.error("Fatal error:", err);
+    process.exitCode = 1;
+  })
+  .finally(() => pool.end());
