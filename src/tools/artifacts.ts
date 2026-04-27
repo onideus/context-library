@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
@@ -21,6 +22,13 @@ interface ArtifactRow {
   created_at: string;
   updated_at: string;
 }
+
+function computeContentHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+// Statuses where content is cryptographically locked — mutations are rejected.
+const LOCKED_STATUSES = new Set(["ready", "executing", "completed"]);
 
 function formatArtifact(row: ArtifactRow) {
   return {
@@ -272,6 +280,12 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       }
 
       const normalizedType = args.artifact_type.trim().toLowerCase();
+      const status = args.status ?? "draft";
+
+      const finalMetadata: Record<string, unknown> = { ...(args.metadata ?? {}) };
+      if (status === "ready") {
+        finalMetadata.content_hash = computeContentHash(args.content ?? "");
+      }
 
       try {
         const result = await query<ArtifactRow>(
@@ -286,13 +300,13 @@ export function registerArtifactTools(mcpServer: McpServer): void {
             normalizedType,
             args.content ?? null,
             args.pointer ? JSON.stringify(args.pointer) : null,
-            args.status ?? "draft",
+            status,
             args.scope,
             args.tags ?? [],
             args.dependencies ?? [],
             args.execution_order ?? null,
             args.related_task_ids ?? [],
-            JSON.stringify(args.metadata ?? {}),
+            JSON.stringify(finalMetadata),
           ]
         );
         const row = result.rows[0];
@@ -530,6 +544,13 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         );
       }
 
+      if (args.content !== undefined && LOCKED_STATUSES.has(current.status)) {
+        return errorResponse(
+          `Cannot modify content of a locked artifact (status: ${current.status})`,
+          "cannot_modify_locked_artifact"
+        );
+      }
+
       // Ensure post-update we still have content or pointer.
       const nextContent =
         args.content !== undefined ? args.content : current.content;
@@ -617,10 +638,34 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           sets.push(`related_task_ids = $${paramIdx++}::uuid[]`);
           params.push(args.related_task_ids);
         }
-        if (args.metadata !== undefined) {
-          // Top-level merge — provided keys overwrite, existing preserved.
+        const transitioningToReady = args.status === "ready" && current.status !== "ready";
+        const revertingToDraft = args.status === "draft" && current.status === "ready";
+
+        if (transitioningToReady) {
+          const hash = computeContentHash(nextContent ?? "");
+          const hashMeta = args.metadata !== undefined
+            ? { ...args.metadata, content_hash: hash }
+            : { content_hash: hash };
           sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
-          params.push(JSON.stringify(args.metadata));
+          params.push(JSON.stringify(hashMeta));
+        } else if (revertingToDraft) {
+          if (args.metadata !== undefined) {
+            sets.push(`metadata = (metadata || $${paramIdx++}::jsonb) - 'content_hash'`);
+            params.push(JSON.stringify(args.metadata));
+          } else {
+            sets.push(`metadata = metadata - 'content_hash'`);
+          }
+        } else if (args.metadata !== undefined) {
+          // Top-level merge — provided keys overwrite, existing preserved.
+          // Strip content_hash from caller-supplied metadata on locked artifacts
+          // so a caller cannot overwrite the cryptographic lock guarantee.
+          let safeMeta: Record<string, unknown> = args.metadata as Record<string, unknown>;
+          if (LOCKED_STATUSES.has(current.status)) {
+            const { content_hash: _stripped, ...rest } = safeMeta;
+            safeMeta = rest;
+          }
+          sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
+          params.push(JSON.stringify(safeMeta));
         }
 
         if (sets.length === 0) {
