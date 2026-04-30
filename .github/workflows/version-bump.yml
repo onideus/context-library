@@ -1,0 +1,94 @@
+name: version-bump
+
+# Automates the package.json version bump, removing the manual edit step from the release process.
+#
+# Updated release flow:
+# 1. Trigger this workflow with the desired bump type (patch/minor/major) or a custom version string
+# 2. Verify image.yml succeeds (builds, Snyk passes, pushes SHA image to GHCR)
+# 3. Trigger release.yml with the new version string
+# 4. (Optional) Pull new image: `docker compose pull && docker compose up -d`
+#
+# PAT requirement:
+# This workflow uses BOT_PAT (a Personal Access Token with `contents: write`) instead of
+# GITHUB_TOKEN. GitHub Actions does not trigger downstream workflows (e.g. image.yml) for
+# pushes made with GITHUB_TOKEN -- that protection exists to prevent infinite loops. A PAT
+# push is treated as a regular user push and correctly triggers image.yml.
+# To configure: create a fine-grained PAT with "Contents: Read and write" on this repo,
+# then store it as a repository secret named BOT_PAT.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type (ignored if custom_version is set)'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      custom_version:
+        description: 'Override version (e.g. 0.8.0-rc.1). Ignores bump_type if set.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          token: ${{ secrets.BOT_PAT }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Configure git identity
+        run: |
+          git config user.name "onideus-bot"
+          git config user.email "oni@onideus.com"
+
+      - name: Compute new version
+        id: version
+        run: |
+          CUSTOM="${{ inputs.custom_version }}"
+          if [ -n "${CUSTOM}" ]; then
+            NEW_VERSION="${CUSTOM#v}"
+            npm version "${NEW_VERSION}" --no-git-tag-version --allow-same-version
+          else
+            NEW_VERSION=$(npm version ${{ inputs.bump_type }} --no-git-tag-version)
+            NEW_VERSION="${NEW_VERSION#v}"
+          fi
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to ${NEW_VERSION}"
+
+      - name: Verify build is clean
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit and push version bump
+        run: |
+          git add package.json
+          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}"
+          git push origin main
+
+      - name: Notify on completion
+        if: always()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          VERSION="${{ steps.version.outputs.new_version }}"
+          curl -s -o /dev/null \
+            -H "Title: Version bump ${STATUS}: v${VERSION:-unknown}" \
+            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
+            -H "Tags: $( [ "$STATUS" = "success" ] && echo "label" || echo "x" )" \
+            -d "package.json bumped to v${VERSION:-unknown} — image.yml should now be running" \
+            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
