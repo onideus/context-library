@@ -3,18 +3,19 @@ name: version-bump
 # Automates the package.json version bump, removing the manual edit step from the release process.
 #
 # Updated release flow:
-# 1. Trigger this workflow with the desired bump type (patch/minor/major) or a custom version string
+# 1. Trigger this workflow with the desired bump type (patch/minor/major) or a custom version string,
+#    then merge the resulting PR (chore/version-bump-X.Y.Z → main)
 # 2. Verify image.yml succeeds (builds, Snyk passes, pushes SHA image to GHCR)
 # 3. Trigger release.yml with the new version string
 # 4. (Optional) Pull new image: `docker compose pull && docker compose up -d`
 #
 # PAT requirement:
-# This workflow uses BOT_PAT (a Personal Access Token with `contents: write`) instead of
-# GITHUB_TOKEN. GitHub Actions does not trigger downstream workflows (e.g. image.yml) for
-# pushes made with GITHUB_TOKEN -- that protection exists to prevent infinite loops. A PAT
-# push is treated as a regular user push and correctly triggers image.yml.
-# To configure: create a fine-grained PAT with "Contents: Read and write" on this repo,
-# then store it as a repository secret named BOT_PAT.
+# This workflow uses BOT_PAT (a Personal Access Token with `contents: write` and `pull-requests: write`)
+# instead of GITHUB_TOKEN. GitHub Actions does not trigger downstream workflows for pushes made with
+# GITHUB_TOKEN -- that protection exists to prevent infinite loops. A BOT_PAT push is treated as a
+# regular user push, so when the resulting PR is merged to main, image.yml fires normally.
+# To configure: create a fine-grained PAT with "Contents: Read and write" and "Pull requests: Read and write"
+# on this repo, then store it as a repository secret named BOT_PAT.
 
 on:
   workflow_dispatch:
@@ -38,6 +39,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   version-bump:
@@ -83,9 +85,33 @@ jobs:
         env:
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
+          BRANCH="chore/version-bump-${NEW_VERSION}"
+          git checkout -B "${BRANCH}"
           git add package.json package-lock.json
           git commit -m "chore: bump version to ${NEW_VERSION}"
-          git push origin main
+          git push --force-with-lease origin "${BRANCH}"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.BOT_PAT }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          BODY="Automated version bump to v${NEW_VERSION}.
+
+          **Next steps after merging:**
+          1. Verify image.yml succeeds (builds, Snyk passes, pushes SHA image to GHCR)
+          2. Trigger release.yml with the new version string
+          3. (Optional) Pull new image: \`docker compose pull && docker compose up -d\`"
+
+          if gh pr view "chore/version-bump-${NEW_VERSION}" --json state -q .state 2>/dev/null | grep -q .; then
+            echo "PR for chore/version-bump-${NEW_VERSION} already exists — skipping creation"
+          else
+            gh pr create \
+              --base main \
+              --head "chore/version-bump-${NEW_VERSION}" \
+              --title "chore: bump version to ${NEW_VERSION}" \
+              --body "${BODY}"
+          fi
 
       - name: Notify on completion
         if: always()
@@ -99,5 +125,5 @@ jobs:
             -H "Title: Version bump ${STATUS}: v${NEW_VERSION:-unknown}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "label" || echo "x" )" \
-            -d "package.json bumped to v${NEW_VERSION:-unknown} — image.yml should now be running" \
+            -d "package.json bumped to v${NEW_VERSION:-unknown} — merge the PR, then image.yml will run" \
             "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
