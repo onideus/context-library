@@ -56,13 +56,15 @@ jobs:
 
       - name: Compute new version
         id: version
+        env:
+          CUSTOM: ${{ inputs.custom_version }}
+          BUMP_TYPE: ${{ inputs.bump_type }}
         run: |
-          CUSTOM="${{ inputs.custom_version }}"
           if [ -n "${CUSTOM}" ]; then
             NEW_VERSION="${CUSTOM#v}"
             npm version "${NEW_VERSION}" --no-git-tag-version --allow-same-version
           else
-            NEW_VERSION=$(npm version ${{ inputs.bump_type }} --no-git-tag-version)
+            NEW_VERSION=$(npm version "${BUMP_TYPE}" --no-git-tag-version)
             NEW_VERSION="${NEW_VERSION#v}"
           fi
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
@@ -75,7 +77,7 @@ jobs:
 
       - name: Commit and push version bump
         run: |
-          git add package.json
+          git add package.json package-lock.json
           git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}"
           git push origin main
 
