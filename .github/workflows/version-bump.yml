@@ -32,6 +32,10 @@ on:
         required: false
         default: ''
 
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -76,21 +80,24 @@ jobs:
           npm run build
 
       - name: Commit and push version bump
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           git add package.json package-lock.json
-          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}"
+          git commit -m "chore: bump version to ${NEW_VERSION}"
           git push origin main
 
       - name: Notify on completion
         if: always()
         env:
           NTFY_URL: ${{ secrets.NTFY_URL }}
+          STATUS: ${{ job.status }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
-          STATUS="${{ job.status }}"
-          VERSION="${{ steps.version.outputs.new_version }}"
+          # Fallback topic is a public ntfy.sh channel — matches pattern used by other workflows
           curl -s -o /dev/null \
-            -H "Title: Version bump ${STATUS}: v${VERSION:-unknown}" \
+            -H "Title: Version bump ${STATUS}: v${NEW_VERSION:-unknown}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "label" || echo "x" )" \
-            -d "package.json bumped to v${VERSION:-unknown} — image.yml should now be running" \
+            -d "package.json bumped to v${NEW_VERSION:-unknown} — image.yml should now be running" \
             "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
