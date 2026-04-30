@@ -11,9 +11,9 @@ name: version-bump
 #
 # PAT requirement:
 # This workflow uses BOT_PAT (a Personal Access Token with `contents: write` and `pull-requests: write`)
-# instead of GITHUB_TOKEN. GitHub Actions does not trigger downstream workflows (e.g. image.yml) for
-# pushes made with GITHUB_TOKEN -- that protection exists to prevent infinite loops. A PAT
-# push is treated as a regular user push and correctly triggers image.yml.
+# instead of GITHUB_TOKEN. GitHub Actions does not trigger downstream workflows for pushes made with
+# GITHUB_TOKEN -- that protection exists to prevent infinite loops. A BOT_PAT push is treated as a
+# regular user push, so when the resulting PR is merged to main, image.yml fires normally.
 # To configure: create a fine-grained PAT with "Contents: Read and write" and "Pull requests: Read and write"
 # on this repo, then store it as a repository secret named BOT_PAT.
 
@@ -86,10 +86,10 @@ jobs:
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           BRANCH="chore/version-bump-${NEW_VERSION}"
-          git checkout -b "${BRANCH}"
+          git checkout -B "${BRANCH}"
           git add package.json package-lock.json
           git commit -m "chore: bump version to ${NEW_VERSION}"
-          git push origin "${BRANCH}"
+          git push --force-with-lease origin "${BRANCH}"
 
       - name: Open pull request
         env:
@@ -103,11 +103,15 @@ jobs:
           2. Trigger release.yml with the new version string
           3. (Optional) Pull new image: \`docker compose pull && docker compose up -d\`"
 
-          gh pr create \
-            --base main \
-            --head "chore/version-bump-${NEW_VERSION}" \
-            --title "chore: bump version to ${NEW_VERSION}" \
-            --body "${BODY}"
+          if gh pr view "chore/version-bump-${NEW_VERSION}" --json state -q .state 2>/dev/null | grep -q .; then
+            echo "PR for chore/version-bump-${NEW_VERSION} already exists — skipping creation"
+          else
+            gh pr create \
+              --base main \
+              --head "chore/version-bump-${NEW_VERSION}" \
+              --title "chore: bump version to ${NEW_VERSION}" \
+              --body "${BODY}"
+          fi
 
       - name: Notify on completion
         if: always()
