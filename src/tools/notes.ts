@@ -306,6 +306,9 @@ export function registerNoteTools(mcpServer: McpServer): void {
             rank: row.rank,
           })),
           total_count: totalCount,
+          next_step: totalCount > 0
+            ? "Notes contain documented decisions. Reference them by title in your response. Do not re-derive conclusions that contradict these notes."
+            : "No matching notes found. If making a new decision on this topic, consider creating a note to document it.",
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");

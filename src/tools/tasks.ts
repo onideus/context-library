@@ -483,6 +483,9 @@ export function registerTaskTools(mcpServer: McpServer): void {
         return jsonResponse({
           tasks: dataResult.rows.map(formatTask),
           total_count: totalCount,
+          next_step: totalCount > 0
+            ? "Tasks found. Check their status before creating new tasks on the same topic."
+            : "No matching tasks found. Safe to create a new task if needed.",
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");

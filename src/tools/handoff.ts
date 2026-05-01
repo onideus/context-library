@@ -82,6 +82,24 @@ export function formatStoredAtLocal(storedAt: string, tz?: string): string | nul
   }
 }
 
+/** Compute next_step guidance based on handoff state. */
+export function computeNextStep(handoff: Handoff): string {
+  const parts: string[] = [];
+
+  parts.push("Before responding on architecture, strategy, or pipeline topics, call search_notes or search_context to check for prior decisions.");
+
+  const openCount = handoff.tasks?.open?.length ?? 0;
+  if (openCount > 0) {
+    parts.push(`${openCount} open tasks loaded. Check search_tasks before creating new tasks to avoid duplicates.`);
+  }
+
+  if (handoff.tone_notes) {
+    parts.push("tone_notes loaded -- read and apply before responding.");
+  }
+
+  return parts.join(" ");
+}
+
 /** Compute task_summary from handoff data. */
 export function computeTaskSummary(handoff: Handoff) {
   return {
@@ -495,6 +513,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               handoff_count: handoffCount,
               embedding_status: embeddingStatus,
               evidence_pulled: true,
+              next_step: computeNextStep(handoff),
             }),
           },
         ],
