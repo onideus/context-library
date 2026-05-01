@@ -1,6 +1,6 @@
 # Context Library
 
-> **Last verified:** April 2026 (v0.7.1, commit 2edcf4d). If this file seems wrong, it probably is — check the source.
+> **Last verified:** May 2026 (v0.8.0, commit 21c0848). If this file seems wrong, it probably is — check the source.
 
 ## What This Is
 
@@ -45,7 +45,7 @@ All four content layers are built and deployed.
 
 ### Built
 
-1. **Handoffs** (ephemeral/session) — Operational state captured at session boundaries. Append-only JSON files in `data/handoffs/`. No database required. Tools: `store_handoff`, `get_latest_handoff`, `patch_handoff`. Schema version: 1.1.
+1. **Handoffs** (ephemeral/session) — Operational state captured at session boundaries. Append-only JSON files in `data/handoffs/`. No database required. Tools: `store_handoff`, `get_latest_handoff`, `patch_handoff`. Schema version: 1.2.
 
 2. **Tasks** (lifecycle) — Action items with status lifecycle (open/completed/deferred/cancelled). Stored in PostgreSQL. Full-text search via `to_tsvector`. Tools: `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`.
 
@@ -62,6 +62,8 @@ All four content layers are built and deployed.
 Every tool description is a **cold-start briefing**. The model reads it with zero prior context about Context Library. Descriptions must be self-contained: explain what the tool does, what each parameter means, what the return shape looks like, and any usage guidance (e.g., "call get_latest_handoff before patching"). This is critical because different MCP clients inject tool descriptions differently and the model may have no system prompt context about this server.
 
 Before adding or modifying MCP tools, read the `mcp-builder` skill reference for tool design patterns, naming conventions, and quality benchmarks.
+
+Search and retrieval tool descriptions follow a CALL-THIS-WHEN / DO-NOT-CALL-WHEN / CONSEQUENCE-OF-SKIPPING structure. This pattern explicitly enumerates trigger conditions, non-triggers, and the cost of failing to call the tool when needed. It produces measurably higher call-through rates than purely informational descriptions. When adding new search or retrieval tools, follow this pattern. When adding write or fetch tools (which are reactive to explicit user requests), the steering pattern is not required.
 
 ## File Structure
 
@@ -113,12 +115,23 @@ src/
     notes.test.ts          # Integration: note CRUD (Postgres-gated)
     artifacts.test.ts      # Integration: artifact CRUD + lifecycle (Postgres-gated)
     artifact-type-normalization.test.ts  # Unit: type normalization
+    backfill-content-hashes.test.ts  # Integration: content_hash backfill (Postgres-gated)
     entities.test.ts       # Integration: entity seed + context_envelope
     compaction.test.ts     # Integration: handoff compaction
     pending-embeddings.test.ts  # Integration: dead letter queue
     rerank.test.ts         # Unit: reranker integration
     validation.test.ts     # Unit: input validation
 ```
+
+### Operational scripts
+
+The `scripts/` directory contains tooling for one-off operations, data migrations, and colocated tests:
+
+- `backfill-content-hashes.ts` — Adds `content_hash` to the `metadata` of existing locked artifacts (`ready`, `executing`, `completed`) that are missing it. Safe to re-run; already-hashed artifacts are skipped. Run once after upgrading from a version prior to the lockable-artifacts feature (PR #85). Run with `npx tsx scripts/backfill-content-hashes.ts`.
+- `compact-history.ts` — Compacts all handoff JSON files except the most recent, reducing file sizes by stripping non-essential keys. Skips handoffs whose embedding is still queued in `pending_embeddings`. Idempotent. Exposed as `npm run compact-history`.
+- `extract-entities.ts` — Reads handoff JSON files from the configured data directory, batches them to the Anthropic API for entity extraction, and writes/merges a draft `entities.seed.json` for human review. Idempotent: an existing seed file is merged, preserving human-edited constraints. Exposed as `npm run extract-entities`. Requires `ANTHROPIC_API_KEY`.
+- `merge-entities.ts` — Pure merge logic for the entity seeding pipeline. Extracted from `extract-entities.ts` for testability. Not directly runnable.
+- `extract-entities.test.ts` — Test suite for the extraction and merge logic (lives in `scripts/`, not `src/__tests__/`).
 
 ## Database
 
@@ -130,7 +143,7 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `tasks` — UUID PK, title, context, status (enum), scope (enum), priority (enum), tags (text[]), blocked_reason, scheduled/due dates, timestamps. FTS index on title+context. Auto-updated `updated_at` trigger.
 - `embeddings` — UUID PK, content_type + content_id (unique), content_text, embedding (vector(768)), metadata (JSONB). HNSW index for cosine similarity (m=16, ef_construction=128). FTS index on content_text.
 - `notes` — UUID PK, title, content, scope, domain, tags (text[]), source_url, related_task_ids (uuid[]), timestamps. FTS on title+content.
-- `artifacts` — UUID PK, title, content, artifact_type, status (enum), scope, tags (text[]), pointer (JSONB), dependencies (uuid[]), execution_order (integer, unique per type), related_task_ids (uuid[]), metadata (JSONB), timestamps. FTS on title+content.
+- `artifacts` — UUID PK, title, content, artifact_type, status (enum), scope, tags (text[]), pointer (JSONB), dependencies (uuid[]), execution_order (integer, unique per type), related_task_ids (uuid[]), metadata (JSONB), timestamps. FTS on title+content. `content_hash` (SHA-256 hex string) is stored inside `metadata` at write time when an artifact transitions to `ready` status, and cleared on revert to `draft`. The tool layer strips any caller-supplied `content_hash` from metadata updates on locked artifacts to prevent tampering.
 - `entities` — Entity knowledge base for context_envelope generation. Seeded from deployment-local JSON.
 - `pending_embeddings` — Dead letter queue for embeddings that failed during TEI outages. Drained on startup and on next successful search_context/reindex.
 - `_migrations` — filename PK, applied_at timestamp.
@@ -189,6 +202,7 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned.
 - **`ci-checks.yml`** — Reusable workflow: `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16), Snyk dependency scan. Notifies via ntfy.
 - **`image.yml`** — On push to main: runs ci-checks, builds Docker image, Snyk container scan (with base image exclusion), pushes `sha-<short>` tagged image to GHCR.
 - **`release.yml`** — On `v*` tag push or workflow_dispatch: promotes a SHA-tagged image to version tag + `latest` (skips latest for prereleases), creates GitHub Release with auto-generated notes, notifies via ntfy.
+- **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `image.yml` normally (GITHUB_TOKEN pushes do not trigger downstream workflows).
 - **`cleanup.yml`** — Cleans up old container images and stale resources.
 
 CI does NOT validate Docker Compose startup. See the compose-validation workflow (if present) or run `scripts/test-compose.sh` locally.
@@ -216,6 +230,8 @@ npm test             # vitest single run
 npm run build        # tsc + copy migrations to dist/
 npm start            # node dist/server.js (production)
 npx tsx src/db/seed.ts  # seed dev database with example tasks
+npm run extract-entities  # populate entities.seed.json from existing handoffs (requires ANTHROPIC_API_KEY)
+npm run compact-history   # compact older handoff files in place
 ```
 
 Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/health`:
@@ -223,10 +239,12 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 ```json
 {
   "status": "ok",       // string — always "ok" when the server is up
-  "version": "0.7.1",  // string — semver from package.json / APP_VERSION env var
+  "version": "0.8.0",  // string — semver from package.json / APP_VERSION env var
   "uptime": 42          // integer — seconds since process start
 }
 ```
+
+For contribution guidelines (PR process, branch naming, review expectations), see `CONTRIBUTING.md` in the repo root.
 
 ## What NOT To Do
 
