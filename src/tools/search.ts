@@ -363,13 +363,19 @@ export function registerSearchTools(mcpServer: McpServer): void {
         const noteResults = finalRows.filter(r => r.content_type === 'note');
         const artifactResults = finalRows.filter(r => r.content_type === 'artifact');
 
+        const formatIds = (ids: string[]) => {
+          const MAX = 5;
+          if (ids.length <= MAX) return ids.join(", ");
+          return `${ids.slice(0, MAX).join(", ")} (+${ids.length - MAX} more)`;
+        };
+
         let nextStep = "Cite relevant content_ids in your response.";
         if (noteResults.length > 0) {
-          const noteIds = noteResults.map(r => r.content_id).join(", ");
+          const noteIds = formatIds(noteResults.map(r => r.content_id));
           nextStep += ` Notes found (${noteIds}) -- these contain prior decisions. Do not contradict them without explicit user override.`;
         }
         if (artifactResults.length > 0) {
-          const artifactIds = artifactResults.map(r => r.content_id).join(", ");
+          const artifactIds = formatIds(artifactResults.map(r => r.content_id));
           nextStep += ` Artifacts found (${artifactIds}) -- check their status before creating related work.`;
         }
 
