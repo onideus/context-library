@@ -429,6 +429,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               filename,
               task_summary: computeTaskSummary(handoff),
               schema_version: SCHEMA_VERSION,
+              next_step: computeNextStep(handoff),
             }),
           },
         ],
