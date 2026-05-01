@@ -125,7 +125,7 @@ src/
 
 ### Operational scripts
 
-The `scripts/` directory contains tooling for one-off operations and data migrations:
+The `scripts/` directory contains tooling for one-off operations, data migrations, and colocated tests:
 
 - `backfill-content-hashes.ts` — Adds `content_hash` to the `metadata` of existing locked artifacts (`ready`, `executing`, `completed`) that are missing it. Safe to re-run; already-hashed artifacts are skipped. Run once after upgrading from a version prior to the lockable-artifacts feature (PR #85). Run with `npx tsx scripts/backfill-content-hashes.ts`.
 - `compact-history.ts` — Compacts all handoff JSON files except the most recent, reducing file sizes by stripping non-essential keys. Skips handoffs whose embedding is still queued in `pending_embeddings`. Idempotent. Exposed as `npm run compact-history`.
@@ -202,7 +202,7 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned.
 - **`ci-checks.yml`** — Reusable workflow: `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16), Snyk dependency scan. Notifies via ntfy.
 - **`image.yml`** — On push to main: runs ci-checks, builds Docker image, Snyk container scan (with base image exclusion), pushes `sha-<short>` tagged image to GHCR.
 - **`release.yml`** — On `v*` tag push or workflow_dispatch: promotes a SHA-tagged image to version tag + `latest` (skips latest for prereleases), creates GitHub Release with auto-generated notes, notifies via ntfy.
-- **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a BOT_PAT so that merging the PR triggers `image.yml` normally (GITHUB_TOKEN pushes do not trigger downstream workflows).
+- **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `image.yml` normally (GITHUB_TOKEN pushes do not trigger downstream workflows).
 - **`cleanup.yml`** — Cleans up old container images and stale resources.
 
 CI does NOT validate Docker Compose startup. See the compose-validation workflow (if present) or run `scripts/test-compose.sh` locally.
@@ -234,8 +234,6 @@ npm run extract-entities  # populate entities.seed.json from existing handoffs (
 npm run compact-history   # compact older handoff files in place
 ```
 
-For contribution guidelines (PR process, branch naming, review expectations), see `CONTRIBUTING.md` in the repo root.
-
 Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/health`:
 
 ```json
@@ -245,6 +243,8 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
   "uptime": 42          // integer — seconds since process start
 }
 ```
+
+For contribution guidelines (PR process, branch naming, review expectations), see `CONTRIBUTING.md` in the repo root.
 
 ## What NOT To Do
 
