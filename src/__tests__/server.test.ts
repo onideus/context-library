@@ -824,6 +824,57 @@ describe("MCP Tools", () => {
       expect(storeTool).toBeDefined();
       expect(storeTool.description).not.toMatch(/[Oo]verwrites?/);
     });
+
+    it("store_handoff response includes next_step string", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: { tone_notes: "next_step test" },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.success).toBe(true);
+      expect(typeof result.next_step).toBe("string");
+      expect(result.next_step.length).toBeGreaterThan(0);
+    });
+
+    it("store_handoff next_step mentions open task count when tasks.open is non-empty", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: { tasks: { open: ["task-a", "task-b"], completed: [], blocked: [] } },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.next_step).toMatch(/2.*open task|open task.*2/i);
+    });
+  });
+
+  describe("get_latest_handoff — next_step field", () => {
+    it("get_latest_handoff response includes next_step string", async () => {
+      await storeAndVerify({ tone_notes: "next_step retrieval test" });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(typeof result.next_step).toBe("string");
+      expect(result.next_step.length).toBeGreaterThan(0);
+    });
+
+    it("get_latest_handoff next_step mentions tone_notes when present", async () => {
+      await storeAndVerify({ tone_notes: "remember to be concise" });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.next_step).toMatch(/tone_notes/i);
+    });
   });
 });
 

@@ -360,6 +360,25 @@ export function registerSearchTools(mcpServer: McpServer): void {
           envelope = emptyEnvelope();
         }
 
+        const noteResults = finalRows.filter(r => r.content_type === 'note');
+        const artifactResults = finalRows.filter(r => r.content_type === 'artifact');
+
+        const formatIds = (ids: string[]) => {
+          const MAX = 5;
+          if (ids.length <= MAX) return ids.join(", ");
+          return `${ids.slice(0, MAX).join(", ")} (+${ids.length - MAX} more)`;
+        };
+
+        let nextStep = "Cite relevant content_ids in your response.";
+        if (noteResults.length > 0) {
+          const noteIds = formatIds(noteResults.map(r => r.content_id));
+          nextStep += ` Notes found (${noteIds}) -- these contain prior decisions. Do not contradict them without explicit user override.`;
+        }
+        if (artifactResults.length > 0) {
+          const artifactIds = formatIds(artifactResults.map(r => r.content_id));
+          nextStep += ` Artifacts found (${artifactIds}) -- check their status before creating related work.`;
+        }
+
         const responseData = {
           results: finalRows.map((r: SearchResultRow & { rerank_score?: number }) => ({
             content_type: r.content_type,
@@ -381,6 +400,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
           deduplicated: true,
           pre_dedup_count: preDedupCount,
           context_envelope: envelope,
+          next_step: nextStep,
         };
 
         // Build MCP content array — prepend boundary notice if detected

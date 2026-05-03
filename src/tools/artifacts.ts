@@ -427,6 +427,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           total_count: totalCount,
           limit,
           offset,
+          ...(args.status === "ready" ? { next_step: "These artifacts are queued for pipeline execution. Do not manually update their status -- the pipeline manages ready -> executing -> completed automatically." } : {}),
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
@@ -497,6 +498,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
             rank: row.rank,
           })),
           total_count: totalCount,
+          next_step: totalCount > 0
+            ? "Artifacts found. Check status (draft/ready/executing/completed/superseded) before creating related artifacts."
+            : "No matching artifacts found.",
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
