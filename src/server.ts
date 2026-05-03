@@ -10,6 +10,7 @@ import { registerTaskTools } from "./tools/tasks.js";
 import { registerNoteTools } from "./tools/notes.js";
 import { registerArtifactTools } from "./tools/artifacts.js";
 import { registerSearchTools } from "./tools/search.js";
+import { registerPrompts } from "./tools/prompts.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
@@ -75,6 +76,7 @@ function createMcpServer(): McpServer {
   registerNoteTools(server);
   registerArtifactTools(server);
   registerSearchTools(server);
+  registerPrompts(server);
   return server;
 }
 
