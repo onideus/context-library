@@ -274,7 +274,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const result = await callTool("get_artifact", { id: created.id });
       expect(result.id).toBe(created.id);
       expect(result.content).toBe("template body");
-      expect(result.metadata).toEqual({ key: "value" });
+      expect(result.metadata.key).toBe("value");
+      expect(result.metadata.content_hash).toBeDefined();
     });
 
     it("returns NOT_FOUND for non-existent ID", async () => {
@@ -552,7 +553,10 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         id: created.id,
         metadata: { b: 20, c: 3 },
       });
-      expect(result.metadata).toEqual({ a: 1, b: 20, c: 3 });
+      expect(result.metadata.a).toBe(1);
+      expect(result.metadata.b).toBe(20);
+      expect(result.metadata.c).toBe(3);
+      expect(result.metadata.content_hash).toBeDefined();
     });
 
     it("returns NOT_FOUND for non-existent artifact", async () => {
@@ -609,9 +613,9 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(fetched.metadata.content_hash).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    it("store_artifact with status 'draft' does NOT set content_hash", async () => {
+    it("store_artifact sets content_hash for any status when content is provided", async () => {
       const result = await callTool("store_artifact", {
-        title: "No-hash-on-draft",
+        title: "Hash-on-draft",
         artifact_type: "cc-prompt",
         scope: "work",
         content: "draft content",
@@ -619,7 +623,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(result.error).toBeUndefined();
 
       const fetched = await callTool("get_artifact", { id: result.id });
-      expect(fetched.metadata.content_hash).toBeUndefined();
+      expect(fetched.metadata.content_hash).toBeDefined();
+      expect(fetched.metadata.content_hash).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it("update_artifact transitioning to 'ready' computes content_hash", async () => {
@@ -659,6 +664,43 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const fetchedA = await callTool("get_artifact", { id: a.id });
       const fetchedB = await callTool("get_artifact", { id: b.id });
       expect(fetchedA.metadata.content_hash).toBe(fetchedB.metadata.content_hash);
+    });
+
+    it("update_artifact recomputes content_hash when content is updated", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-recompute",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "original content",
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      const originalHash = original.metadata.content_hash;
+      expect(originalHash).toBeDefined();
+
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        content: "updated content",
+      });
+      expect(updated.metadata.content_hash).toBeDefined();
+      expect(updated.metadata.content_hash).not.toBe(originalHash);
+    });
+
+    it("server-computed hash overrides caller-supplied content_hash when content is provided", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-override",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "some content",
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      const correctHash = original.metadata.content_hash;
+
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        content: "some content",
+        metadata: { content_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
+      });
+      expect(updated.metadata.content_hash).toBe(correctHash);
     });
 
     it("update_artifact rejects content modification when status is 'ready'", async () => {
@@ -751,9 +793,9 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(updated.metadata.existing_key).toBe("keep-me");
     });
 
-    it("pointer-only artifact gets content_hash of empty string when stored as ready", async () => {
+    it("pointer-only artifact does not set content_hash", async () => {
       const result = await callTool("store_artifact", {
-        title: "Pointer-hash",
+        title: "Pointer-no-hash",
         artifact_type: "research",
         scope: "work",
         pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.pdf" },
@@ -762,11 +804,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(result.error).toBeUndefined();
 
       const fetched = await callTool("get_artifact", { id: result.id });
-      expect(fetched.metadata.content_hash).toBeDefined();
-      // sha256 of empty string
-      expect(fetched.metadata.content_hash).toBe(
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-      );
+      expect(fetched.metadata.content_hash).toBeUndefined();
     });
 
     it("update_artifact silently ignores content_hash supplied in metadata on a locked artifact", async () => {

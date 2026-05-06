@@ -283,8 +283,8 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       const status = args.status ?? "draft";
 
       const finalMetadata: Record<string, unknown> = { ...(args.metadata ?? {}) };
-      if (status === "ready") {
-        finalMetadata.content_hash = computeContentHash(args.content ?? "");
+      if (hasContent) {
+        finalMetadata.content_hash = computeContentHash(args.content!);
       }
 
       try {
@@ -642,11 +642,12 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           sets.push(`related_task_ids = $${paramIdx++}::uuid[]`);
           params.push(args.related_task_ids);
         }
-        const transitioningToReady = args.status === "ready" && current.status !== "ready";
+        const contentUpdated = typeof args.content === "string";
         const revertingToDraft = args.status === "draft" && current.status === "ready";
 
-        if (transitioningToReady) {
-          const hash = computeContentHash(nextContent ?? "");
+        if (contentUpdated) {
+          // Content is changing — server-computed hash overrides any caller-supplied value.
+          const hash = computeContentHash(args.content as string);
           const hashMeta = args.metadata !== undefined
             ? { ...args.metadata, content_hash: hash }
             : { content_hash: hash };
