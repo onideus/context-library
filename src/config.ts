@@ -16,4 +16,7 @@ export const config = {
   entitySeedPath: process.env.ENTITY_SEED_PATH ?? "./data/entities.seed.json",
   searchAliasPath: process.env.SEARCH_ALIAS_PATH ?? "./data/search-aliases.json",
   rerankerUrl: process.env.RERANKER_URL ?? null,
+  entityExtractionEnabled: process.env.ENTITY_EXTRACTION_ENABLED === "true",
+  entityExtractionProvider: process.env.ENTITY_EXTRACTION_PROVIDER ?? "none",
+  entityExtractionAsync: process.env.ENTITY_EXTRACTION_ASYNC !== "false",
 } as const;
