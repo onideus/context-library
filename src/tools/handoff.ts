@@ -310,6 +310,8 @@ Parameters:
 
 const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of store_handoff when you only need to update specific fields (e.g., move a task from open to completed, update mood, append to conversation arc). Scalars overwrite, objects deep-merge, arrays use explicit operations (append/remove/replace). Each call creates a new timestamped file (append-only).
 
+Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and store_artifact for guidance on what belongs elsewhere.
+
 IMPORTANT: Always call get_latest_handoff first to confirm current state before patching. This prevents merge conflicts and stale data issues.
 
 Session naming convention: Use YYYY-MM-DD-vNN format for session labels in active_context.session_meta.label (e.g., "2026-04-10-v01").

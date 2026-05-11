@@ -148,7 +148,7 @@ const pointerSchema = z.object({
 
 // ── Tool Descriptions ────────────────────────────────────────────
 
-const STORE_ARTIFACT_DESC = `Store a generated output as an artifact. Artifacts are the fourth content primitive — tracked, searchable, lifecycle-aware outputs that bridge planning and execution. Use for Claude Code prompts, research reports, blog posts, templates, presentations — anything generated once and consumed later.
+const STORE_ARTIFACT_DESC = `Store a generated output as an artifact. Artifacts are the fourth content primitive — tracked, searchable, lifecycle-aware outputs that bridge planning and execution. Use for CC prompts, research reports, blog posts, templates, presentations — anything generated once and consumed later.
 
 How artifacts differ from the other primitives:
 - Tasks are action items with an open/completed lifecycle — "write the migration" is a task.
