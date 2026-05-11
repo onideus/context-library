@@ -148,13 +148,15 @@ const pointerSchema = z.object({
 
 // ── Tool Descriptions ────────────────────────────────────────────
 
-const STORE_ARTIFACT_DESC = `Store a generated output as an artifact. Artifacts are the fourth content primitive — tracked, searchable, lifecycle-aware outputs that bridge planning and execution. Use for Claude Code prompts, research reports, blog posts, templates, presentations — anything generated once and consumed later.
+const STORE_ARTIFACT_DESC = `Store a generated output as an artifact. Artifacts are the fourth content primitive — tracked, searchable, lifecycle-aware outputs that bridge planning and execution. Use for CC prompts, research reports, blog posts, templates, presentations — anything generated once and consumed later.
 
 How artifacts differ from the other primitives:
 - Tasks are action items with an open/completed lifecycle — "write the migration" is a task.
 - Notes are permanent interpretation — decisions, patterns, takeaways. No lifecycle, no ordering.
 - Handoffs are ephemeral session state.
 - Artifacts are the concrete outputs produced by work. They have a status lifecycle (draft → ready → executing → completed) and can be ordered within a batch via execution_order.
+
+Route content to the appropriate primitive — see create_note, create_task, store_handoff, and patch_handoff for guidance on what belongs elsewhere.
 
 Storage modes:
 - Inline 'content' — for small artifacts like CC prompts, snippets, short docs. Stored directly in Postgres, indexed for semantic search.

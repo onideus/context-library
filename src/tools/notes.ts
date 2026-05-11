@@ -65,9 +65,10 @@ const orderDirEnum = z.enum(["asc", "desc"]);
 
 const CREATE_NOTE_DESC = `Create a permanent knowledge entry. Use for decisions made, approaches tried, constraints discovered, patterns identified, article takeaways, and connections between ideas — anything that should survive across sessions and never be compacted away.
 
-Knowledge is distinct from the other two primitives:
+Context Library has four content primitives — tasks, handoffs, artifacts, and notes. Notes are distinct from the others:
 - Tasks are action items with a lifecycle (open → completed). "Research X" is a task.
 - Handoffs are ephemeral session state that gets compacted over time.
+- Artifacts are generated outputs with a status lifecycle (draft → ready → completed). A produced CC prompt is an artifact.
 - Notes are permanent interpretation — the reasoning, the decision, the insight. "After researching X, we decided Y because Z" is knowledge.
 
 Use the 'domain' field to categorize (e.g., 'architecture', 'security', 'career', 'health'). Tags are free-form and compose with domain. The 'scope' field separates work/personal/shared knowledge. Provide 'source_url' when capturing takeaways from external material. Set 'related_task_ids' to link a note back to the tasks that produced it.
@@ -81,6 +82,8 @@ const LIST_NOTES_DESC = `List knowledge entries with optional filters and pagina
 Defaults to newest-first by created_at. Filter by scope, domain, or tags (ANY-match). Use search_notes or search_context when you want relevance ranking instead of filtered browsing.`;
 
 const SEARCH_NOTES_DESC = `Full-text search across note titles and content. Uses PostgreSQL FTS with English stemming, ranked by relevance. Returns matching notes WITH full content (unlike list_notes).
+
+Use search_notes when looking for a specific decision or pattern: "What did we decide about X?", "Is there a note about Y?" It queries only the notes table, making it faster for targeted knowledge lookup. Prefer search_context when you need cross-primitive results (handoffs + notes + artifacts in one query). Prefer search_notes when you specifically want decisions and patterns.
 
 CALL THIS WHEN:
 - You need to verify a prior decision before making a recommendation

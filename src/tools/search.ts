@@ -92,6 +92,14 @@ CONSEQUENCE OF SKIPPING: Recommendations will contradict documented decisions. D
 
 QUERY TIPS: Natural language, include entity names. People: full name. Devices: user's name for it.
 
+Content type guide — what each type contains:
+- handoff — what happened in recent sessions, operational history
+- note — decisions made, patterns established, lessons learned
+- task — action items and their status
+- artifact — generated outputs: CC prompts, research, templates, reports
+
+If you know which primitive you want, filter by content_types to reduce noise. If uncertain, run without a filter and let RRF surface what's most relevant.
+
 - after (optional): ISO date — only return results stored after this date
 - before (optional): ISO date — only return results stored before this date
 Use these to narrow searches to specific time windows (e.g., "what did I decide about X last week").
@@ -103,8 +111,8 @@ Returns: {results[], context_envelope, query, total, mode, deduplicated, pre_ded
 If results reference events indirectly, reformulate with specific terms, lower threshold (0.05), higher limit (20).
 
 Response Format:
-- Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
-- Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
+- Reasoning-capable models (extended thinking enabled): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
+- Standard inference models: Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
 
 const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs, tasks, notes, and artifacts. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
 

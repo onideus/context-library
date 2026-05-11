@@ -241,6 +241,8 @@ async function compactPreviousHandoff(previousFilename: string | null): Promise<
 
 const STORE_HANDOFF_DESCRIPTION = `Store the current operational handoff state as a new timestamped file (append-only — previous handoffs are preserved, not overwritten). Use this for full-state captures at session boundaries. For partial updates mid-session, use patch_handoff instead.
 
+Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and store_artifact for guidance on what belongs elsewhere.
+
 IMPORTANT: Always call get_latest_handoff first to load existing state before storing. This prevents data loss from overwriting fields you didn't intend to clear.
 
 Usage cadence:
@@ -249,6 +251,18 @@ Usage cadence:
 - Before heavy context operations that may compress earlier messages
 
 Session naming convention: Use YYYY-MM-DD-vNN format for session labels in active_context.session_meta.label (e.g., "2026-04-10-v01").
+
+Content routing — what belongs in active_context (handoff):
+- Working state: current branch, where you stopped, next steps in this session
+- In-progress decisions not yet finalized
+- Short-lived context that only matters in the next 1–2 sessions
+
+What belongs elsewhere:
+- Durable decisions, architectural patterns, lessons learned → create_note
+- Action items with completion lifecycle → create_task
+- Generated outputs (CC prompts, research, templates) → store_artifact
+
+If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
 
 Parameters:
   - operational_state (optional): {sleep_hours, physical_state, energy_level, mood}
@@ -262,12 +276,14 @@ Parameters:
 Returns: {success, stored_at, filename, task_summary, schema_version}
 
 Response Format:
-- Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before confirming the store. Evaluate whether the captured state reflects the actual session. Note any gaps in active_context or tasks explicitly.
-- Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly. Confirm the store and summarize task_summary. Flag when captured state seems thin.`;
+- Reasoning-capable models (extended thinking enabled): Use structured reflection before confirming the store. Evaluate whether the captured state reflects the actual session. Note any gaps in active_context or tasks explicitly.
+- Standard inference models: Respond directly. Confirm the store and summarize task_summary. Flag when captured state seems thin.`;
 
 const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. Returns operational context, active work, task lists, and tone notes from the last session.
 
 WHEN TO CALL: At session start (always), before any store_handoff or patch_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
+
+After loading the handoff, check for durable decisions by calling search_context(content_types: ['note']) or search_notes(query) for topic-specific retrieval. Notes are permanent interpretation — they don't expire between sessions. If making an architectural recommendation, career decision, or strategic judgment, check notes before responding. Handoffs show what was happening; notes show what has been decided and why.
 
 CONSEQUENCE OF SKIPPING: You will operate without session context, miss open tasks, duplicate completed work, or contradict the conversation arc documented in the handoff.
 
@@ -294,6 +310,8 @@ Parameters:
 
 const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of store_handoff when you only need to update specific fields (e.g., move a task from open to completed, update mood, append to conversation arc). Scalars overwrite, objects deep-merge, arrays use explicit operations (append/remove/replace). Each call creates a new timestamped file (append-only).
 
+Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and store_artifact for guidance on what belongs elsewhere.
+
 IMPORTANT: Always call get_latest_handoff first to confirm current state before patching. This prevents merge conflicts and stale data issues.
 
 Session naming convention: Use YYYY-MM-DD-vNN format for session labels in active_context.session_meta.label (e.g., "2026-04-10-v01").
@@ -318,11 +336,23 @@ Parameters:
   - tone_notes (optional): String to replace, or null to preserve
   - timezone (optional): IANA timezone string to replace, or null to preserve
 
+Content routing — what belongs in active_context (handoff):
+- Working state: current branch, where you stopped, next steps in this session
+- In-progress decisions not yet finalized
+- Short-lived context that only matters in the next 1–2 sessions
+
+What belongs elsewhere:
+- Durable decisions, architectural patterns, lessons learned → create_note
+- Action items with completion lifecycle → create_task
+- Generated outputs (CC prompts, research, templates) → store_artifact
+
+If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
+
 Returns: {success, patched_fields, stored_at, source_handoff, task_summary, schema_version}
 
 Response Format:
-- Reasoning-capable models (Claude Opus, o1, Gemini with thinking): Use structured reflection before patching. Evaluate whether the patch is consistent with the loaded state. Note any gaps or conflicts explicitly.
-- Standard models (Claude Sonnet/Haiku, GPT-4.x, Gemini Flash): Respond directly. Confirm the patched_fields and updated task_summary. Flag when the patch seems inconsistent with recent context.`;
+- Reasoning-capable models (extended thinking enabled): Use structured reflection before patching. Evaluate whether the patch is consistent with the loaded state. Note any gaps or conflicts explicitly.
+- Standard inference models: Respond directly. Confirm the patched_fields and updated task_summary. Flag when the patch seems inconsistent with recent context.`;
 
 // ── Zod Schemas for patch_handoff ──────────────────────────────────
 
