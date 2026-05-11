@@ -1,7 +1,11 @@
 export interface ExtractedTriple {
   subject: string;
+  /** Entity type for the subject node (e.g. "person", "technology"). Defaults to "concept". */
+  subjectType?: string;
   predicate: string;
   object: string;
+  /** Entity type for the object node (e.g. "person", "technology"). Defaults to "concept". */
+  objectType?: string;
   confidence: number;
   contextSnippet?: string;
 }

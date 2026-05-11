@@ -234,9 +234,10 @@ describe("storeTriples", () => {
     const stored = await storeTriples(result, runId);
     warnSpy.mockRestore();
 
-    // First triple's subject upsert failed, so only 0 or 1 triples stored
-    // (second triple's subject/object both succeeded but only if the relation insert ran)
-    expect(stored).toBeGreaterThanOrEqual(0);
+    // Triple 1: subject upsert fails (returns null); object upsert still runs (consumes mock 2).
+    // Triple 2: subject resolves (mock 3); object gets the empty-rows mock (mock 4) → null → skip.
+    // Net result: 0 triples stored.
+    expect(stored).toBe(0);
   });
 });
 
@@ -366,6 +367,16 @@ describe("getRelationsForEntity", () => {
     const [, params] = queryMock.mock.calls[0] as [string, unknown[]];
     // depth param should be clamped to 3
     expect(params[1]).toBe(3);
+  });
+
+  it("clamps hops to a minimum of 1 for zero or negative values", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+
+    await getRelationsForEntity("entity-001", 0);
+
+    // hops=0 → Math.max(1,0)=1 → uses simple WHERE path, not recursive CTE
+    const [sql] = queryMock.mock.calls[0] as [string, unknown[]];
+    expect(sql).not.toContain("WITH RECURSIVE");
   });
 
   it("returns empty array when Postgres is unavailable", async () => {

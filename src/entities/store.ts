@@ -44,6 +44,7 @@ interface ExtractionRunRow {
   provider_version: string | null;
   status: string;
   content_scope: string | null;
+  /** Reserved — not yet written by any function; always 0 until a batch API is added. */
   content_count: number;
   triple_count: number;
   started_at: string;
@@ -61,6 +62,9 @@ export async function upsertEntity(
 ): Promise<EntityNodeRow | null> {
   const canonicalName = name.toLowerCase().trim();
   try {
+    // ON CONFLICT intentionally does not merge metadata — the initial metadata
+    // (usually from the first extraction) is preserved as written; bumping the
+    // mention counter and refreshing last_seen is sufficient for deduplication.
     const result = await query<EntityNodeRow>(
       `INSERT INTO entity_nodes (name, entity_type, canonical_name, metadata)
        VALUES ($1, $2, $3, $4::jsonb)
@@ -84,14 +88,16 @@ export async function storeTriples(
   result: ExtractionResult,
   runId: string
 ): Promise<number> {
+  // Not transactional: a failed relation INSERT after a successful entity upsert
+  // leaves bumped mention_count/last_seen with no corresponding relation.
+  // Acceptable for v1; fix by wrapping in a BEGIN/COMMIT block if needed.
   let stored = 0;
   for (const triple of result.triples) {
     try {
-      // Entities extracted from triples default to 'concept' type since the
-      // triple schema carries no entity type information — callers that have
-      // richer type data should upsertEntity directly before calling storeTriples.
-      const subjectEntity = await upsertEntity(triple.subject, "concept");
-      const objectEntity = await upsertEntity(triple.object, "concept");
+      // Use caller-supplied entity types when available so the same canonical name
+      // can exist as multiple types (e.g. "Python" as "language" vs "project").
+      const subjectEntity = await upsertEntity(triple.subject, triple.subjectType ?? "concept");
+      const objectEntity = await upsertEntity(triple.object, triple.objectType ?? "concept");
       if (!subjectEntity || !objectEntity) continue;
 
       await query(
