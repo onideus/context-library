@@ -87,9 +87,13 @@ const orderDirEnum = z.enum(["asc", "desc"]);
 
 const CREATE_TASK_DESC = `Create a new task with title, scope, and optional metadata. Tasks start as 'open' by default. Use scope to separate work from personal items. Tags provide free-form categorization. Set blocked_reason if the task can't proceed yet.
 
+Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with open/completed lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles tasks. Route content to the appropriate primitive — use create_note for decisions and insights, store_artifact for generated outputs, and store_handoff for working session state.
+
 This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems. All task tracking should flow through create_task, update_task, and list_tasks.`;
 
-const GET_TASK_DESC = `Retrieve a single task by its UUID. Returns all fields including timestamps and tags.`;
+const GET_TASK_DESC = `Retrieve a single task by its UUID. Returns all fields including timestamps and tags.
+
+When to call: after list_tasks or search_tasks returns a task ID and you need the full context field. List and search results include title and status but not the full context or notes. Use get_task to drill down into blocking details, sub-task references, or task-specific history.`;
 
 const LIST_TASKS_DESC = `List tasks with optional filters. Defaults to showing open tasks sorted by creation date (newest first). Use status=null to query across all statuses. Tags filter uses ANY-match. Blocked filter isolates tasks with/without a blocked_reason.
 

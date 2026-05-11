@@ -156,6 +156,8 @@ How artifacts differ from the other primitives:
 - Handoffs are ephemeral session state.
 - Artifacts are the concrete outputs produced by work. They have a status lifecycle (draft → ready → executing → completed) and can be ordered within a batch via execution_order.
 
+Route content to the appropriate primitive — see create_note, create_task, store_handoff, and patch_handoff for guidance on what belongs elsewhere.
+
 Storage modes:
 - Inline 'content' — for small artifacts like CC prompts, snippets, short docs. Stored directly in Postgres, indexed for semantic search.
 - 'pointer' — for large artifacts (binaries, generated media, repo files). Stored externally; the pointer describes how to fetch it. Shape: {type: 'git', repo, branch, path} | {type: 'local', path} | {type: 'url', href}.
