@@ -29,4 +29,8 @@ export const config = {
     const v = parseInt(process.env.ENTITY_EXTRACTION_TIMEOUT_MS ?? "30000", 10);
     return Number.isFinite(v) ? v : 30000;
   })(),
+  entityApiKey: process.env.ENTITY_API_KEY ?? null,
+  entityApiBaseUrl: process.env.ENTITY_API_BASE_URL ?? "https://api.anthropic.com",
+  entityApiModel: process.env.ENTITY_API_MODEL ?? "claude-sonnet-4-20250514",
+  entityApiFormat: (process.env.ENTITY_API_FORMAT ?? "anthropic") as "anthropic" | "openai",
 } as const;
