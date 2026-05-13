@@ -21,6 +21,10 @@ export function getActiveProvider(): EntityExtractor | undefined {
   return registry.get(name)?.extractor;
 }
 
+export function clearRegistry(): void {
+  registry.clear();
+}
+
 export async function listProviders(): Promise<
   Array<{ name: string; version: string; available: boolean }>
 > {

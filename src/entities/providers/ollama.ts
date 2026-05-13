@@ -3,6 +3,8 @@ import type { EntityExtractor, ExtractionResult, ExtractedTriple } from "../type
 
 const PROVIDER_NAME = "ollama";
 const PROVIDER_VERSION = "1.0.0";
+const AVAILABLE_TIMEOUT_MS = 3000;
+const MAX_CONTENT_LENGTH = 16000;
 
 const EXTRACTION_PROMPT = `Extract knowledge graph triples from the following text.
 Return ONLY a JSON array of objects with these fields: subject, predicate, object, confidence (0-1).
@@ -38,8 +40,7 @@ interface OllamaOptions {
 }
 
 interface OllamaChatResponse {
-  message?: { content?: string };
-  done?: boolean;
+  choices?: Array<{ message?: { content?: string } }>;
 }
 
 interface RawTriple {
@@ -118,7 +119,7 @@ export class OllamaProvider implements EntityExtractor {
   async available(): Promise<boolean> {
     try {
       const response = await fetch(`${this.baseUrl}/api/tags`, {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(AVAILABLE_TIMEOUT_MS),
       });
       if (!response.ok) return false;
       const data = await response.json() as { models?: Array<{ name?: string }> };
@@ -140,7 +141,7 @@ export class OllamaProvider implements EntityExtractor {
   ): Promise<ExtractionResult> {
     const start = Date.now();
 
-    const prompt = EXTRACTION_PROMPT.replace("{content}", content.slice(0, 16000));
+    const prompt = EXTRACTION_PROMPT.replace("{content}", content.slice(0, MAX_CONTENT_LENGTH));
 
     const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
       method: "POST",
@@ -161,7 +162,7 @@ export class OllamaProvider implements EntityExtractor {
     }
 
     const data = await response.json() as OllamaChatResponse;
-    const rawText = data?.message?.content ?? "";
+    const rawText = data?.choices?.[0]?.message?.content ?? "";
 
     const triples = parseTriples(rawText, this.minConfidence);
 

@@ -21,6 +21,12 @@ export const config = {
   entityExtractionAsync: process.env.ENTITY_EXTRACTION_ASYNC !== "false",
   ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
   ollamaExtractionModel: process.env.OLLAMA_EXTRACTION_MODEL ?? "sciphi/triplex",
-  entityMinConfidence: parseFloat(process.env.ENTITY_MIN_CONFIDENCE ?? "0.5"),
-  entityExtractionTimeoutMs: parseInt(process.env.ENTITY_EXTRACTION_TIMEOUT_MS ?? "30000", 10),
+  entityMinConfidence: (function () {
+    const v = parseFloat(process.env.ENTITY_MIN_CONFIDENCE ?? "0.5");
+    return Number.isFinite(v) ? v : 0.5;
+  })(),
+  entityExtractionTimeoutMs: (function () {
+    const v = parseInt(process.env.ENTITY_EXTRACTION_TIMEOUT_MS ?? "30000", 10);
+    return Number.isFinite(v) ? v : 30000;
+  })(),
 } as const;

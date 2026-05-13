@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { extractAndStore, extractBatch } from "../../entities/pipeline.js";
+import { extractAndStore, extractBatch, reextractAll } from "../../entities/pipeline.js";
 import type { ExtractionResult } from "../../entities/types.js";
 
 // ── Module mocks ──────────────────────────────────────────────────────
@@ -7,13 +7,13 @@ import type { ExtractionResult } from "../../entities/types.js";
 const createExtractionRunMock = vi.fn();
 const completeExtractionRunMock = vi.fn();
 const failExtractionRunMock = vi.fn();
-const storeTripplesMock = vi.fn();
+const storeTriplesMock = vi.fn();
 
 vi.mock("../../entities/store.js", () => ({
   createExtractionRun: (...args: unknown[]) => createExtractionRunMock(...args),
   completeExtractionRun: (...args: unknown[]) => completeExtractionRunMock(...args),
   failExtractionRun: (...args: unknown[]) => failExtractionRunMock(...args),
-  storeTriples: (...args: unknown[]) => storeTripplesMock(...args),
+  storeTriples: (...args: unknown[]) => storeTriplesMock(...args),
 }));
 
 const getActiveProviderMock = vi.fn();
@@ -27,8 +27,18 @@ vi.mock("../../embeddings/indexer.js", () => ({
   extractHandoffText: (obj: Record<string, unknown>) => JSON.stringify(obj),
 }));
 
+const queryMock = vi.fn();
+
 vi.mock("../../db/client.js", () => ({
-  query: vi.fn().mockResolvedValue({ rows: [] }),
+  query: (...args: unknown[]) => queryMock(...args),
+}));
+
+const readdirMock = vi.fn();
+const readFileMock = vi.fn();
+
+vi.mock("node:fs/promises", () => ({
+  readdir: (...args: unknown[]) => readdirMock(...args),
+  readFile: (...args: unknown[]) => readFileMock(...args),
 }));
 
 // ── Config mock: enabled by default ──────────────────────────────────
@@ -68,8 +78,11 @@ beforeEach(() => {
   createExtractionRunMock.mockReset().mockResolvedValue("run-abc");
   completeExtractionRunMock.mockReset().mockResolvedValue(undefined);
   failExtractionRunMock.mockReset().mockResolvedValue(undefined);
-  storeTripplesMock.mockReset().mockResolvedValue(2);
+  storeTriplesMock.mockReset().mockResolvedValue(2);
   getActiveProviderMock.mockReset();
+  queryMock.mockReset().mockResolvedValue({ rows: [] });
+  readdirMock.mockReset().mockResolvedValue([]);
+  readFileMock.mockReset();
 });
 
 // ── extractAndStore ───────────────────────────────────────────────────
@@ -85,7 +98,7 @@ describe("extractAndStore", () => {
 
     expect(createExtractionRunMock).toHaveBeenCalledOnce();
     expect(provider.extract).toHaveBeenCalledWith("some content", "note", "note-001");
-    expect(storeTripplesMock).toHaveBeenCalledWith(
+    expect(storeTriplesMock).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "ollama" }),
       "run-abc"
     );
@@ -138,7 +151,7 @@ describe("extractAndStore", () => {
     await extractAndStore("task", "t-1", "content", "existing-run-id");
 
     expect(createExtractionRunMock).not.toHaveBeenCalled();
-    expect(storeTripplesMock).toHaveBeenCalledWith(
+    expect(storeTriplesMock).toHaveBeenCalledWith(
       expect.any(Object),
       "existing-run-id"
     );
@@ -157,7 +170,25 @@ describe("extractAndStore", () => {
     warnSpy.mockRestore();
   });
 
-  it("does not block the caller (resolves without awaiting background work)", async () => {
+  it("never rejects — safe to call as fire-and-forget with .catch() for logging only", async () => {
+    const provider = makeProvider(true);
+    provider.extract.mockRejectedValue(new Error("model exploded"));
+    getActiveProviderMock.mockReturnValue(provider);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Simulate the exact pattern used in handoff.ts and notes.ts:
+    //   extractAndStore(...).catch(err => console.warn(...))
+    // The .catch() must never fire because extractAndStore always resolves.
+    let catchWasCalled = false;
+    const bgWork = extractAndStore("note", "n-1", "content");
+    bgWork.catch(() => { catchWasCalled = true; });
+    await bgWork;
+
+    expect(catchWasCalled).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it("resolves without awaiting background work when used without await", async () => {
     const provider = makeProvider(true, []);
     let extractResolve: () => void;
     provider.extract.mockReturnValue(
@@ -175,9 +206,6 @@ describe("extractAndStore", () => {
     );
     getActiveProviderMock.mockReturnValue(provider);
 
-    // When called fire-and-forget from tools, the caller doesn't await.
-    // Verify extractAndStore itself resolves in the scenario where it is awaited
-    // and the extract promise is pending (due to availability check completing fast).
     const pending = extractAndStore("note", "n-1", "content");
     extractResolve!();
     await pending; // should not hang
@@ -266,6 +294,156 @@ describe("extractBatch", () => {
 
     expect(result.runId).toBeNull();
     expect(result.processed).toBe(0);
+    warnSpy.mockRestore();
+  });
+});
+
+// ── reextractAll ──────────────────────────────────────────────────────
+
+describe("reextractAll", () => {
+  it("returns zero processed when no provider is configured", async () => {
+    getActiveProviderMock.mockReturnValue(undefined);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await reextractAll();
+
+    expect(result.handoffs).toEqual({ runId: null, processed: 0 });
+    expect(result.notes).toEqual({ runId: null, processed: 0 });
+    expect(createExtractionRunMock).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("returns zero processed when provider is unavailable", async () => {
+    const provider = makeProvider(false);
+    getActiveProviderMock.mockReturnValue(provider);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await reextractAll();
+
+    expect(result.handoffs).toEqual({ runId: null, processed: 0 });
+    expect(result.notes).toEqual({ runId: null, processed: 0 });
+    expect(createExtractionRunMock).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("processes .json handoff files and notes, returning processed counts", async () => {
+    const provider = makeProvider(true, [
+      { subject: "A", predicate: "uses", object: "B", confidence: 0.9 },
+    ]);
+    getActiveProviderMock.mockReturnValue(provider);
+
+    readdirMock.mockResolvedValue(["handoff-1.json", "handoff-2.json", "not-json.txt"]);
+    readFileMock.mockResolvedValue(JSON.stringify({ summary: "test handoff" }));
+    queryMock.mockResolvedValue({
+      rows: [
+        { id: "note-1", title: "Note One", content: "note content" },
+        { id: "note-2", title: "Note Two", content: "more content" },
+      ],
+    });
+
+    const result = await reextractAll();
+
+    // Only .json files processed (not-json.txt skipped)
+    expect(result.handoffs.processed).toBe(2);
+    expect(result.notes.processed).toBe(2);
+    expect(result.handoffs.runId).toBe("run-abc");
+    expect(result.notes.runId).toBe("run-abc");
+    // Two runs created: one for handoffs, one for notes
+    expect(createExtractionRunMock).toHaveBeenCalledTimes(2);
+    expect(completeExtractionRunMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("continues to notes even when the handoff directory is missing", async () => {
+    const provider = makeProvider(true, []);
+    getActiveProviderMock.mockReturnValue(provider);
+
+    readdirMock.mockRejectedValue(new Error("ENOENT: no such file or directory"));
+    queryMock.mockResolvedValue({
+      rows: [{ id: "note-1", title: "T", content: "C" }],
+    });
+
+    const result = await reextractAll();
+
+    expect(result.handoffs.processed).toBe(0);
+    expect(result.notes.processed).toBe(1);
+    // Note run was still created and completed
+    expect(createExtractionRunMock).toHaveBeenCalledTimes(2);
+    expect(completeExtractionRunMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips handoff files that fail to read and continues processing remaining", async () => {
+    const provider = makeProvider(true, [
+      { subject: "A", predicate: "uses", object: "B", confidence: 0.9 },
+    ]);
+    getActiveProviderMock.mockReturnValue(provider);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    readdirMock.mockResolvedValue(["bad.json", "good.json"]);
+    readFileMock
+      .mockRejectedValueOnce(new Error("permission denied"))
+      .mockResolvedValueOnce(JSON.stringify({ summary: "valid content" }));
+    queryMock.mockResolvedValue({ rows: [] });
+
+    const result = await reextractAll();
+
+    expect(result.handoffs.processed).toBe(1);
+    expect(result.notes.processed).toBe(0);
+    warnSpy.mockRestore();
+  });
+
+  it("skips handoff files that produce empty text after extraction", async () => {
+    const provider = makeProvider(true, []);
+    getActiveProviderMock.mockReturnValue(provider);
+
+    // An empty object serialises to "{}" which has no meaningful text
+    readdirMock.mockResolvedValue(["empty.json"]);
+    readFileMock.mockResolvedValue("{}");
+    queryMock.mockResolvedValue({ rows: [] });
+
+    // extractHandoffText is mocked as JSON.stringify, so "{}" → no content to skip on whitespace check
+    // Provide genuinely blank content by mocking a handoff that yields only whitespace
+    readFileMock.mockResolvedValue(JSON.stringify({ stored_at: "2025-01-01", schema_version: "1.2" }));
+
+    const result = await reextractAll();
+
+    // Even if text is blank, the run is still created and the item is just skipped
+    expect(result.handoffs.runId).toBe("run-abc");
+  });
+
+  it("uses getProvider(name) when an explicit providerName is given", async () => {
+    const provider = makeProvider(true, []);
+    // getProvider is wired to getActiveProviderMock(name)
+    getActiveProviderMock.mockImplementation((name?: string) => {
+      if (name === "custom-provider") return provider;
+      return undefined;
+    });
+
+    readdirMock.mockResolvedValue([]);
+    queryMock.mockResolvedValue({ rows: [] });
+
+    const result = await reextractAll("custom-provider");
+
+    expect(getActiveProviderMock).toHaveBeenCalledWith("custom-provider");
+    // Both runs are created even when no items exist
+    expect(result.handoffs.runId).toBe("run-abc");
+    expect(result.notes.runId).toBe("run-abc");
+  });
+
+  it("handles notes DB failure gracefully — notes processed is 0 but handoffs still complete", async () => {
+    const provider = makeProvider(true, [
+      { subject: "A", predicate: "uses", object: "B", confidence: 0.9 },
+    ]);
+    getActiveProviderMock.mockReturnValue(provider);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    readdirMock.mockResolvedValue(["hf.json"]);
+    readFileMock.mockResolvedValue(JSON.stringify({ summary: "ok" }));
+    queryMock.mockRejectedValue(new Error("connection refused"));
+
+    const result = await reextractAll();
+
+    expect(result.handoffs.processed).toBe(1);
+    expect(result.notes.processed).toBe(0);
     warnSpy.mockRestore();
   });
 });

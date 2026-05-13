@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { registerProvider, getProvider, getActiveProvider, listProviders } from "../../entities/registry.js";
+import { registerProvider, getProvider, getActiveProvider, listProviders, clearRegistry } from "../../entities/registry.js";
 import type { EntityExtractor, ExtractionResult } from "../../entities/types.js";
 
 // ── Config mock ───────────────────────────────────────────────────────
@@ -34,11 +34,8 @@ function makeMockExtractor(name: string, available = true): EntityExtractor {
   };
 }
 
-// Clear registry between tests by re-registering over existing entries.
-// The registry Map is module-level state — we reset by re-registering fresh mocks.
 beforeEach(() => {
-  // No teardown API on the registry; tests manage their own isolation
-  // by registering specific providers they need.
+  clearRegistry();
 });
 
 // ── registerProvider / getProvider ───────────────────────────────────
@@ -73,11 +70,8 @@ describe("getActiveProvider", () => {
   });
 
   it("returns undefined if the active provider name is not registered", () => {
-    // "mock-provider" from config, but not registered in this isolated call
-    // We can't easily clear the registry, so test with a provider known not to exist
-    // by using a fresh config mock context.
-    // This test verifies the lookup logic by ensuring an unregistered-named mock returns undefined.
-    expect(getProvider("definitely-not-registered-abc123")).toBeUndefined();
+    // Registry was cleared by beforeEach — no provider is registered yet.
+    expect(getActiveProvider()).toBeUndefined();
   });
 });
 

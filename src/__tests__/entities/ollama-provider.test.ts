@@ -101,7 +101,7 @@ describe("OllamaProvider.extract() — happy path", () => {
 
   it("returns an ExtractionResult with parsed triples", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: JSON.stringify(triples) } })
+      jsonResponse({ choices: [{ message: { content:JSON.stringify(triples) } }] })
     );
 
     const provider = makeProvider();
@@ -119,7 +119,7 @@ describe("OllamaProvider.extract() — happy path", () => {
 
   it("sends a POST to /v1/chat/completions with the model and prompt", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: "[]" } })
+      jsonResponse({ choices: [{ message: { content:"[]" } }] })
     );
 
     await makeProvider().extract("test content", "handoff", "hf-001");
@@ -141,7 +141,7 @@ describe("OllamaProvider.extract() — happy path", () => {
       { subject: "C", predicate: "rel", object: "D", confidence: 0.3 }, // below 0.5
     ];
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: JSON.stringify(mixed) } })
+      jsonResponse({ choices: [{ message: { content:JSON.stringify(mixed) } }] })
     );
 
     const result = await makeProvider({ minConfidence: 0.5 }).extract("content", "task", "t-1");
@@ -152,7 +152,7 @@ describe("OllamaProvider.extract() — happy path", () => {
   it("clamps confidence to [0, 1]", async () => {
     const raw = [{ subject: "X", predicate: "rel", object: "Y", confidence: 1.5 }];
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: JSON.stringify(raw) } })
+      jsonResponse({ choices: [{ message: { content:JSON.stringify(raw) } }] })
     );
 
     const result = await makeProvider().extract("c", "note", "n-1");
@@ -165,7 +165,7 @@ describe("OllamaProvider.extract() — happy path", () => {
 describe("OllamaProvider.extract() — prompt construction", () => {
   it("includes few-shot examples in the prompt", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: "[]" } })
+      jsonResponse({ choices: [{ message: { content:"[]" } }] })
     );
 
     await makeProvider().extract("my content", "note", "n-1");
@@ -183,7 +183,7 @@ describe("OllamaProvider.extract() — prompt construction", () => {
 
   it("injects the content into the prompt", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: "[]" } })
+      jsonResponse({ choices: [{ message: { content:"[]" } }] })
     );
 
     const content = "Unique-marker-string-XYZ";
@@ -195,7 +195,7 @@ describe("OllamaProvider.extract() — prompt construction", () => {
 
   it("truncates content to 16000 chars to stay within model limits", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: "[]" } })
+      jsonResponse({ choices: [{ message: { content:"[]" } }] })
     );
 
     const longContent = "a".repeat(20000);
@@ -214,7 +214,7 @@ describe("OllamaProvider.extract() — prompt construction", () => {
 describe("OllamaProvider.extract() — malformed JSON handling", () => {
   it("returns empty triples on completely invalid JSON", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: "not json at all" } })
+      jsonResponse({ choices: [{ message: { content:"not json at all" } }] })
     );
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -226,7 +226,7 @@ describe("OllamaProvider.extract() — malformed JSON handling", () => {
 
   it("returns empty triples when response is a non-array JSON value", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: '{"not": "an array"}' } })
+      jsonResponse({ choices: [{ message: { content:'{"not": "an array"}' } }] })
     );
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -240,7 +240,7 @@ describe("OllamaProvider.extract() — malformed JSON handling", () => {
     const triples = [{ subject: "S", predicate: "p", object: "O", confidence: 0.9 }];
     const fenced = `\`\`\`json\n${JSON.stringify(triples)}\n\`\`\``;
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: fenced } })
+      jsonResponse({ choices: [{ message: { content:fenced } }] })
     );
 
     const result = await makeProvider().extract("c", "note", "n-1");
@@ -255,7 +255,7 @@ describe("OllamaProvider.extract() — malformed JSON handling", () => {
       { predicate: "rel", object: "Target", confidence: 0.9 },              // missing subject
     ];
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: JSON.stringify(mixed) } })
+      jsonResponse({ choices: [{ message: { content:JSON.stringify(mixed) } }] })
     );
 
     const result = await makeProvider().extract("c", "note", "n-1");
@@ -266,7 +266,7 @@ describe("OllamaProvider.extract() — malformed JSON handling", () => {
   it("handles JSON array embedded in preamble text", async () => {
     const preamble = 'Here are the triples: [{"subject":"X","predicate":"uses","object":"Y","confidence":0.85}] done.';
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ message: { content: preamble } })
+      jsonResponse({ choices: [{ message: { content:preamble } }] })
     );
 
     const result = await makeProvider().extract("c", "note", "n-1");
