@@ -1,0 +1,34 @@
+# Entity extraction configuration overlay (Tier 4)
+#
+# Passes Ollama connection and entity extraction env vars into the
+# context-library container. Ollama runs externally (on the desktop GPU
+# alongside TEI) — it is not managed by Compose. Set OLLAMA_BASE_URL to
+# the address where Ollama is reachable from the NAS (e.g. http://192.168.1.x:11434).
+#
+# Merge with the base compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+#                  -f docker-compose.entities.yml up -d
+#
+# Entity extraction is disabled by default (ENTITY_EXTRACTION_ENABLED=false).
+# Set to true and configure OLLAMA_BASE_URL to enable.
+#
+# The extraction pipeline is fire-and-forget: if Ollama is unreachable,
+# handoff/note writes still succeed and a warning is logged.
+
+services:
+  context-library:
+    environment:
+      # Set to true to enable background entity extraction on handoff/note writes
+      - ENTITY_EXTRACTION_ENABLED=${ENTITY_EXTRACTION_ENABLED:-false}
+      # Provider name — must match a registered provider (currently: "ollama")
+      - ENTITY_EXTRACTION_PROVIDER=${ENTITY_EXTRACTION_PROVIDER:-ollama}
+      # false to run extraction synchronously (not recommended for production)
+      - ENTITY_EXTRACTION_ASYNC=${ENTITY_EXTRACTION_ASYNC:-true}
+      # Ollama runs externally — set to the NAS-reachable address of your desktop
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://localhost:11434}
+      # Ollama model to use for triple extraction
+      - OLLAMA_EXTRACTION_MODEL=${OLLAMA_EXTRACTION_MODEL:-sciphi/triplex}
+      # Minimum confidence threshold for extracted triples (0–1)
+      - ENTITY_MIN_CONFIDENCE=${ENTITY_MIN_CONFIDENCE:-0.5}
+      # Timeout per extraction call in milliseconds
+      - ENTITY_EXTRACTION_TIMEOUT_MS=${ENTITY_EXTRACTION_TIMEOUT_MS:-30000}
