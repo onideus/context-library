@@ -17,14 +17,17 @@ vi.mock("../../entities/store.js", () => ({
 }));
 
 const getActiveProviderMock = vi.fn();
+const getProviderMock = vi.fn();
 
 vi.mock("../../entities/registry.js", () => ({
   getActiveProvider: () => getActiveProviderMock(),
-  getProvider: (name: string) => getActiveProviderMock(name),
+  getProvider: (name: string) => getProviderMock(name),
 }));
 
+const extractHandoffTextMock = vi.fn((obj: Record<string, unknown>) => JSON.stringify(obj));
+
 vi.mock("../../embeddings/indexer.js", () => ({
-  extractHandoffText: (obj: Record<string, unknown>) => JSON.stringify(obj),
+  extractHandoffText: (...args: unknown[]) => extractHandoffTextMock(...args as [Record<string, unknown>]),
 }));
 
 const queryMock = vi.fn();
@@ -80,6 +83,8 @@ beforeEach(() => {
   failExtractionRunMock.mockReset().mockResolvedValue(undefined);
   storeTriplesMock.mockReset().mockResolvedValue(2);
   getActiveProviderMock.mockReset();
+  getProviderMock.mockReset();
+  extractHandoffTextMock.mockReset().mockImplementation((obj: Record<string, unknown>) => JSON.stringify(obj));
   queryMock.mockReset().mockResolvedValue({ rows: [] });
   readdirMock.mockReset().mockResolvedValue([]);
   readFileMock.mockReset();
@@ -366,9 +371,11 @@ describe("reextractAll", () => {
 
     expect(result.handoffs.processed).toBe(0);
     expect(result.notes.processed).toBe(1);
-    // Note run was still created and completed
-    expect(createExtractionRunMock).toHaveBeenCalledTimes(2);
-    expect(completeExtractionRunMock).toHaveBeenCalledTimes(2);
+    expect(result.handoffs.runId).toBeNull();
+    expect(result.notes.runId).toBe("run-abc");
+    // Only the notes run is created — no handoff run for an empty/missing directory
+    expect(createExtractionRunMock).toHaveBeenCalledTimes(1);
+    expect(completeExtractionRunMock).toHaveBeenCalledTimes(1);
   });
 
   it("skips handoff files that fail to read and continues processing remaining", async () => {
@@ -395,25 +402,24 @@ describe("reextractAll", () => {
     const provider = makeProvider(true, []);
     getActiveProviderMock.mockReturnValue(provider);
 
-    // An empty object serialises to "{}" which has no meaningful text
-    readdirMock.mockResolvedValue(["empty.json"]);
-    readFileMock.mockResolvedValue("{}");
-    queryMock.mockResolvedValue({ rows: [] });
-
-    // extractHandoffText is mocked as JSON.stringify, so "{}" → no content to skip on whitespace check
-    // Provide genuinely blank content by mocking a handoff that yields only whitespace
+    readdirMock.mockResolvedValue(["structural-only.json"]);
     readFileMock.mockResolvedValue(JSON.stringify({ stored_at: "2025-01-01", schema_version: "1.2" }));
+    // Override extractHandoffText to return whitespace, as the real implementation would
+    // when the handoff contains only structural keys (stored_at, schema_version, etc.).
+    extractHandoffTextMock.mockReturnValueOnce("   ");
+    queryMock.mockResolvedValue({ rows: [] });
 
     const result = await reextractAll();
 
-    // Even if text is blank, the run is still created and the item is just skipped
+    // File exists so a run is still created, but the item is skipped due to empty text
     expect(result.handoffs.runId).toBe("run-abc");
+    expect(result.handoffs.processed).toBe(0);
+    expect(provider.extract).not.toHaveBeenCalled();
   });
 
   it("uses getProvider(name) when an explicit providerName is given", async () => {
     const provider = makeProvider(true, []);
-    // getProvider is wired to getActiveProviderMock(name)
-    getActiveProviderMock.mockImplementation((name?: string) => {
+    getProviderMock.mockImplementation((name?: string) => {
       if (name === "custom-provider") return provider;
       return undefined;
     });
@@ -423,10 +429,12 @@ describe("reextractAll", () => {
 
     const result = await reextractAll("custom-provider");
 
-    expect(getActiveProviderMock).toHaveBeenCalledWith("custom-provider");
-    // Both runs are created even when no items exist
-    expect(result.handoffs.runId).toBe("run-abc");
-    expect(result.notes.runId).toBe("run-abc");
+    expect(getProviderMock).toHaveBeenCalledWith("custom-provider");
+    // No items to process — no runs are created
+    expect(result.handoffs.runId).toBeNull();
+    expect(result.notes.runId).toBeNull();
+    expect(result.handoffs.processed).toBe(0);
+    expect(result.notes.processed).toBe(0);
   });
 
   it("handles notes DB failure gracefully — notes processed is 0 but handoffs still complete", async () => {

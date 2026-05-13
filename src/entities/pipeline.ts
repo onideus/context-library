@@ -17,6 +17,7 @@ export async function extractAndStore(
   runId?: string
 ): Promise<void> {
   if (!config.entityExtractionEnabled) return;
+  if (!content.trim()) return;
 
   const provider = getActiveProvider();
   if (!provider) {
@@ -103,6 +104,7 @@ export async function extractBatch(
   let totalTriples = 0;
 
   for (const item of items) {
+    if (!item.content.trim()) continue;
     try {
       const result = await provider.extract(item.content, contentType, item.id);
       const stored = runId ? await storeTriples(result, runId) : 0;
@@ -166,31 +168,33 @@ export async function reextractAll(providerName?: string): Promise<{
     // Directory missing or unreadable — proceed with empty list
   }
 
-  const handoffRunId = await createExtractionRun(provider.provider, provider.version, {
-    scope: "all-handoffs",
-    contentCount: handoffFiles.length,
-    model: config.ollamaExtractionModel,
-  });
-
-  let handoffTriples = 0;
+  let handoffRunId: string | null = null;
   let handoffsProcessed = 0;
 
-  for (const file of handoffFiles) {
-    try {
-      const raw = await readFile(join(handoffsDir, file), "utf-8");
-      const handoff = JSON.parse(raw) as Record<string, unknown>;
-      const text = extractHandoffText(handoff);
-      if (!text.trim()) continue;
-      const result = await provider.extract(text, "handoff", file);
-      const stored = handoffRunId ? await storeTriples(result, handoffRunId) : 0;
-      handoffTriples += stored;
-      handoffsProcessed++;
-    } catch (err) {
-      console.warn(`[entity-pipeline] reextractAll handoff ${file}:`, (err as Error).message);
-    }
-  }
+  if (handoffFiles.length > 0) {
+    handoffRunId = await createExtractionRun(provider.provider, provider.version, {
+      scope: "all-handoffs",
+      contentCount: handoffFiles.length,
+      model: config.ollamaExtractionModel,
+    });
 
-  if (handoffRunId) {
+    let handoffTriples = 0;
+
+    for (const file of handoffFiles) {
+      try {
+        const raw = await readFile(join(handoffsDir, file), "utf-8");
+        const handoff = JSON.parse(raw) as Record<string, unknown>;
+        const text = extractHandoffText(handoff);
+        if (!text.trim()) continue;
+        const result = await provider.extract(text, "handoff", file);
+        const stored = await storeTriples(result, handoffRunId!);
+        handoffTriples += stored;
+        handoffsProcessed++;
+      } catch (err) {
+        console.warn(`[entity-pipeline] reextractAll handoff ${file}:`, (err as Error).message);
+      }
+    }
+
     await completeExtractionRun(handoffRunId, handoffTriples);
   }
 
@@ -205,28 +209,30 @@ export async function reextractAll(providerName?: string): Promise<{
     console.warn("[entity-pipeline] reextractAll: failed to fetch notes:", (err as Error).message);
   }
 
-  const noteRunId = await createExtractionRun(provider.provider, provider.version, {
-    scope: "all-notes",
-    contentCount: noteRows.length,
-    model: config.ollamaExtractionModel,
-  });
-
-  let noteTriples = 0;
+  let noteRunId: string | null = null;
   let notesProcessed = 0;
 
-  for (const note of noteRows) {
-    try {
-      const text = [note.title, note.content].filter(Boolean).join("\n");
-      const result = await provider.extract(text, "note", note.id);
-      const stored = noteRunId ? await storeTriples(result, noteRunId) : 0;
-      noteTriples += stored;
-      notesProcessed++;
-    } catch (err) {
-      console.warn(`[entity-pipeline] reextractAll note ${note.id}:`, (err as Error).message);
-    }
-  }
+  if (noteRows.length > 0) {
+    noteRunId = await createExtractionRun(provider.provider, provider.version, {
+      scope: "all-notes",
+      contentCount: noteRows.length,
+      model: config.ollamaExtractionModel,
+    });
 
-  if (noteRunId) {
+    let noteTriples = 0;
+
+    for (const note of noteRows) {
+      try {
+        const text = [note.title, note.content].filter(Boolean).join("\n");
+        const result = await provider.extract(text, "note", note.id);
+        const stored = await storeTriples(result, noteRunId!);
+        noteTriples += stored;
+        notesProcessed++;
+      } catch (err) {
+        console.warn(`[entity-pipeline] reextractAll note ${note.id}:`, (err as Error).message);
+      }
+    }
+
     await completeExtractionRun(noteRunId, noteTriples);
   }
 
