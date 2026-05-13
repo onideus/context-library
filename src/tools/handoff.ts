@@ -6,8 +6,9 @@ import { read, writeHandoff, writeHandoffInPlace, getLatestHandoffFilename, getH
 import type { Handoff } from "../storage/schemas.js";
 import { mergeHandoff } from "./merge.js";
 import { compactHandoff, COMPACTED_FLAG } from "./compaction.js";
-import { indexHandoff, getPendingEmbeddingsCount, hasPendingEmbedding } from "../embeddings/indexer.js";
+import { indexHandoff, getPendingEmbeddingsCount, hasPendingEmbedding, extractHandoffText } from "../embeddings/indexer.js";
 import { isEmbeddingAvailable, getLastEmbeddingSuccess } from "../embeddings/client.js";
+import { extractAndStore } from "../entities/pipeline.js";
 import { computeDynamicTaskSummary } from "./task-summary.js";
 import { validatePayloadSize, PayloadTooLargeError, LIMITS } from "./validation.js";
 
@@ -442,6 +443,14 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         console.warn("[store_handoff] Background indexing failed:", err.message)
       );
 
+      // Fire-and-forget entity extraction
+      if (config.entityExtractionEnabled && config.entityExtractionAsync) {
+        const handoffText = extractHandoffText(handoff as Record<string, unknown>);
+        extractAndStore("handoff", filename, handoffText).catch(err =>
+          console.warn("[store_handoff] Background entity extraction failed:", (err as Error).message)
+        );
+      }
+
       // Fire-and-forget compaction of the prior handoff. Non-fatal.
       if (previousFilename && previousFilename !== filename) {
         compactPreviousHandoff(previousFilename).catch(err =>
@@ -657,6 +666,14 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       indexHandoff(newFilename, merged as Record<string, unknown>).catch(err =>
         console.warn("[patch_handoff] Background indexing failed:", err.message)
       );
+
+      // Fire-and-forget entity extraction
+      if (config.entityExtractionEnabled && config.entityExtractionAsync) {
+        const handoffText = extractHandoffText(merged as Record<string, unknown>);
+        extractAndStore("handoff", newFilename, handoffText).catch(err =>
+          console.warn("[patch_handoff] Background entity extraction failed:", (err as Error).message)
+        );
+      }
 
       return {
         content: [

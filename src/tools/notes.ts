@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
 import { indexNote } from "../embeddings/indexer.js";
+import { config } from "../config.js";
+import { extractAndStore } from "../entities/pipeline.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -153,6 +155,12 @@ export function registerNoteTools(mcpServer: McpServer): void {
         }).catch((err) =>
           console.warn("[create_note] Background indexing failed:", err.message)
         );
+        if (config.entityExtractionEnabled && config.entityExtractionAsync) {
+          const noteText = [row.title, row.content].filter(Boolean).join("\n");
+          extractAndStore("note", row.id, noteText).catch((err) =>
+            console.warn("[create_note] Background entity extraction failed:", (err as Error).message)
+          );
+        }
         return jsonResponse({
           id: row.id,
           title: row.title,
@@ -402,6 +410,12 @@ export function registerNoteTools(mcpServer: McpServer): void {
           }).catch((err) =>
             console.warn("[update_note] Background indexing failed:", err.message)
           );
+          if (config.entityExtractionEnabled && config.entityExtractionAsync) {
+            const noteText = [row.title, row.content].filter(Boolean).join("\n");
+            extractAndStore("note", row.id, noteText).catch((err) =>
+              console.warn("[update_note] Background entity extraction failed:", (err as Error).message)
+            );
+          }
         }
 
         return jsonResponse(formatNote(row));
