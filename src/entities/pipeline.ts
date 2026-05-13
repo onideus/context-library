@@ -172,30 +172,33 @@ export async function reextractAll(providerName?: string): Promise<{
   let handoffsProcessed = 0;
 
   if (handoffFiles.length > 0) {
-    handoffRunId = await createExtractionRun(provider.provider, provider.version, {
+    const runId = await createExtractionRun(provider.provider, provider.version, {
       scope: "all-handoffs",
       contentCount: handoffFiles.length,
       model: config.ollamaExtractionModel,
     });
 
-    let handoffTriples = 0;
+    if (runId) {
+      handoffRunId = runId;
+      let handoffTriples = 0;
 
-    for (const file of handoffFiles) {
-      try {
-        const raw = await readFile(join(handoffsDir, file), "utf-8");
-        const handoff = JSON.parse(raw) as Record<string, unknown>;
-        const text = extractHandoffText(handoff);
-        if (!text.trim()) continue;
-        const result = await provider.extract(text, "handoff", file);
-        const stored = await storeTriples(result, handoffRunId!);
-        handoffTriples += stored;
-        handoffsProcessed++;
-      } catch (err) {
-        console.warn(`[entity-pipeline] reextractAll handoff ${file}:`, (err as Error).message);
+      for (const file of handoffFiles) {
+        try {
+          const raw = await readFile(join(handoffsDir, file), "utf-8");
+          const handoff = JSON.parse(raw) as Record<string, unknown>;
+          const text = extractHandoffText(handoff);
+          if (!text.trim()) continue;
+          const result = await provider.extract(text, "handoff", file);
+          const stored = await storeTriples(result, runId);
+          handoffTriples += stored;
+          handoffsProcessed++;
+        } catch (err) {
+          console.warn(`[entity-pipeline] reextractAll handoff ${file}:`, (err as Error).message);
+        }
       }
-    }
 
-    await completeExtractionRun(handoffRunId, handoffTriples);
+      await completeExtractionRun(runId, handoffTriples);
+    }
   }
 
   // ── Notes ─────────────────────────────────────────────────────────
@@ -213,27 +216,30 @@ export async function reextractAll(providerName?: string): Promise<{
   let notesProcessed = 0;
 
   if (noteRows.length > 0) {
-    noteRunId = await createExtractionRun(provider.provider, provider.version, {
+    const runId = await createExtractionRun(provider.provider, provider.version, {
       scope: "all-notes",
       contentCount: noteRows.length,
       model: config.ollamaExtractionModel,
     });
 
-    let noteTriples = 0;
+    if (runId) {
+      noteRunId = runId;
+      let noteTriples = 0;
 
-    for (const note of noteRows) {
-      try {
-        const text = [note.title, note.content].filter(Boolean).join("\n");
-        const result = await provider.extract(text, "note", note.id);
-        const stored = await storeTriples(result, noteRunId!);
-        noteTriples += stored;
-        notesProcessed++;
-      } catch (err) {
-        console.warn(`[entity-pipeline] reextractAll note ${note.id}:`, (err as Error).message);
+      for (const note of noteRows) {
+        try {
+          const text = [note.title, note.content].filter(Boolean).join("\n");
+          const result = await provider.extract(text, "note", note.id);
+          const stored = await storeTriples(result, runId);
+          noteTriples += stored;
+          notesProcessed++;
+        } catch (err) {
+          console.warn(`[entity-pipeline] reextractAll note ${note.id}:`, (err as Error).message);
+        }
       }
-    }
 
-    await completeExtractionRun(noteRunId, noteTriples);
+      await completeExtractionRun(runId, noteTriples);
+    }
   }
 
   return {
