@@ -30,7 +30,7 @@ Output: [{"subject":"semantic search","predicate":"implemented_with","object":"p
 Now extract triples from:
 {content}`;
 
-export function buildExtractionPrompt(content: string): string {
+export function buildExtractionPrompt(content: string, _options?: { fewShotCount?: number }): string {
   return EXTRACTION_PROMPT_TEMPLATE.replace("{content}", content.slice(0, MAX_CONTENT_LENGTH));
 }
 

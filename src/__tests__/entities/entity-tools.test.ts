@@ -141,7 +141,7 @@ describe("extract_entities tool", () => {
     expect(result.provider_used).toBe("api");
   });
 
-  it("returns NOT_FOUND for note when content_id is omitted", async () => {
+  it("returns VALIDATION_ERROR for note when content_id is omitted", async () => {
     const provider = makeMockProvider();
     getActiveProviderMock.mockReturnValue(provider);
     const server = makeServer();

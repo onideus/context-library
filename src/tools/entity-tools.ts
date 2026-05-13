@@ -152,9 +152,10 @@ Returns: source entity info, list of relations with connected entity names and t
 // ── Tool Registration ─────────────────────────────────────────────────────────
 
 export function registerEntityTools(mcpServer: McpServer): void {
-  // Create a per-request sampling provider — only valid during this MCP request's lifecycle.
-  // sampling/createMessage requires an active client connection; this instance must not
-  // escape beyond the current request.
+  // Shared SamplingProvider instance — the provider object is reused across requests.
+  // available() and extract() calls are request-scoped: sampling/createMessage only
+  // works when an active MCP client connection is present. Always check available()
+  // before calling extract().
   const samplingProvider = new SamplingProvider(mcpServer.server, {
     minConfidence: config.entityMinConfidence,
   });
@@ -202,6 +203,10 @@ export function registerEntityTools(mcpServer: McpServer): void {
             return errorResponse("No handoff files found", "NOT_FOUND");
           }
           contentId = latest;
+        }
+        // Reject path traversal: contentId must be a bare filename with no separators, ending in .json
+        if (contentId.includes("/") || contentId.includes("\\") || !contentId.endsWith(".json")) {
+          return errorResponse(`Invalid handoff filename: '${contentId}'`, "VALIDATION_ERROR");
         }
         try {
           const { readFile } = await import("node:fs/promises");
@@ -346,9 +351,11 @@ export function registerEntityTools(mcpServer: McpServer): void {
       // ── Process notes ─────────────────────────────────────────────────────
       if (scope === "notes" || scope === "all") {
         try {
-          const limitClause = limit ? `LIMIT ${limit}` : "";
           const noteResult = await query<{ id: string; title: string; content: string }>(
-            `SELECT id, title, content FROM notes ORDER BY created_at ASC ${limitClause}`
+            limit
+              ? `SELECT id, title, content FROM notes ORDER BY created_at ASC LIMIT $1`
+              : `SELECT id, title, content FROM notes ORDER BY created_at ASC`,
+            limit ? [limit] : undefined
           );
 
           if (noteResult.rows.length > 0) {
