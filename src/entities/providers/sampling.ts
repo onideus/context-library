@@ -58,7 +58,7 @@ export class SamplingProvider implements EntityExtractor {
       maxTokens: this.maxTokens,
     });
 
-    const rawText = result.content.type === "text" ? result.content.text : "";
+    const rawText = result.content.type === "text" ? (result.content.text ?? "") : "";
     // Report the client's chosen model as the provider version for traceability
     const modelName = result.model ?? "unknown";
 

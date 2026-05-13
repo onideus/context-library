@@ -132,6 +132,19 @@ describe("SamplingProvider.extract() — happy path", () => {
     const result = await makeProvider(server).extract("content", "note", "n-1");
     expect(result.triples).toEqual([]);
   });
+
+  it("returns empty triples when content type is text but text is undefined", async () => {
+    const server = makeServer({
+      createMessageResult: {
+        role: "assistant",
+        model: "m",
+        content: { type: "text", text: undefined },
+        stopReason: "end_turn",
+      },
+    });
+    const result = await makeProvider(server).extract("content", "note", "n-1");
+    expect(result.triples).toEqual([]);
+  });
 });
 
 // ── extract() — filtering ─────────────────────────────────────────────────────

@@ -407,8 +407,8 @@ export function registerEntityTools(mcpServer: McpServer): void {
     "compare_extractions",
     COMPARE_EXTRACTIONS_DESC,
     {
-      run_id_a: z.string().describe("UUID of the first extraction run"),
-      run_id_b: z.string().describe("UUID of the second extraction run"),
+      run_id_a: z.string().uuid().describe("UUID of the first extraction run"),
+      run_id_b: z.string().uuid().describe("UUID of the second extraction run"),
     },
     async (args) => {
       try {
@@ -639,7 +639,7 @@ export function registerEntityTools(mcpServer: McpServer): void {
     "entity_relations",
     ENTITY_RELATIONS_DESC,
     {
-      entity_id: z.string().describe("UUID of the entity (get from browse_entities if unknown)"),
+      entity_id: z.string().uuid().describe("UUID of the entity (get from browse_entities if unknown)"),
       hops: z.number().min(1).max(3).optional().describe("Traversal depth 1–3 (default 1)"),
       relation_type: z.string().optional().describe("Filter to relations of this type only"),
     },
@@ -692,12 +692,12 @@ export function registerEntityTools(mcpServer: McpServer): void {
           id: r.id,
           source: {
             id: r.source_entity_id,
-            ...(entityMap.get(r.source_entity_id) ?? { name: "unknown", entity_type: "concept" }),
+            ...(entityMap.get(r.source_entity_id) ?? { name: "[unresolved]", entity_type: "unknown" }),
           },
           relation_type: r.relation_type,
           target: {
             id: r.target_entity_id,
-            ...(entityMap.get(r.target_entity_id) ?? { name: "unknown", entity_type: "concept" }),
+            ...(entityMap.get(r.target_entity_id) ?? { name: "[unresolved]", entity_type: "unknown" }),
           },
           confidence: r.confidence,
           provider: r.provider,

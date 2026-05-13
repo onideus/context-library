@@ -12,6 +12,9 @@ import { registerArtifactTools } from "./tools/artifacts.js";
 import { registerSearchTools } from "./tools/search.js";
 import { registerPrompts } from "./tools/prompts.js";
 import { registerEntityTools } from "./tools/entity-tools.js";
+import { registerProvider } from "./entities/registry.js";
+import { createOllamaProviderFromConfig } from "./entities/providers/ollama.js";
+import { createApiProviderFromConfig } from "./entities/providers/api.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
@@ -143,14 +146,11 @@ async function main() {
 
   // Register entity extraction providers based on config
   try {
-    const { registerProvider } = await import("./entities/registry.js");
     if (config.ollamaBaseUrl) {
-      const { createOllamaProviderFromConfig } = await import("./entities/providers/ollama.js");
       registerProvider(createOllamaProviderFromConfig());
       console.log("[startup] Registered entity provider: ollama");
     }
     if (config.entityApiKey) {
-      const { createApiProviderFromConfig } = await import("./entities/providers/api.js");
       const apiProvider = createApiProviderFromConfig();
       if (apiProvider) {
         registerProvider(apiProvider);
