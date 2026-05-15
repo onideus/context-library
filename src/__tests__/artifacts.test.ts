@@ -793,6 +793,106 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(updated.metadata.existing_key).toBe("keep-me");
     });
 
+    it("content_hash survives metadata-only update on a draft artifact", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-survives-meta-update",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "content with hash",
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      const originalHash = original.metadata.content_hash;
+      expect(originalHash).toBeDefined();
+
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        metadata: { target_repo: "some-repo" },
+      });
+      expect(updated.metadata.content_hash).toBe(originalHash);
+      expect(updated.metadata.target_repo).toBe("some-repo");
+      expect(updated.status).toBe("draft");
+    });
+
+    it("content_hash is recomputed when promoting after revert-to-draft cleared it", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-recompute-on-repromote",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "stable content",
+        status: "ready",
+      });
+      const locked = await callTool("get_artifact", { id: created.id });
+      const originalHash = locked.metadata.content_hash;
+      expect(originalHash).toBeDefined();
+
+      const reverted = await callTool("update_artifact", {
+        id: created.id,
+        status: "draft",
+      });
+      expect(reverted.metadata.content_hash).toBeUndefined();
+
+      const repromoted = await callTool("update_artifact", {
+        id: created.id,
+        status: "ready",
+      });
+      expect(repromoted.metadata.content_hash).toBe(originalHash);
+    });
+
+    it("strips caller-supplied content_hash from metadata update on draft artifact", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Hash-strip-on-draft",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "draft content",
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      const correctHash = original.metadata.content_hash;
+
+      const updated = await callTool("update_artifact", {
+        id: created.id,
+        metadata: { content_hash: "deadbeef".repeat(8), extra: "ok" },
+      });
+      expect(updated.metadata.content_hash).toBe(correctHash);
+      expect(updated.metadata.extra).toBe("ok");
+    });
+
+    it("content_hash survives a full store -> metadata update -> promote -> metadata fix sequence", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Full-lifecycle-hash",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "pipeline-ready content",
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      const expectedHash = original.metadata.content_hash;
+      expect(expectedHash).toBeDefined();
+
+      await callTool("update_artifact", {
+        id: created.id,
+        metadata: { target_repo: "some-repo" },
+      });
+
+      const promoted = await callTool("update_artifact", {
+        id: created.id,
+        status: "ready",
+      });
+      expect(promoted.status).toBe("ready");
+      expect(promoted.metadata.content_hash).toBe(expectedHash);
+
+      const fixed = await callTool("update_artifact", {
+        id: created.id,
+        metadata: { target_repo: "correct-repo", model: "opus" },
+      });
+      expect(fixed.metadata.content_hash).toBe(expectedHash);
+      expect(fixed.metadata.target_repo).toBe("correct-repo");
+
+      const executing = await callTool("update_artifact", {
+        id: created.id,
+        status: "executing",
+      });
+      expect(executing.metadata.content_hash).toBe(expectedHash);
+    });
+
     it("pointer-only artifact does not set content_hash", async () => {
       const result = await callTool("store_artifact", {
         title: "Pointer-no-hash",
