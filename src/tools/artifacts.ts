@@ -662,15 +662,30 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           } else {
             sets.push(`metadata = metadata - 'content_hash'`);
           }
-        } else if (args.metadata !== undefined) {
-          // Top-level merge — provided keys overwrite, existing preserved.
-          // Strip content_hash from caller-supplied metadata on locked artifacts
-          // so a caller cannot overwrite the cryptographic lock guarantee.
-          let safeMeta: Record<string, unknown> = args.metadata as Record<string, unknown>;
-          if (LOCKED_STATUSES.has(current.status)) {
-            const { content_hash: _stripped, ...rest } = safeMeta;
-            safeMeta = rest;
+        } else if (
+          args.status !== undefined &&
+          LOCKED_STATUSES.has(args.status) &&
+          !LOCKED_STATUSES.has(current.status) &&
+          current.content &&
+          !(current.metadata as Record<string, unknown>)?.content_hash
+        ) {
+          // Promoting to a locked status but content_hash is missing.
+          // Recompute from current row content.
+          const hash = computeContentHash(current.content);
+          if (args.metadata !== undefined) {
+            const { content_hash: _stripped, ...rest } = args.metadata as Record<string, unknown>;
+            sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
+            params.push(JSON.stringify({ ...rest, content_hash: hash }));
+          } else {
+            sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
+            params.push(JSON.stringify({ content_hash: hash }));
           }
+        } else if (args.metadata !== undefined) {
+          // Top-level merge. Strip content_hash unconditionally when content
+          // is not changing — the hash is always server-computed.
+          let safeMeta: Record<string, unknown> = args.metadata as Record<string, unknown>;
+          const { content_hash: _stripped, ...rest } = safeMeta;
+          safeMeta = rest;
           sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
           params.push(JSON.stringify(safeMeta));
         }
