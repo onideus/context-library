@@ -670,7 +670,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           !(current.metadata as Record<string, unknown>)?.content_hash
         ) {
           // Promoting to a locked status but content_hash is missing.
-          // Recompute from current row content so the lock guarantee holds.
+          // Recompute from current row content.
           const hash = computeContentHash(current.content);
           if (args.metadata !== undefined) {
             const { content_hash: _stripped, ...rest } = args.metadata as Record<string, unknown>;
