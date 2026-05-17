@@ -991,6 +991,14 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(reverted.status).toBe("draft");
       expect(reverted.metadata.content_hash).toBeUndefined();
 
+      // Re-fetch to prove the persisted row (not just the update response)
+      // has content_hash cleared. Guards against a future refactor that
+      // returns the right shape from update_artifact but fails to actually
+      // strip the hash from the database row.
+      const refetched = await callTool("get_artifact", { id: created.id });
+      expect(refetched.status).toBe("draft");
+      expect(refetched.metadata.content_hash).toBeUndefined();
+
       // Step 2: re-promote to ready via status-only update (no content, no
       // metadata) — the server must recompute content_hash from the row's
       // existing content. The artifact must not end up in ready with no hash.
