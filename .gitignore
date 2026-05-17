@@ -10,3 +10,4 @@ proxy-data/
 .claude/worktrees/
 .claude/settings.local.json
 entities.seed.json
+.github/.DS_Store
