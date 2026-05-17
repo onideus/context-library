@@ -15,6 +15,7 @@ import {
   localIsoTimestamp,
 } from "./handoff.js";
 import { computeDynamicTaskSummary } from "./task-summary.js";
+import { computeDynamicArtifactSummary } from "./artifact-summary.js";
 
 const FILENAME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]+\.json$/;
 
@@ -48,7 +49,7 @@ Returns: {handoffs: [{filename, stored_at, session_label, size_bytes, has_tasks,
 
 The metadata is intentionally lightweight. Call get_handoff with a filename to load full content for a specific entry.`;
 
-const GET_HANDOFF_DESCRIPTION = `Retrieve a specific historical handoff by filename (obtained from list_handoffs). Returns the same enriched response shape as get_latest_handoff, including elapsed_seconds, task_summary, and scope filtering.
+const GET_HANDOFF_DESCRIPTION = `Retrieve a specific historical handoff by filename (obtained from list_handoffs). Returns the same enriched response shape as get_latest_handoff, including elapsed_seconds, task_summary, artifact_summary, and scope filtering.
 
 Use this after list_handoffs identifies the target session. For the most recent handoff, use get_latest_handoff directly — it's faster than listing then fetching.
 
@@ -56,7 +57,9 @@ Parameters:
 - filename (required): Exact filename from list_handoffs (must not contain '/' or '..')
 - scope (optional, default "full"): "full" | "work" | "personal" — same semantics as get_latest_handoff
 
-Returns: The handoff content filtered by scope plus retrieved_at, elapsed_seconds, same_calendar_day, task_summary, applied_scope, filtered_fields (if scope != full), schema_version.
+Returns: The handoff content filtered by scope plus retrieved_at, elapsed_seconds, same_calendar_day, task_summary, artifact_summary, applied_scope, filtered_fields (if scope != full), schema_version.
+
+artifact_summary scopes recently_completed to artifacts whose status transitioned to 'completed' after this handoff's stored_at — useful for spotting in-flight items the handoff narrates that have since finished. Null when Postgres is unavailable.
 
 Errors: Returns {error: true, code: "NOT_FOUND"} if the filename doesn't exist or fails validation.`;
 
@@ -200,8 +203,11 @@ export function registerHandoffNavTools(mcpServer: McpServer): void {
       const scope = args.scope ?? "full";
       const { result: filtered, filteredFields } = filterByScope(handoff, scope);
 
-      // Prefer dynamic (Postgres) summary; fall back to handoff-based counts
+      // Prefer dynamic (Postgres) summary; fall back to handoff-based counts.
+      // Sequence to share a single Postgres-availability gate — skip artifact summary on failure.
       const dynamic = await computeDynamicTaskSummary();
+      const artifactSummary =
+        dynamic !== null ? await computeDynamicArtifactSummary(handoff.stored_at) : null;
       const taskSummary = dynamic ?? computeTaskSummary(handoff);
 
       return jsonResponse({
@@ -210,6 +216,7 @@ export function registerHandoffNavTools(mcpServer: McpServer): void {
         elapsed_seconds: computeElapsedSeconds(handoff.stored_at),
         same_calendar_day: computeSameCalendarDay(handoff.stored_at, handoff.timezone),
         task_summary: taskSummary,
+        artifact_summary: artifactSummary,
         applied_scope: scope,
         ...(scope !== "full" ? { filtered_fields: filteredFields } : {}),
         stored_at_local: formatStoredAtLocal(handoff.stored_at ?? "", handoff.timezone),

@@ -10,6 +10,7 @@ import { indexHandoff, getPendingEmbeddingsCount, hasPendingEmbedding, extractHa
 import { isEmbeddingAvailable, getLastEmbeddingSuccess } from "../embeddings/client.js";
 import { extractAndStore } from "../entities/pipeline.js";
 import { computeDynamicTaskSummary } from "./task-summary.js";
+import { computeDynamicArtifactSummary } from "./artifact-summary.js";
 import { validatePayloadSize, PayloadTooLargeError, LIMITS } from "./validation.js";
 
 export const SCHEMA_VERSION = "1.2";
@@ -288,16 +289,21 @@ After loading the handoff, check for durable decisions by calling search_context
 
 CONSEQUENCE OF SKIPPING: You will operate without session context, miss open tasks, duplicate completed work, or contradict the conversation arc documented in the handoff.
 
-Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled.
+Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, artifact_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled.
 
 embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
 
-Response shape: operational_state, active_context, tasks, task_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled.
+Response shape: operational_state, active_context, tasks, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled.
 
 task_summary shape:
 When Postgres is available, task_summary is computed live from the authoritative tasks table and returns:
 {open_count, blocked_count, completed_count, critical_items: [{id, title, due_date}], due_this_week: [{id, title, due_date}], recently_completed: [{id, title, completed_at}], blocked_items: [{id, title, blocked_reason}]}
 When Postgres is unavailable, task_summary falls back to counts derived from the handoff's own tasks arrays: {open_count, blocked_count, completed_count}.
+
+artifact_summary shape:
+Computed live from Postgres against the authoritative artifacts table. Use this to ground narration about artifact lifecycle — handoff active_context.prompts_generated text can become stale once an artifact transitions to 'completed'. Shape:
+{ready_count, executing_count, draft_count, completed_count, recently_completed: [{id, title, artifact_type, execution_order, completed_at}], currently_executing: [{id, title, artifact_type, execution_order}], ready_queue: [{id, title, artifact_type, execution_order}]}
+recently_completed only includes artifacts whose status transitioned to 'completed' after the handoff's stored_at. When Postgres is unavailable, artifact_summary is null (no fallback) — treat the absence as a degradation signal.
 
 SessionEvidence:
 evidence_pulled indicates whether operational context was successfully loaded.
@@ -570,8 +576,13 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         pending_count: await getPendingEmbeddingsCount(),
       };
 
-      // Prefer enriched task summary from Postgres; fall back to handoff-array counts when unavailable
+      // Prefer enriched task summary from Postgres; fall back to handoff-array counts when unavailable.
+      // Sequence the artifact summary after the task summary so a single Postgres-availability check
+      // gates both queries — if the first call fails (Postgres down), we skip the second to keep
+      // get_latest_handoff fast under graceful degradation.
       const dynamicSummary = await computeDynamicTaskSummary();
+      const artifactSummary =
+        dynamicSummary !== null ? await computeDynamicArtifactSummary(handoff.stored_at) : null;
       const taskSummary = dynamicSummary ?? computeTaskSummary(handoff);
 
       return {
@@ -584,6 +595,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               elapsed_seconds: computeElapsedSeconds(handoff.stored_at),
               same_calendar_day: computeSameCalendarDay(handoff.stored_at, handoff.timezone),
               task_summary: taskSummary,
+              artifact_summary: artifactSummary,
               applied_scope: scope,
               ...(scope !== "full" ? { filtered_fields: filteredFields } : {}),
               stored_at_local: formatStoredAtLocal(handoff.stored_at ?? "", handoff.timezone),
