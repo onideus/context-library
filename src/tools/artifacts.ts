@@ -285,8 +285,11 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       const status = args.status ?? "draft";
 
       const callerMeta: Record<string, unknown> = { ...(args.metadata ?? {}) };
-      // content_hash is always server-computed. Strip any caller-supplied value
-      // up front, then recompute below only when there is content to hash.
+      // content_hash is the single source of truth for artifact content identity
+      // and must be tamper-resistant: only the server computes it, from the actual
+      // stored content. Drop any caller-supplied value unconditionally so a pointer-
+      // only store (no content to hash) cannot smuggle in a forged hash, then
+      // recompute below when real content is present.
       delete callerMeta.content_hash;
       const finalMetadata: Record<string, unknown> = callerMeta;
       if (hasContent) {

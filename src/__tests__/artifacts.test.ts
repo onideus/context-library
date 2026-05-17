@@ -15,6 +15,11 @@ const TEST_PORT = 3195;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_DATA_DIR = join(process.cwd(), "data", "test-artifacts");
 
+// 64-char hex string shaped like a real SHA-256 but is never the real hash of
+// any test content. Used to exercise the server's strip/override of caller-
+// supplied content_hash values.
+const FAKE_HASH = "deadbeef".repeat(8);
+
 const PG_DATABASE = "cl_test_artifacts";
 const PG_USER = process.env.PGUSER ?? "cl";
 const PG_PASSWORD = process.env.PGPASSWORD ?? "test";
@@ -698,7 +703,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const updated = await callTool("update_artifact", {
         id: created.id,
         content: "some content",
-        metadata: { content_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
+        metadata: { content_hash: FAKE_HASH },
       });
       expect(updated.metadata.content_hash).toBe(correctHash);
     });
@@ -850,7 +855,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
       const updated = await callTool("update_artifact", {
         id: created.id,
-        metadata: { content_hash: "deadbeef".repeat(8), extra: "ok" },
+        metadata: { content_hash: FAKE_HASH, extra: "ok" },
       });
       expect(updated.metadata.content_hash).toBe(correctHash);
       expect(updated.metadata.extra).toBe("ok");
@@ -913,7 +918,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         artifact_type: "research",
         scope: "work",
         pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.pdf" },
-        metadata: { content_hash: "deadbeef".repeat(8), label: "keep-me" },
+        metadata: { content_hash: FAKE_HASH, label: "keep-me" },
       });
       expect(result.error).toBeUndefined();
 
@@ -928,12 +933,12 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         artifact_type: "cc-prompt",
         scope: "work",
         content: "real content",
-        metadata: { content_hash: "deadbeef".repeat(8), label: "keep-me" },
+        metadata: { content_hash: FAKE_HASH, label: "keep-me" },
       });
       expect(result.error).toBeUndefined();
 
       const fetched = await callTool("get_artifact", { id: result.id });
-      expect(fetched.metadata.content_hash).not.toBe("deadbeef".repeat(8));
+      expect(fetched.metadata.content_hash).not.toBe(FAKE_HASH);
       expect(fetched.metadata.content_hash).toBeDefined();
       expect(fetched.metadata.label).toBe("keep-me");
     });
@@ -953,13 +958,48 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       // Attempt to overwrite the hash via a metadata update
       const updated = await callTool("update_artifact", {
         id: created.id,
-        metadata: { content_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", extra: "ok" },
+        metadata: { content_hash: FAKE_HASH, extra: "ok" },
       });
       expect(updated.error).toBeUndefined();
       // Legitimate hash is preserved; caller-supplied value was stripped
       expect(updated.metadata.content_hash).toBe(legitimateHash);
       // Other metadata keys are still merged
       expect(updated.metadata.extra).toBe("ok");
+    });
+
+    it("ready -> draft -> ready via status-only updates recomputes content_hash", async () => {
+      // Regression: the exact path called out in the sweep spec. Reverting to
+      // draft clears content_hash; a subsequent status-only promotion back to
+      // a locked status must recompute it from the row's current content,
+      // because the caller did not provide content or metadata on either call.
+      const created = await callTool("store_artifact", {
+        title: "Hash-status-only-roundtrip",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "round-trip content",
+        status: "ready",
+      });
+      const locked = await callTool("get_artifact", { id: created.id });
+      const originalHash = locked.metadata.content_hash;
+      expect(originalHash).toBeDefined();
+
+      // Step 1: revert to draft via status-only update — hash should be cleared.
+      const reverted = await callTool("update_artifact", {
+        id: created.id,
+        status: "draft",
+      });
+      expect(reverted.status).toBe("draft");
+      expect(reverted.metadata.content_hash).toBeUndefined();
+
+      // Step 2: re-promote to ready via status-only update (no content, no
+      // metadata) — the server must recompute content_hash from the row's
+      // existing content. The artifact must not end up in ready with no hash.
+      const repromoted = await callTool("update_artifact", {
+        id: created.id,
+        status: "ready",
+      });
+      expect(repromoted.status).toBe("ready");
+      expect(repromoted.metadata.content_hash).toBe(originalHash);
     });
   });
 
