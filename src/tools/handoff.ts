@@ -432,7 +432,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         ),
     },
     async (args) => {
-      const argsBytes = JSON.stringify(args).length;
+      const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
       console.log(`[store_handoff] args size: ${argsBytes} bytes`);
 
       if (!hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)) {
@@ -646,7 +646,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       timezone: z.string().nullable().optional(),
     },
     async (args) => {
-      const argsBytes = JSON.stringify(args).length;
+      const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
       console.log(`[patch_handoff] args size: ${argsBytes} bytes`);
 
       if (!hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)) {
