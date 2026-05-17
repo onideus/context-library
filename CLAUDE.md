@@ -80,6 +80,7 @@ src/
     merge.ts               # Pure mergeHandoff function
     tasks.ts               # Task CRUD + search_tasks
     task-summary.ts        # Server-computed task_summary for handoff responses
+    artifact-summary.ts    # Server-computed artifact_summary for handoff responses
     notes.ts               # Note CRUD + search_notes
     artifacts.ts           # Artifact CRUD + search_artifacts, status lifecycle
     search.ts              # search_context (hybrid), reindex
@@ -114,6 +115,7 @@ src/
     tasks.test.ts          # Integration: task CRUD (Postgres-gated)
     notes.test.ts          # Integration: note CRUD (Postgres-gated)
     artifacts.test.ts      # Integration: artifact CRUD + lifecycle (Postgres-gated)
+    artifact-summary.test.ts  # Integration: artifact_summary on handoff retrieval (Postgres-gated)
     artifact-type-normalization.test.ts  # Unit: type normalization
     backfill-content-hashes.test.ts  # Integration: content_hash backfill (Postgres-gated)
     entities.test.ts       # Integration: entity seed + context_envelope

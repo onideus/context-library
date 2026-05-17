@@ -61,11 +61,14 @@ export async function writeHandoff<T>(data: T): Promise<string> {
   await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
   await safeRename(tmpPath, filepath);
 
-  // Update pointer file (atomic write)
-  const pointerPath = join(config.dataDir, "handoff-latest.json");
-  const pointerTmp = join(config.dataDir, `.tmp-${randomUUID()}.json`);
-  await writeFile(pointerTmp, JSON.stringify(data, null, 2), "utf-8");
-  await safeRename(pointerTmp, pointerPath);
+  // Best-effort cleanup of the deprecated handoff-latest.json pointer file.
+  // Pre-existing deployments may still have a stale pointer on disk; nothing
+  // reads it any more, but removing it prevents confusion when inspecting data/.
+  try {
+    await unlink(join(config.dataDir, "handoff-latest.json"));
+  } catch {
+    // pointer file already gone or never existed — ignore
+  }
 
   // Prune old handoffs beyond retention limit
   await pruneHandoffs(handoffsDir, config.retentionCount);
