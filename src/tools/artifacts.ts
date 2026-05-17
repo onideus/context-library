@@ -651,50 +651,32 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           sets.push(`related_task_ids = $${paramIdx++}::uuid[]`);
           params.push(args.related_task_ids);
         }
-        const contentUpdated = typeof args.content === "string";
-        const revertingToDraft = args.status === "draft" && current.status === "ready";
+        // content_hash lifecycle: one rule — if the artifact has content, it
+        // has a hash. The hash is always server-computed from the effective
+        // post-update content (new content if provided, existing row content
+        // otherwise). Any caller-supplied content_hash is stripped first.
+        const callerMeta = args.metadata !== undefined
+          ? (() => {
+              const { content_hash: _stripped, ...rest } =
+                args.metadata as Record<string, unknown>;
+              return rest;
+            })()
+          : undefined;
 
-        if (contentUpdated) {
-          // Content is changing — server-computed hash overrides any caller-supplied value.
-          const hash = computeContentHash(args.content as string);
-          const hashMeta = args.metadata !== undefined
-            ? { ...args.metadata, content_hash: hash }
-            : { content_hash: hash };
-          sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
-          params.push(JSON.stringify(hashMeta));
-        } else if (revertingToDraft) {
-          if (args.metadata !== undefined) {
-            sets.push(`metadata = (metadata || $${paramIdx++}::jsonb) - 'content_hash'`);
-            params.push(JSON.stringify(args.metadata));
-          } else {
-            sets.push(`metadata = metadata - 'content_hash'`);
-          }
-        } else if (
-          args.status !== undefined &&
-          LOCKED_STATUSES.has(args.status) &&
-          !LOCKED_STATUSES.has(current.status) &&
-          current.content &&
-          !(current.metadata as Record<string, unknown>)?.content_hash
+        const effectiveContent =
+          args.content !== undefined ? args.content : current.content;
+        const hashMeta: Record<string, unknown> = {};
+        if (
+          typeof effectiveContent === "string" &&
+          effectiveContent.trim().length > 0
         ) {
-          // Promoting to a locked status but content_hash is missing.
-          // Recompute from current row content.
-          const hash = computeContentHash(current.content);
-          if (args.metadata !== undefined) {
-            const { content_hash: _stripped, ...rest } = args.metadata as Record<string, unknown>;
-            sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
-            params.push(JSON.stringify({ ...rest, content_hash: hash }));
-          } else {
-            sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
-            params.push(JSON.stringify({ content_hash: hash }));
-          }
-        } else if (args.metadata !== undefined) {
-          // Top-level merge. Strip content_hash unconditionally when content
-          // is not changing — the hash is always server-computed.
-          let safeMeta: Record<string, unknown> = args.metadata as Record<string, unknown>;
-          const { content_hash: _stripped, ...rest } = safeMeta;
-          safeMeta = rest;
+          hashMeta.content_hash = computeContentHash(effectiveContent);
+        }
+
+        if (callerMeta !== undefined || Object.keys(hashMeta).length > 0) {
+          const merged = { ...(callerMeta ?? {}), ...hashMeta };
           sets.push(`metadata = metadata || $${paramIdx++}::jsonb`);
-          params.push(JSON.stringify(safeMeta));
+          params.push(JSON.stringify(merged));
         }
 
         if (sets.length === 0) {
