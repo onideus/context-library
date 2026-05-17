@@ -61,12 +61,6 @@ export async function writeHandoff<T>(data: T): Promise<string> {
   await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
   await safeRename(tmpPath, filepath);
 
-  // Update pointer file (atomic write)
-  const pointerPath = join(config.dataDir, "handoff-latest.json");
-  const pointerTmp = join(config.dataDir, `.tmp-${randomUUID()}.json`);
-  await writeFile(pointerTmp, JSON.stringify(data, null, 2), "utf-8");
-  await safeRename(pointerTmp, pointerPath);
-
   // Prune old handoffs beyond retention limit
   await pruneHandoffs(handoffsDir, config.retentionCount);
 

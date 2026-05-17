@@ -365,6 +365,25 @@ const arrayOpSchema = z
   .nullable()
   .optional();
 
+/** Fields treated as user-supplied content on store_handoff. */
+const STORE_CONTENT_FIELDS = [
+  "operational_state",
+  "active_context",
+  "tasks",
+  "memory_deltas",
+  "tone_notes",
+  "timezone",
+] as const;
+
+/** True when at least one content field is present (non-undefined, non-null). */
+function hasAnyContent(args: Record<string, unknown>, fields: readonly string[]): boolean {
+  for (const field of fields) {
+    const value = args[field];
+    if (value !== undefined && value !== null) return true;
+  }
+  return false;
+}
+
 // ── Tool Registration ──────────────────────────────────────────────
 
 export function registerHandoffTools(mcpServer: McpServer): void {
@@ -407,6 +426,25 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         ),
     },
     async (args) => {
+      const argsBytes = JSON.stringify(args).length;
+      console.log(`[store_handoff] args size: ${argsBytes} bytes`);
+
+      if (!hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: true,
+                code: "EMPTY_HANDOFF",
+                message:
+                  "store_handoff requires at least one content field (operational_state, active_context, tasks, memory_deltas, tone_notes, or timezone).",
+              }),
+            },
+          ],
+        };
+      }
+
       try {
         validatePayloadSize(args, LIMITS.STORE_HANDOFF_BYTES, "store_handoff payload");
       } catch (err) {
@@ -596,6 +634,25 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       timezone: z.string().nullable().optional(),
     },
     async (args) => {
+      const argsBytes = JSON.stringify(args).length;
+      console.log(`[patch_handoff] args size: ${argsBytes} bytes`);
+
+      if (!hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: true,
+                code: "EMPTY_PATCH",
+                message:
+                  "patch_handoff requires at least one content field (operational_state, active_context, tasks, memory_deltas, tone_notes, or timezone). Null values are treated as no-op.",
+              }),
+            },
+          ],
+        };
+      }
+
       try {
         validatePayloadSize(args, LIMITS.PATCH_HANDOFF_BYTES, "patch_handoff payload");
       } catch (err) {

@@ -876,6 +876,85 @@ describe("MCP Tools", () => {
       expect(result.next_step).toMatch(/tone_notes/i);
     });
   });
+
+  // ────────────────────────────────────────────────
+  // Defensive hardening: empty-content guards + pointer cleanup
+  // ────────────────────────────────────────────────
+
+  describe("Defensive hardening", () => {
+    it("store_handoff with no content fields returns EMPTY_HANDOFF", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "store_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_HANDOFF");
+    });
+
+    it("store_handoff with a single content field (timezone) succeeds", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: { timezone: "America/Los_Angeles" },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("patch_handoff with no content fields returns EMPTY_PATCH", async () => {
+      // Ensure a handoff exists so the empty-guard runs before the NOT_FOUND check.
+      await storeAndVerify({ tone_notes: "empty-patch baseline" });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "patch_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_PATCH");
+    });
+
+    it("patch_handoff with all null fields returns EMPTY_PATCH", async () => {
+      await storeAndVerify({ tone_notes: "all-null baseline" });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "patch_handoff",
+          arguments: {
+            operational_state: null,
+            active_context: null,
+            tasks: null,
+            memory_deltas: null,
+            tone_notes: null,
+            timezone: null,
+          },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_PATCH");
+    });
+
+    it("store_handoff does not write the deprecated handoff-latest.json pointer file", async () => {
+      await storeAndVerify({ tone_notes: "pointer cleanup test" });
+
+      const pointerPath = join(TEST_DATA_DIR, "handoff-latest.json");
+      const { access } = await import("node:fs/promises");
+      let exists = false;
+      try {
+        await access(pointerPath);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      expect(exists).toBe(false);
+    });
+  });
 });
 
 // ────────────────────────────────────────────────
