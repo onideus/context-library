@@ -971,6 +971,36 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(updated.metadata.extra).toBe("ok");
     });
 
+    it("clearing content on a draft artifact strips stale content_hash", async () => {
+      // When a draft artifact with both content and pointer has its content
+      // cleared (content: null), the row becomes pointer-only. The hash that
+      // described the now-removed content must not survive — otherwise the
+      // metadata advertises a content_hash that no longer corresponds to any
+      // stored content.
+      const created = await callTool("store_artifact", {
+        title: "Clear-content-strip-hash",
+        artifact_type: "research",
+        scope: "work",
+        content: "will be cleared",
+        pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.pdf" },
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      expect(original.metadata.content_hash).toBeDefined();
+
+      const cleared = await callTool("update_artifact", {
+        id: created.id,
+        content: null,
+      });
+      expect(cleared.error).toBeUndefined();
+      expect(cleared.content).toBeNull();
+      expect(cleared.metadata.content_hash).toBeUndefined();
+
+      // Re-fetch to confirm the row itself dropped the hash, not just the
+      // update response.
+      const refetched = await callTool("get_artifact", { id: created.id });
+      expect(refetched.metadata.content_hash).toBeUndefined();
+    });
+
     it("ready -> draft -> ready via status-only updates keeps content_hash present", async () => {
       // Regression: under the simplified rule, every write path ensures the
       // hash is present whenever the artifact has content. Status-only
