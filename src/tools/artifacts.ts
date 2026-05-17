@@ -284,7 +284,11 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       const normalizedType = args.artifact_type.trim().toLowerCase();
       const status = args.status ?? "draft";
 
-      const finalMetadata: Record<string, unknown> = { ...(args.metadata ?? {}) };
+      const callerMeta: Record<string, unknown> = { ...(args.metadata ?? {}) };
+      // content_hash is always server-computed. Strip any caller-supplied value
+      // up front, then recompute below only when there is content to hash.
+      delete callerMeta.content_hash;
+      const finalMetadata: Record<string, unknown> = callerMeta;
       if (hasContent) {
         finalMetadata.content_hash = computeContentHash(args.content!);
       }

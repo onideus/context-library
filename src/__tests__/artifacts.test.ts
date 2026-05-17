@@ -907,6 +907,37 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(fetched.metadata.content_hash).toBeUndefined();
     });
 
+    it("store_artifact strips caller-supplied content_hash on pointer-only artifact", async () => {
+      const result = await callTool("store_artifact", {
+        title: "Pointer-strip-fake-hash",
+        artifact_type: "research",
+        scope: "work",
+        pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.pdf" },
+        metadata: { content_hash: "deadbeef".repeat(8), label: "keep-me" },
+      });
+      expect(result.error).toBeUndefined();
+
+      const fetched = await callTool("get_artifact", { id: result.id });
+      expect(fetched.metadata.content_hash).toBeUndefined();
+      expect(fetched.metadata.label).toBe("keep-me");
+    });
+
+    it("store_artifact overrides caller-supplied content_hash when content is provided", async () => {
+      const result = await callTool("store_artifact", {
+        title: "Content-override-fake-hash",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content: "real content",
+        metadata: { content_hash: "deadbeef".repeat(8), label: "keep-me" },
+      });
+      expect(result.error).toBeUndefined();
+
+      const fetched = await callTool("get_artifact", { id: result.id });
+      expect(fetched.metadata.content_hash).not.toBe("deadbeef".repeat(8));
+      expect(fetched.metadata.content_hash).toBeDefined();
+      expect(fetched.metadata.label).toBe("keep-me");
+    });
+
     it("update_artifact silently ignores content_hash supplied in metadata on a locked artifact", async () => {
       const created = await callTool("store_artifact", {
         title: "Tamper-guard",
