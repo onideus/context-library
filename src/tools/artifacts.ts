@@ -651,6 +651,14 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           sets.push(`related_task_ids = $${paramIdx++}::uuid[]`);
           params.push(args.related_task_ids);
         }
+
+        // No user-supplied updates — short-circuit before the auto content_hash
+        // recompute below, which would otherwise always touch metadata when the
+        // artifact has content and mask the "no updates" case.
+        if (sets.length === 0 && args.metadata === undefined) {
+          return errorResponse("No updates provided", "VALIDATION_ERROR");
+        }
+
         // content_hash lifecycle: one rule — if the artifact has content, it
         // has a hash. The hash is always server-computed from the effective
         // post-update content (new content if provided, existing row content
@@ -684,10 +692,6 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           // isn't present, so it's safe even when no hash existed.
           sets.push(`metadata = (metadata - 'content_hash') || $${paramIdx++}::jsonb`);
           params.push(JSON.stringify(callerMeta ?? {}));
-        }
-
-        if (sets.length === 0) {
-          return errorResponse("No updates provided", "VALIDATION_ERROR");
         }
 
         const result = await query<ArtifactRow>(
