@@ -55,6 +55,28 @@ app.use("/*", async (c, next) => {
   console.log(`[${new Date().toISOString()}] [req] ${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`);
 });
 
+// Cache the embedding-availability probe so frequent /health polls (load
+// balancers, NAS watchdogs) don't hammer the TEI backend on every request,
+// and so a slow/degraded TEI doesn't add its full 2s timeout to every health
+// check. TTL is short enough that a real outage is reflected within ~10s.
+const HEALTH_EMBED_CACHE_MS = 10_000;
+let cachedEmbeddingAvailable: boolean | null = null;
+let cachedEmbeddingCheckedAt = 0;
+
+async function getEmbeddingAvailableForHealth(): Promise<boolean | null> {
+  const now = Date.now();
+  if (now - cachedEmbeddingCheckedAt < HEALTH_EMBED_CACHE_MS) {
+    return cachedEmbeddingAvailable;
+  }
+  try {
+    cachedEmbeddingAvailable = await isEmbeddingAvailable();
+  } catch {
+    cachedEmbeddingAvailable = null;
+  }
+  cachedEmbeddingCheckedAt = now;
+  return cachedEmbeddingAvailable;
+}
+
 // ── Health endpoint — intentional auth bypass ──────────────────────────────
 // Authentication is enforced upstream by mcp-auth-proxy; there is no
 // in-process auth middleware. This is the only route that must remain
@@ -64,14 +86,9 @@ app.use("/*", async (c, next) => {
 // unauthenticated paths; this exception is scoped to operational monitoring.
 app.get("/health", async (c) => {
   // embedding_status.available is a fast HEAD-style check (~2s cap) with
-  // graceful failure — wrap in try/catch so a TEI outage cannot break the
-  // health endpoint that load balancers and watchdogs rely on.
-  let embeddingAvailable: boolean | null;
-  try {
-    embeddingAvailable = await isEmbeddingAvailable();
-  } catch {
-    embeddingAvailable = null;
-  }
+  // graceful failure — cached for HEALTH_EMBED_CACHE_MS so health polls don't
+  // probe TEI on every request.
+  const embeddingAvailable = await getEmbeddingAvailableForHealth();
   return c.json({
     status: "ok",
     version,
@@ -103,12 +120,20 @@ function createMcpServer(): McpServer {
  * can derive the JSON-RPC status (success vs. error) for structured response
  * logs. Returns null when the body is not parseable — callers fall back to
  * the "unknown" status.
+ *
+ * Concatenates consecutive `data:` lines per the SSE spec (multi-line
+ * payloads are joined with "\n" before being parsed as JSON). Today MCP
+ * single-lines its payloads, but supporting the multi-line form keeps status
+ * detection working if the transport ever emits chunked SSE data.
  */
 function parseSseDataPayload(text: string): Record<string, unknown> | null {
-  const dataLine = text.split("\n").find((line) => line.startsWith("data:"));
-  if (!dataLine) return null;
+  const dataLines: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return null;
   try {
-    return JSON.parse(dataLine.slice(5).trim()) as Record<string, unknown>;
+    return JSON.parse(dataLines.join("\n").trim()) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -130,6 +155,11 @@ function deriveToolLabel(body: unknown): string | null {
   }
   return method;
 }
+
+// Truncation cap for the optional body field on response logs. Even with
+// LOG_RESPONSE_BODIES=true we never want a single search hit to balloon log
+// pipeline storage — large payloads are summarized.
+const RESPONSE_BODY_LOG_MAX_BYTES = 4096;
 
 app.post("/mcp", async (c) => {
   const correlationId = randomUUID();
@@ -178,20 +208,58 @@ app.post("/mcp", async (c) => {
     );
   }
 
-  // Structured response logging. Body logging is gated on
-  // LOG_RESPONSE_BODIES=true because response bodies may contain
-  // user-supplied content (handoff state, notes, search hits).
-  let resultStatus: "success" | "error" | "unknown" = handlerError ? "error" : "unknown";
+  // Tee the body before returning so the async logger reads the clone while
+  // the framework streams the original to the client. The actual buffered
+  // read happens after we hand back the response — body size/status detection
+  // must not add latency to the request path (spec constraint).
+  const cloned = response.clone();
+  const httpStatus = response.status;
+  queueMicrotask(() => {
+    void logMcpResponse({
+      cloned,
+      handlerError,
+      logResponseBodies,
+      correlationId,
+      toolLabel,
+      requestId,
+      httpStatus,
+      start,
+    });
+  });
+
+  return response;
+});
+
+interface ResponseLogOptions {
+  cloned: Response;
+  handlerError: Error | null;
+  logResponseBodies: boolean;
+  correlationId: string;
+  toolLabel: string | null;
+  requestId: unknown;
+  httpStatus: number;
+  start: number;
+}
+
+/**
+ * Read the cloned response body and emit a structured log line. Runs after
+ * the response has been handed back so it adds zero latency to the request
+ * path. Reading must be fully best-effort — a stream error here cannot
+ * affect what the client receives.
+ */
+async function logMcpResponse(opts: ResponseLogOptions): Promise<void> {
+  let resultStatus: "success" | "error" | "unknown" = opts.handlerError ? "error" : "unknown";
   let sizeBytes = 0;
-  let bodySnippet: string | null = null;
+  let bodyForLog: string | null = null;
   try {
-    // Response.clone() tees the body so the caller still receives the
-    // original stream. Reading the clone is safe for our buffered SSE
-    // payloads — the transport does not stream chunks in stateless mode.
-    const cloned = response.clone();
-    const bodyText = await cloned.text();
+    const bodyText = await opts.cloned.text();
     sizeBytes = Buffer.byteLength(bodyText, "utf-8");
-    if (logResponseBodies) bodySnippet = bodyText;
+    if (opts.logResponseBodies) {
+      bodyForLog =
+        sizeBytes > RESPONSE_BODY_LOG_MAX_BYTES
+          ? bodyText.slice(0, RESPONSE_BODY_LOG_MAX_BYTES) + "...[truncated]"
+          : bodyText;
+    }
 
     const sseData = parseSseDataPayload(bodyText);
     if (sseData) {
@@ -208,25 +276,23 @@ app.post("/mcp", async (c) => {
       }
     }
   } catch {
-    // Cloning/reading must never break the response we already produced.
+    // Cloning/reading must never break logging; emit with whatever we have.
   }
 
   const logEntry: Record<string, unknown> = {
-    level: handlerError ? "error" : "info",
+    level: opts.handlerError ? "error" : "info",
     type: "mcp_response",
-    correlation_id: correlationId,
-    tool: toolLabel,
-    request_id: requestId,
+    correlation_id: opts.correlationId,
+    tool: opts.toolLabel,
+    request_id: opts.requestId,
     status: resultStatus,
-    http_status: response.status,
-    duration_ms: Date.now() - start,
+    http_status: opts.httpStatus,
+    duration_ms: Date.now() - opts.start,
     size_bytes: sizeBytes,
   };
-  if (bodySnippet !== null) logEntry.body = bodySnippet;
+  if (bodyForLog !== null) logEntry.body = bodyForLog;
   console.log(JSON.stringify(logEntry));
-
-  return response;
-});
+}
 
 // Stateless mode: GET and DELETE are not supported
 app.get("/mcp", async (c) => {

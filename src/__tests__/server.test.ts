@@ -960,10 +960,12 @@ describe("MCP Tools", () => {
       expect(result.code).toBe("EMPTY_HANDOFF");
     });
 
-    it("store_handoff with only a deprecated tasks field returns EMPTY_HANDOFF", async () => {
-      // Since schema 1.3, tasks are stripped server-side and do not count
-      // as content — a payload that contains only tasks must fail the
-      // empty-content guard, not write a metadata-only handoff file.
+    it("store_handoff with only a deprecated tasks field succeeds (backwards-compatible)", async () => {
+      // Pre-schema-1.3 callers that send tasks-only payloads must still
+      // receive a success response — silently turning these into
+      // EMPTY_HANDOFF would be a breaking change. The legacy task arrays
+      // are stripped server-side and a deprecation warning is logged, but
+      // the empty-content guard treats `tasks` as content for compatibility.
       const res = await mcpPost(
         jsonrpc("tools/call", {
           name: "store_handoff",
@@ -974,8 +976,9 @@ describe("MCP Tools", () => {
       );
       const data = (await parseSseResponse(res)) as any;
       const result = JSON.parse(data.result.content[0].text);
-      expect(result.error).toBe(true);
-      expect(result.code).toBe("EMPTY_HANDOFF");
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(typeof result.filename).toBe("string");
     });
 
     it("store_handoff with a single content field (timezone) succeeds", async () => {
@@ -1512,7 +1515,10 @@ describe("Session close — final flag", () => {
     expect(parsed.session_closed_at).toBe(parsed.stored_at);
   });
 
-  it("get_latest_handoff returns session_continuity='cold_start' after a closed write", async () => {
+  it("get_latest_handoff returns session_continuity='resume' immediately after a closed write (elapsed gate)", async () => {
+    // Per spec, cold_start requires session_closed=true AND a significant
+    // elapsed_seconds gap. A session that was just closed (seconds ago) is
+    // still effectively warm — operational_state is fresh.
     await storeAndVerify({ tone_notes: "closing-write", final: true });
 
     const res = await mcpPost(
@@ -1522,6 +1528,32 @@ describe("Session close — final flag", () => {
     const result = JSON.parse(data.result.content[0].text);
     expect(result.session_closed).toBe(true);
     expect(typeof result.session_closed_at).toBe("string");
+    expect(result.session_continuity).toBe("resume");
+  });
+
+  it("get_latest_handoff returns session_continuity='cold_start' once enough time has elapsed since close", async () => {
+    // Write a synthetic handoff file with stored_at backdated past the
+    // cold-start threshold so we can verify the gate flips to cold_start.
+    const { writeFile } = await import("node:fs/promises");
+    const backdated = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const filename = `${backdated.replace(/[:.]/g, "-")}.json`;
+    await writeFile(
+      join(TEST_DATA_DIR, "handoffs", filename),
+      JSON.stringify({
+        stored_at: backdated,
+        schema_version: "1.3",
+        tone_notes: "old-closed-session",
+        session_closed: true,
+        session_closed_at: backdated,
+      })
+    );
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.session_closed).toBe(true);
     expect(result.session_continuity).toBe("cold_start");
   });
 
@@ -1554,13 +1586,16 @@ describe("Session close — final flag", () => {
     expect(result.session_closed).toBe(true);
     expect(typeof result.session_closed_at).toBe("string");
 
-    // The new handoff file should now flip get_latest into cold_start.
+    // The new handoff carries session_closed=true. cold_start only flips
+    // once enough elapsed time has passed; immediately after the close
+    // continuity is still 'resume' (no gap yet).
     const getRes = await mcpPost(
       jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
     );
     const getData = (await parseSseResponse(getRes)) as any;
     const retrieved = JSON.parse(getData.result.content[0].text);
-    expect(retrieved.session_continuity).toBe("cold_start");
+    expect(retrieved.session_closed).toBe(true);
+    expect(retrieved.session_continuity).toBe("resume");
   });
 
   it("patch_handoff WITHOUT final or content fails with EMPTY_PATCH", async () => {
@@ -1578,14 +1613,14 @@ describe("Session close — final flag", () => {
     expect(result.code).toBe("EMPTY_PATCH");
   });
 
-  it("a subsequent open patch resets session_continuity to 'resume'", async () => {
+  it("a subsequent open patch clears the session_closed marker", async () => {
     // 1. Close a session.
     await storeAndVerify({ tone_notes: "close-1", final: true });
     let getRes = await mcpPost(
       jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
     );
     let result = JSON.parse(((await parseSseResponse(getRes)) as any).result.content[0].text);
-    expect(result.session_continuity).toBe("cold_start");
+    expect(result.session_closed).toBe(true);
 
     // 2. Open patch — should drop the stale close marker.
     const patchRes = await mcpPost(

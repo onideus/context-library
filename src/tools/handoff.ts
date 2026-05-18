@@ -172,15 +172,32 @@ export function computeSameCalendarDay(storedAt?: string, tz?: string): boolean 
 }
 
 /**
+ * Minimum elapsed seconds between a session-closing handoff and "now" before
+ * we classify the next conversation as a cold start. A session reopened
+ * within this window (e.g., the user closed and reopened Claude Code to fix
+ * a config) is still effectively warm — operational_state and active_context
+ * are very likely to apply directly. The spec calls this "significant
+ * elapsed_seconds." 15 minutes is the threshold: long enough that the user
+ * has likely walked away, short enough that genuine resumptions still
+ * register as resume.
+ */
+const COLD_START_THRESHOLD_SECONDS = 15 * 60;
+
+/**
  * Derive a coarse session-continuity signal for the next caller.
  *
  *  - "cold_start"   : the previous session was explicitly closed via
- *                     store_handoff/patch_handoff with final=true. The next
- *                     conversation should treat operational_state and
- *                     active_context as historical context, not live state.
- *  - "resume"       : the previous session never set final=true. The next
- *                     conversation may be a continuation; load the active
- *                     context with that framing.
+ *                     store_handoff/patch_handoff with final=true AND a
+ *                     significant amount of time has elapsed since the
+ *                     closing handoff (see COLD_START_THRESHOLD_SECONDS).
+ *                     The next conversation should treat operational_state
+ *                     and active_context as historical context, not live
+ *                     state.
+ *  - "resume"       : the previous session never set final=true, OR it set
+ *                     final=true but was reopened within the cold-start
+ *                     threshold. The next conversation may be a
+ *                     continuation; load the active context with that
+ *                     framing.
  *  - "unknown"      : no stored_at is parseable (e.g., corrupted handoff).
  *
  * Returned as advisory information — callers decide how to weight it.
@@ -192,7 +209,10 @@ export function computeSessionContinuity(handoff: {
   session_closed?: boolean;
 }): "cold_start" | "resume" | "unknown" {
   if (!handoff.stored_at) return "unknown";
-  return handoff.session_closed === true ? "cold_start" : "resume";
+  if (handoff.session_closed !== true) return "resume";
+  const elapsed = computeElapsedSeconds(handoff.stored_at);
+  if (elapsed === null) return "unknown";
+  return elapsed >= COLD_START_THRESHOLD_SECONDS ? "cold_start" : "resume";
 }
 
 /**
@@ -367,7 +387,7 @@ Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_s
 Session continuity:
 - session_closed (boolean): true when the previous write set final=true. Implies the user explicitly ended that session.
 - session_closed_at (ISO timestamp or null): when the session was closed (matches stored_at on the closing handoff).
-- session_continuity ('cold_start' | 'resume' | 'unknown'): coarse signal for whether this conversation is picking up a still-open session ('resume') or starting after a closed one ('cold_start'). Use this to frame how literally to apply operational_state and active_context — a closed session's working state is historical, not live.
+- session_continuity ('cold_start' | 'resume' | 'unknown'): coarse signal for whether this conversation is picking up a still-open session ('resume') or starting after a closed one ('cold_start'). Use this to frame how literally to apply operational_state and active_context — a closed session's working state is historical, not live. A closed session reopened within ~15 minutes still reports 'resume' so brief reopens (e.g., to fix config) don't lose context.
 
 embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
 
@@ -444,15 +464,22 @@ const arrayOpSchema = z
   .optional();
 
 /**
- * Fields treated as user-supplied content on store_handoff / patch_handoff.
+ * Fields treated as user-supplied content on store_handoff / patch_handoff
+ * for the purposes of the empty-payload guard.
  *
- * tasks is intentionally excluded since schema 1.3: it is stripped server-side
- * and never persisted, so a tasks-only payload is effectively empty and must
- * fail the empty-content guard rather than write a metadata-only file.
+ * `tasks` is intentionally still counted as content even though it is
+ * deprecated and stripped server-side before persistence: pre-schema-1.3
+ * callers that send tasks-only payloads must still receive a success
+ * response (they previously got a metadata-only handoff file). Stripping
+ * `tasks` from this list would silently turn those calls into EMPTY_HANDOFF
+ * errors, which is a breaking change we don't want bundled into a hardening
+ * batch. The stored file remains metadata-only; the deprecation warning
+ * still fires; only the empty guard treats the payload as non-empty.
  */
 const STORE_CONTENT_FIELDS = [
   "operational_state",
   "active_context",
+  "tasks",
   "tone_notes",
   "timezone",
 ] as const;

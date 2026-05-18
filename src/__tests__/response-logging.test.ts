@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join } from "node:path";
 
 /**
@@ -13,10 +14,26 @@ import { join } from "node:path";
  * (default) and one with body logging on — to cover both code paths.
  */
 
-const TEST_PORT_OFF = 3196;
-const TEST_PORT_ON = 3195;
 const TEST_DATA_DIR_OFF = join(process.cwd(), "data", "test-resp-log-off");
 const TEST_DATA_DIR_ON = join(process.cwd(), "data", "test-resp-log-on");
+
+/** Reserve an ephemeral port by listening on 0 then closing — avoids fixed-port flake. */
+async function pickFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      if (typeof addr === "object" && addr) {
+        const port = addr.port;
+        srv.close(() => resolve(port));
+      } else {
+        srv.close();
+        reject(new Error("Could not get port from server"));
+      }
+    });
+  });
+}
 
 async function waitForServer(url: string, timeoutMs = 30_000): Promise<void> {
   const start = Date.now();
@@ -30,6 +47,26 @@ async function waitForServer(url: string, timeoutMs = 30_000): Promise<void> {
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`Server did not start within ${timeoutMs}ms`);
+}
+
+/**
+ * Poll `stdout` for log entries matching `predicate` until `timeoutMs`
+ * elapses. Avoids fixed setTimeout sleeps in tests, which are flaky on
+ * slow CI. Returns the matched entries (may be empty on timeout).
+ */
+async function waitForLogEntries(
+  stdout: string[],
+  baseline: number,
+  predicate: (entry: Record<string, unknown>) => boolean,
+  timeoutMs = 5_000
+): Promise<Array<Record<string, unknown>>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const entries = parseLogEntries(stdout.slice(baseline)).filter(predicate);
+    if (entries.length > 0) return entries;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return parseLogEntries(stdout.slice(baseline)).filter(predicate);
 }
 
 function spawnServer(
@@ -105,6 +142,8 @@ async function mcpPost(baseUrl: string, body: unknown): Promise<Response> {
 
 let offServer: ReturnType<typeof spawnServer>;
 let onServer: ReturnType<typeof spawnServer>;
+let offPort: number;
+let onPort: number;
 
 beforeAll(async () => {
   await rm(TEST_DATA_DIR_OFF, { recursive: true, force: true });
@@ -112,14 +151,17 @@ beforeAll(async () => {
   await mkdir(TEST_DATA_DIR_OFF, { recursive: true });
   await mkdir(TEST_DATA_DIR_ON, { recursive: true });
 
-  offServer = spawnServer(TEST_PORT_OFF, TEST_DATA_DIR_OFF);
-  onServer = spawnServer(TEST_PORT_ON, TEST_DATA_DIR_ON, {
+  offPort = await pickFreePort();
+  onPort = await pickFreePort();
+
+  offServer = spawnServer(offPort, TEST_DATA_DIR_OFF);
+  onServer = spawnServer(onPort, TEST_DATA_DIR_ON, {
     LOG_RESPONSE_BODIES: "true",
   });
 
   await Promise.all([
-    waitForServer(`http://localhost:${TEST_PORT_OFF}`),
-    waitForServer(`http://localhost:${TEST_PORT_ON}`),
+    waitForServer(`http://localhost:${offPort}`),
+    waitForServer(`http://localhost:${onPort}`),
   ]);
 }, 45_000);
 
@@ -137,7 +179,7 @@ afterAll(async () => {
 describe("Structured response logging", () => {
   it("emits one mcp_response log entry per /mcp request with expected fields", async () => {
     const before = offServer.stdout.length;
-    const res = await mcpPost(`http://localhost:${TEST_PORT_OFF}`, {
+    const res = await mcpPost(`http://localhost:${offPort}`, {
       jsonrpc: "2.0",
       method: "tools/call",
       params: { name: "store_handoff", arguments: { tone_notes: "log test" } },
@@ -145,10 +187,11 @@ describe("Structured response logging", () => {
     });
     expect(res.status).toBe(200);
 
-    // Give the logger a moment to flush.
-    await new Promise((r) => setTimeout(r, 100));
-
-    const entries = parseLogEntries(offServer.stdout.slice(before));
+    const entries = await waitForLogEntries(
+      offServer.stdout,
+      before,
+      (e) => e.request_id === 99
+    );
     expect(entries.length).toBeGreaterThanOrEqual(1);
     const entry = entries[entries.length - 1];
     expect(entry.level).toBe("info");
@@ -166,14 +209,17 @@ describe("Structured response logging", () => {
 
   it("does not include response body at default log level (no LOG_RESPONSE_BODIES)", async () => {
     const before = offServer.stdout.length;
-    await mcpPost(`http://localhost:${TEST_PORT_OFF}`, {
+    await mcpPost(`http://localhost:${offPort}`, {
       jsonrpc: "2.0",
       method: "tools/call",
       params: { name: "store_handoff", arguments: { tone_notes: "no-body-log" } },
       id: 100,
     });
-    await new Promise((r) => setTimeout(r, 100));
-    const entries = parseLogEntries(offServer.stdout.slice(before));
+    const entries = await waitForLogEntries(
+      offServer.stdout,
+      before,
+      (e) => e.request_id === 100
+    );
     expect(entries.length).toBeGreaterThanOrEqual(1);
     const entry = entries[entries.length - 1];
     expect("body" in entry).toBe(false);
@@ -181,14 +227,17 @@ describe("Structured response logging", () => {
 
   it("includes the response body when LOG_RESPONSE_BODIES=true is set", async () => {
     const before = onServer.stdout.length;
-    await mcpPost(`http://localhost:${TEST_PORT_ON}`, {
+    await mcpPost(`http://localhost:${onPort}`, {
       jsonrpc: "2.0",
       method: "tools/call",
       params: { name: "store_handoff", arguments: { tone_notes: "with-body-log" } },
       id: 101,
     });
-    await new Promise((r) => setTimeout(r, 100));
-    const entries = parseLogEntries(onServer.stdout.slice(before));
+    const entries = await waitForLogEntries(
+      onServer.stdout,
+      before,
+      (e) => e.request_id === 101
+    );
     expect(entries.length).toBeGreaterThanOrEqual(1);
     const entry = entries[entries.length - 1];
     expect(typeof entry.body).toBe("string");
