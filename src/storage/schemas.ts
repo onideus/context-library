@@ -11,21 +11,19 @@ export const HandoffSchema = z
       })
       .optional(),
     active_context: z.record(z.string(), z.unknown()).optional(),
+    /**
+     * @deprecated Handoff task arrays are deprecated since schema 1.3. The
+     * Postgres tasks table is authoritative; use create_task / update_task.
+     * Accepted on input for backwards compatibility but stripped server-side
+     * before storage. Historical handoffs on disk may still contain this
+     * field — read it defensively, never write it.
+     */
     tasks: z
       .object({
         completed: z.array(z.string()).optional(),
         open: z.array(z.string()).optional(),
         blocked: z.array(z.string()).optional(),
       })
-      .optional(),
-    memory_deltas: z
-      .array(
-        z.object({
-          slot: z.number(),
-          action: z.enum(["add", "replace", "remove"]),
-          content: z.string().optional(),
-        })
-      )
       .optional(),
     tone_notes: z.string().optional(),
     timezone: z.string().optional(),

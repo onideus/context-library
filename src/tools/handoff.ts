@@ -13,7 +13,31 @@ import { computeDynamicTaskSummary } from "./task-summary.js";
 import { computeDynamicArtifactSummary } from "./artifact-summary.js";
 import { validatePayloadSize, PayloadTooLargeError, LIMITS } from "./validation.js";
 
-export const SCHEMA_VERSION = "1.2";
+export const SCHEMA_VERSION = "1.3";
+
+/**
+ * Log the structured deprecation warning emitted whenever a caller sends
+ * legacy handoff task arrays. Centralised so store_handoff and patch_handoff
+ * emit identical signal.
+ */
+function logTaskArrayDeprecation(tool: "store_handoff" | "patch_handoff"): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      tool,
+      message: "Deprecated: handoff task arrays stripped server-side",
+      field: "tasks",
+      recommendation: "Use create_task/update_task for task management",
+    })
+  );
+}
+
+/** True when the incoming handoff payload contains any legacy task array. */
+function hasTaskArrays(args: Record<string, unknown>): boolean {
+  const t = args.tasks as Record<string, unknown> | undefined;
+  if (!t || typeof t !== "object") return false;
+  return "completed" in t || "open" in t || "blocked" in t;
+}
 
 export const HANDOFFS_DIR = () => join(config.dataDir, "handoffs");
 
@@ -84,13 +108,24 @@ export function formatStoredAtLocal(storedAt: string, tz?: string): string | nul
   }
 }
 
-/** Compute next_step guidance based on handoff state. */
-export function computeNextStep(handoff: Handoff): string {
+/**
+ * Compute next_step guidance based on handoff state.
+ *
+ * Accepts an optional taskSummary so the open-task hint can reflect the
+ * authoritative Postgres count when available. Handoff task arrays are no
+ * longer authoritative (deprecated since schema 1.3) so we only fall back to
+ * them when no summary is supplied — historical handoffs are read defensively.
+ */
+export function computeNextStep(
+  handoff: Handoff,
+  taskSummary?: { open_count: number } | null
+): string {
   const parts: string[] = [];
 
   parts.push("Before responding on architecture, strategy, or pipeline topics, call search_notes or search_context to check for prior decisions.");
 
-  const openCount = handoff.tasks?.open?.length ?? 0;
+  const openCount =
+    taskSummary?.open_count ?? handoff.tasks?.open?.length ?? 0;
   if (openCount > 0) {
     parts.push(`${openCount} open tasks loaded. Check search_tasks before creating new tasks to avoid duplicates.`);
   }
@@ -102,7 +137,11 @@ export function computeNextStep(handoff: Handoff): string {
   return parts.join(" ");
 }
 
-/** Compute task_summary from handoff data. */
+/**
+ * Compute task_summary from handoff data. Used only as a fallback when
+ * Postgres is unavailable — handoff task arrays are deprecated since schema
+ * 1.3 and may be missing entirely from new handoffs (counts will be 0).
+ */
 export function computeTaskSummary(handoff: Handoff) {
   return {
     open_count: (handoff.tasks?.open || []).length,
@@ -132,12 +171,25 @@ export function computeSameCalendarDay(storedAt?: string, tz?: string): boolean 
   }
 }
 
-/** Filter a handoff payload by scope, tracking which fields were removed. */
+/**
+ * Filter a handoff payload by scope, tracking which fields were removed.
+ *
+ * Note: legacy task arrays (tasks.completed/open/blocked) are no longer
+ * surfaced in any scope since schema 1.3 — task_summary, computed from
+ * Postgres, is authoritative. Historical handoffs on disk may still contain
+ * the field; it is dropped from the response, never written back.
+ */
 export function filterByScope(
   handoff: Handoff,
   scope: "full" | "work" | "personal"
 ): { result: Record<string, unknown>; filteredFields: string[] } {
-  if (scope === "full") return { result: handoff, filteredFields: [] };
+  if (scope === "full") {
+    // Strip the deprecated tasks key from the response without mutating
+    // the input. The on-disk file is untouched.
+    const { tasks: _tasks, ...rest } = handoff as Handoff & { tasks?: unknown };
+    void _tasks;
+    return { result: rest, filteredFields: [] };
+  }
 
   const filteredFields: string[] = [];
 
@@ -145,13 +197,6 @@ export function filterByScope(
     // Exclude personal health/financial data
     const result: Record<string, unknown> = {
       active_context: handoff.active_context,
-      tasks: handoff.tasks
-        ? {
-            completed: handoff.tasks.completed,
-            open: handoff.tasks.open,
-            blocked: handoff.tasks.blocked,
-          }
-        : undefined,
       tone_notes: handoff.tone_notes,
       stored_at: handoff.stored_at,
       timezone: handoff.timezone,
@@ -170,10 +215,6 @@ export function filterByScope(
       }
     }
 
-    if (handoff.memory_deltas) {
-      filteredFields.push("memory_deltas");
-    }
-
     return { result, filteredFields };
   }
 
@@ -181,7 +222,6 @@ export function filterByScope(
   const filteredPersonal: string[] = [];
   const result: Record<string, unknown> = {
     operational_state: handoff.operational_state,
-    memory_deltas: handoff.memory_deltas,
     tone_notes: handoff.tone_notes,
     stored_at: handoff.stored_at,
     timezone: handoff.timezone,
@@ -189,9 +229,6 @@ export function filterByScope(
 
   if (handoff.active_context) {
     filteredPersonal.push("active_context");
-  }
-  if (handoff.tasks) {
-    filteredPersonal.push("tasks");
   }
 
   return {
@@ -266,12 +303,11 @@ What belongs elsewhere:
 
 If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
 
+Task management uses create_task and update_task. Handoff task arrays are deprecated and will be stripped server-side if provided (the request still succeeds; a structured warning is logged).
+
 Parameters:
   - operational_state (optional): {sleep_hours, physical_state, energy_level, mood}
   - active_context (optional): Free-form object for session context, conversation arc, key decisions, and prompts generated. Supports an optional session_meta sub-object: {label, surface, model} to record which instance/surface/model produced this handoff.
-  - tasks (optional): {completed: string[], open: string[], blocked: string[]}
-    Blocked items should encode dependencies as "task → dependency"
-  - memory_deltas (optional): Array of {slot, action, content} for memory edit requests
   - tone_notes (optional): Guidance for the next instance on how to approach the user
   - timezone (optional): IANA timezone identifier (e.g., 'America/New_York')
 
@@ -293,7 +329,7 @@ Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_s
 
 embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
 
-Response shape: operational_state, active_context, tasks, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled.
+Response shape: operational_state, active_context, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled. Legacy handoff task arrays (tasks.completed/open/blocked) are NOT returned since schema 1.3 — task_summary is the authoritative replacement, computed live from the Postgres tasks table. Call search_tasks or list_tasks for full task detail.
 
 task_summary shape:
 When Postgres is available, task_summary is computed live from the authoritative tasks table and returns:
@@ -315,7 +351,7 @@ Parameters:
 - scope (optional, default "full"): "full" | "work" | "personal"
 - timezone (optional): IANA timezone for retrieved_at formatting`;
 
-const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of store_handoff when you only need to update specific fields (e.g., move a task from open to completed, update mood, append to conversation arc). Scalars overwrite, objects deep-merge, arrays use explicit operations (append/remove/replace). Each call creates a new timestamped file (append-only).
+const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of store_handoff when you only need to update mood, append to conversation arc, or revise tone_notes. Scalars overwrite, objects deep-merge. Each call creates a new timestamped file (append-only).
 
 Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and store_artifact for guidance on what belongs elsewhere.
 
@@ -326,20 +362,13 @@ Session naming convention: Use YYYY-MM-DD-vNN format for session labels in activ
 Merge semantics:
 - Scalars (tone_notes, timezone): Direct overwrite if provided, preserved if null/absent.
 - Objects (operational_state, active_context): Deep merge — patch keys overwrite, others preserved.
-- Arrays (tasks.completed, tasks.open, tasks.blocked): Explicit operations only.
-  - {op: "append", items: [...]} — add items to end
-  - {op: "remove", items: [...]} — remove matching items
-  - {op: "replace", items: [...]} — full replacement (escape hatch)
-  - null — preserve original array
-- memory_deltas: If provided, these are NEW deltas for this patch (not merged with original).
 - active_context supports an optional session_meta sub-object: {label, surface, model}.
+
+Task management uses create_task and update_task — the handoff tasks parameter is deprecated. A tasks argument is still accepted for backwards compatibility, but task array operations (append/remove/replace) are no-ops: the patch succeeds, a structured warning is logged, and the returned task_summary reflects the authoritative Postgres state.
 
 Parameters:
   - operational_state (optional): Partial object — keys provided overwrite, others preserved
   - active_context (optional): Partial object — keys provided overwrite, others preserved
-  - tasks (optional): Object with array operations per sub-key (completed, open, blocked).
-    Each accepts {op: "append"|"remove"|"replace", items: string[]} or null to preserve.
-  - memory_deltas (optional): Array of {slot, action, content} — new deltas for this patch
   - tone_notes (optional): String to replace, or null to preserve
   - timezone (optional): IANA timezone string to replace, or null to preserve
 
@@ -371,12 +400,17 @@ const arrayOpSchema = z
   .nullable()
   .optional();
 
-/** Fields treated as user-supplied content on store_handoff. */
+/**
+ * Fields treated as user-supplied content on store_handoff / patch_handoff.
+ *
+ * tasks is still accepted on input for backwards compatibility (so the
+ * empty-content guard doesn't reject a callers-only-sent-tasks payload), but
+ * the field is stripped server-side before storage.
+ */
 const STORE_CONTENT_FIELDS = [
   "operational_state",
   "active_context",
   "tasks",
-  "memory_deltas",
   "tone_notes",
   "timezone",
 ] as const;
@@ -407,21 +441,17 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         })
         .optional(),
       active_context: z.record(z.string(), z.unknown()).optional(),
+      /**
+       * @deprecated Handoff task arrays are deprecated since schema 1.3 and
+       * stripped server-side before storage. Use create_task / update_task
+       * instead. Field stays in the schema so existing callers don't fail.
+       */
       tasks: z
         .object({
           completed: z.array(z.string()).optional(),
           open: z.array(z.string()).optional(),
           blocked: z.array(z.string()).optional(),
         })
-        .optional(),
-      memory_deltas: z
-        .array(
-          z.object({
-            slot: z.number(),
-            action: z.enum(["add", "replace", "remove"]),
-            content: z.string().optional(),
-          })
-        )
         .optional(),
       tone_notes: z.string().optional(),
       timezone: z
@@ -444,7 +474,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 code: "EMPTY_HANDOFF",
                 message:
-                  "store_handoff requires at least one content field (operational_state, active_context, tasks, memory_deltas, tone_notes, or timezone).",
+                  "store_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone).",
               }),
             },
           ],
@@ -474,8 +504,23 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         throw err;
       }
 
+      // Deprecation: log + strip legacy task arrays before storage. The
+      // Postgres tasks table is authoritative; handoff arrays are never
+      // persisted on the new schema (1.3+).
+      if (hasTaskArrays(args as Record<string, unknown>)) {
+        logTaskArrayDeprecation("store_handoff");
+      }
+      const { tasks: _droppedTasks, ...sanitizedArgs } = args as typeof args & {
+        tasks?: unknown;
+      };
+      void _droppedTasks;
+
       const storedAt = new Date().toISOString();
-      const handoff: Handoff = { ...args, stored_at: storedAt, schema_version: SCHEMA_VERSION };
+      const handoff: Handoff = {
+        ...sanitizedArgs,
+        stored_at: storedAt,
+        schema_version: SCHEMA_VERSION,
+      };
 
       // Capture previous latest BEFORE writing so we know what to compact.
       const previousFilename = await getLatestHandoffFilename();
@@ -502,6 +547,13 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         );
       }
 
+      // Prefer the authoritative Postgres-derived task_summary; fall back to
+      // the handoff-array counts when Postgres is unavailable. For new
+      // handoffs the array fallback will be 0 (task arrays are stripped) —
+      // tasks live in Postgres now.
+      const dynamicSummary = await computeDynamicTaskSummary();
+      const taskSummary = dynamicSummary ?? computeTaskSummary(handoff);
+
       return {
         content: [
           {
@@ -510,9 +562,9 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               success: true,
               stored_at: storedAt,
               filename,
-              task_summary: computeTaskSummary(handoff),
+              task_summary: taskSummary,
               schema_version: SCHEMA_VERSION,
-              next_step: computeNextStep(handoff),
+              next_step: computeNextStep(handoff, taskSummary),
             }),
           },
         ],
@@ -603,7 +655,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               handoff_count: handoffCount,
               embedding_status: embeddingStatus,
               evidence_pulled: true,
-              next_step: computeNextStep(handoff),
+              next_step: computeNextStep(handoff, taskSummary),
             }),
           },
         ],
@@ -624,22 +676,18 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .record(z.string(), z.unknown())
         .nullable()
         .optional(),
+      /**
+       * @deprecated Handoff task array operations are no-ops since schema
+       * 1.3. The Postgres tasks table is authoritative — use create_task /
+       * update_task. Accepted for backwards compatibility; a structured
+       * warning is logged when present and the operations are skipped.
+       */
       tasks: z
         .object({
           completed: arrayOpSchema,
           open: arrayOpSchema,
           blocked: arrayOpSchema,
         })
-        .nullable()
-        .optional(),
-      memory_deltas: z
-        .array(
-          z.object({
-            slot: z.number(),
-            action: z.enum(["add", "replace", "remove"]),
-            content: z.string().optional(),
-          })
-        )
         .nullable()
         .optional(),
       tone_notes: z.string().nullable().optional(),
@@ -658,7 +706,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 code: "EMPTY_PATCH",
                 message:
-                  "patch_handoff requires at least one content field (operational_state, active_context, tasks, memory_deltas, tone_notes, or timezone). Null values are treated as no-op.",
+                  "patch_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone). Null values are treated as no-op.",
               }),
             },
           ],
@@ -720,8 +768,26 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         };
       }
 
+      // Deprecation: task array ops become no-ops since schema 1.3. Log a
+      // structured warning and drop the field from both the patch and the
+      // source handoff so the merged result never carries legacy task arrays
+      // forward.
+      const patchHasTasks =
+        args.tasks !== undefined && args.tasks !== null && Object.keys(args.tasks).length > 0;
+      if (patchHasTasks) {
+        logTaskArrayDeprecation("patch_handoff");
+      }
+      const { tasks: _patchTasks, ...patchWithoutTasks } = args as typeof args & {
+        tasks?: unknown;
+      };
+      void _patchTasks;
+      const { tasks: _origTasks, ...handoffWithoutTasks } = handoff as Handoff & {
+        tasks?: unknown;
+      };
+      void _origTasks;
+
       // Merge
-      const { merged, patchedFields } = mergeHandoff(handoff, args);
+      const { merged, patchedFields } = mergeHandoff(handoffWithoutTasks, patchWithoutTasks);
 
       // Set new stored_at, schema_version, and patched_from reference
       merged.stored_at = new Date().toISOString();
@@ -744,6 +810,11 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         );
       }
 
+      // task_summary on patch_handoff response reflects authoritative
+      // Postgres state, not the legacy handoff arrays (now stripped).
+      const dynamicSummary = await computeDynamicTaskSummary();
+      const taskSummary = dynamicSummary ?? computeTaskSummary(merged);
+
       return {
         content: [
           {
@@ -753,7 +824,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               patched_fields: patchedFields,
               stored_at: merged.stored_at,
               source_handoff: sourceFilename,
-              task_summary: computeTaskSummary(merged),
+              task_summary: taskSummary,
               schema_version: SCHEMA_VERSION,
             }),
           },

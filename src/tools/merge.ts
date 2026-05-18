@@ -5,6 +5,15 @@ interface ArrayOp {
   items: string[];
 }
 
+/**
+ * Patch input accepted by mergeHandoff.
+ *
+ * Note: the `tasks` field is no longer processed by merge (deprecated since
+ * schema 1.3). The patch_handoff handler strips `tasks` from both the patch
+ * and the source handoff before calling merge, so the legacy task arrays
+ * never propagate into new files. The field stays in the type for callers
+ * that still type-check against the old shape.
+ */
 interface PatchInput {
   operational_state?: Record<string, string | undefined> | null;
   active_context?: Record<string, unknown> | null;
@@ -13,22 +22,8 @@ interface PatchInput {
     open?: ArrayOp | null;
     blocked?: ArrayOp | null;
   } | null;
-  memory_deltas?: Array<{ slot: number; action: string; content?: string }> | null;
   tone_notes?: string | null;
   timezone?: string | null;
-}
-
-function applyArrayOp(original: string[], op: ArrayOp): string[] {
-  switch (op.op) {
-    case "append":
-      return [...original, ...op.items];
-    case "remove":
-      return original.filter((item) => !op.items.includes(item));
-    case "replace":
-      return [...op.items];
-    default:
-      return original;
-  }
 }
 
 export function mergeHandoff(
@@ -62,28 +57,6 @@ export function mergeHandoff(
       ...patch.active_context,
     };
     patchedFields.push("active_context");
-  }
-
-  // Tasks — explicit array operations
-  if (patch.tasks !== undefined && patch.tasks !== null) {
-    const origTasks = original.tasks || { completed: [], open: [], blocked: [] };
-    const mergedTasks = { ...origTasks };
-
-    for (const key of ["completed", "open", "blocked"] as const) {
-      const op = patch.tasks[key];
-      if (op !== undefined && op !== null) {
-        mergedTasks[key] = applyArrayOp(origTasks[key] || [], op);
-      }
-    }
-
-    merged.tasks = mergedTasks;
-    patchedFields.push("tasks");
-  }
-
-  // memory_deltas — new deltas for this patch, not merged with original
-  if (patch.memory_deltas !== undefined && patch.memory_deltas !== null) {
-    merged.memory_deltas = patch.memory_deltas as Handoff["memory_deltas"];
-    patchedFields.push("memory_deltas");
   }
 
   return { merged, patchedFields };
