@@ -92,7 +92,6 @@ function spawnServer(
       return env;
     })(),
     stdio: ["pipe", "pipe", "pipe"],
-    shell: true,
   });
 
   // Buffer the lines so tests can search for log entries after the request.

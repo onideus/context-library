@@ -205,6 +205,11 @@ app.post("/mcp", async (c) => {
   // must not add latency to the request path (spec constraint).
   const cloned = response.clone();
   const httpStatus = response.status;
+  // Snapshot server latency BEFORE queueing the microtask. Computing this
+  // inside logMcpResponse (after awaiting both body reads) would inflate the
+  // metric with microtask scheduling + body buffering time, especially for
+  // large search_context / handoff payloads.
+  const durationMs = Date.now() - start;
   queueMicrotask(() => {
     void logMcpResponse({
       requestClone,
@@ -213,7 +218,7 @@ app.post("/mcp", async (c) => {
       logResponseBodies,
       correlationId,
       httpStatus,
-      start,
+      durationMs,
     });
   });
 
@@ -227,7 +232,7 @@ interface ResponseLogOptions {
   logResponseBodies: boolean;
   correlationId: string;
   httpStatus: number;
-  start: number;
+  durationMs: number;
 }
 
 /**
@@ -237,65 +242,71 @@ interface ResponseLogOptions {
  * affect what the client receives.
  */
 async function logMcpResponse(opts: ResponseLogOptions): Promise<void> {
-  // Parse the cloned request body here (off the hot path) to derive the tool
-  // label and JSON-RPC id for the log entry. A malformed body just means the
-  // log line lacks those fields — the transport rejected it on its own clone.
-  let toolLabel: string | null = null;
-  let requestId: unknown = null;
+  // Outer try/catch ensures a logging bug (e.g. a synchronous throw while
+  // assembling the entry) becomes a warning, not an unhandled rejection.
   try {
-    const parsedReq = await opts.requestClone.json();
-    toolLabel = deriveToolLabel(parsedReq);
-    if (parsedReq && typeof parsedReq === "object") {
-      requestId = (parsedReq as Record<string, unknown>).id ?? null;
-    }
-  } catch {
-    // Malformed JSON — leave label/id null.
-  }
-
-  let resultStatus: "success" | "error" | "unknown" = opts.handlerError ? "error" : "unknown";
-  let sizeBytes = 0;
-  let bodyForLog: string | null = null;
-  try {
-    const bodyText = await opts.cloned.text();
-    sizeBytes = Buffer.byteLength(bodyText, "utf-8");
-    if (opts.logResponseBodies) {
-      bodyForLog =
-        sizeBytes > RESPONSE_BODY_LOG_MAX_BYTES
-          ? bodyText.slice(0, RESPONSE_BODY_LOG_MAX_BYTES) + "...[truncated]"
-          : bodyText;
-    }
-
-    const sseData = parseSseDataPayload(bodyText);
-    if (sseData) {
-      if (sseData.error) resultStatus = "error";
-      else if (sseData.result) resultStatus = "success";
-    } else {
-      // Non-SSE responses (transport errors, 405s) are plain JSON.
-      try {
-        const parsed = JSON.parse(bodyText) as Record<string, unknown>;
-        if (parsed.error) resultStatus = "error";
-        else if (parsed.result) resultStatus = "success";
-      } catch {
-        // Best-effort — leave resultStatus as is.
+    // Parse the cloned request body here (off the hot path) to derive the tool
+    // label and JSON-RPC id for the log entry. A malformed body just means the
+    // log line lacks those fields — the transport rejected it on its own clone.
+    let toolLabel: string | null = null;
+    let requestId: unknown = null;
+    try {
+      const parsedReq = await opts.requestClone.json();
+      toolLabel = deriveToolLabel(parsedReq);
+      if (parsedReq && typeof parsedReq === "object") {
+        requestId = (parsedReq as Record<string, unknown>).id ?? null;
       }
+    } catch {
+      // Malformed JSON — leave label/id null.
     }
-  } catch {
-    // Cloning/reading must never break logging; emit with whatever we have.
-  }
 
-  const logEntry: Record<string, unknown> = {
-    level: opts.handlerError ? "error" : "info",
-    type: "mcp_response",
-    correlation_id: opts.correlationId,
-    tool: toolLabel,
-    request_id: requestId,
-    status: resultStatus,
-    http_status: opts.httpStatus,
-    duration_ms: Date.now() - opts.start,
-    size_bytes: sizeBytes,
-  };
-  if (bodyForLog !== null) logEntry.body = bodyForLog;
-  console.log(JSON.stringify(logEntry));
+    let resultStatus: "success" | "error" | "unknown" = opts.handlerError ? "error" : "unknown";
+    let sizeBytes = 0;
+    let bodyForLog: string | null = null;
+    try {
+      const bodyText = await opts.cloned.text();
+      sizeBytes = Buffer.byteLength(bodyText, "utf-8");
+      if (opts.logResponseBodies) {
+        bodyForLog =
+          sizeBytes > RESPONSE_BODY_LOG_MAX_BYTES
+            ? bodyText.slice(0, RESPONSE_BODY_LOG_MAX_BYTES) + "...[truncated]"
+            : bodyText;
+      }
+
+      const sseData = parseSseDataPayload(bodyText);
+      if (sseData) {
+        if (sseData.error) resultStatus = "error";
+        else if (sseData.result) resultStatus = "success";
+      } else {
+        // Non-SSE responses (transport errors, 405s) are plain JSON.
+        try {
+          const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+          if (parsed.error) resultStatus = "error";
+          else if (parsed.result) resultStatus = "success";
+        } catch {
+          // Best-effort — leave resultStatus as is.
+        }
+      }
+    } catch {
+      // Cloning/reading must never break logging; emit with whatever we have.
+    }
+
+    const logEntry: Record<string, unknown> = {
+      level: opts.handlerError ? "error" : "info",
+      type: "mcp_response",
+      correlation_id: opts.correlationId,
+      tool: toolLabel,
+      request_id: requestId,
+      status: resultStatus,
+      http_status: opts.httpStatus,
+      duration_ms: opts.durationMs,
+      size_bytes: sizeBytes,
+    };
+    if (bodyForLog !== null) logEntry.body = bodyForLog;
+    console.log(JSON.stringify(logEntry));
+  } catch (err) {
+    console.warn(`[mcp] response logger failed:`, (err as Error)?.message ?? err);
+  }
 }
 
 // Stateless mode: GET and DELETE are not supported
