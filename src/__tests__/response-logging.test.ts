@@ -85,6 +85,9 @@ function spawnServer(
         DATA_DIR: dataDir,
         ...extraEnv,
       };
+      // Force the spawned server through the package.json fallback path in
+      // getVersion(); inheriting APP_VERSION from the parent (e.g. when
+      // Docker sets it) would short-circuit that branch.
       delete env.APP_VERSION;
       return env;
     })(),
@@ -165,13 +168,33 @@ beforeAll(async () => {
   ]);
 }, 45_000);
 
+/**
+ * Wait for a child process to exit, falling back to SIGKILL after the
+ * deadline. Awaiting the `exit` event avoids both flake on slow CI
+ * (where 300ms isn't enough for the process to shut down) and the dead
+ * wait on fast CI (where it would have exited immediately).
+ */
+async function killAndWait(proc: ChildProcess, deadlineMs = 2_000): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const onExit = () => {
+      clearTimeout(killTimer);
+      resolve();
+    };
+    proc.once("exit", onExit);
+    const killTimer = setTimeout(() => {
+      if (!proc.killed) proc.kill("SIGKILL");
+    }, deadlineMs);
+    proc.kill("SIGTERM");
+  });
+}
+
 afterAll(async () => {
-  for (const s of [offServer, onServer]) {
-    if (!s?.proc) continue;
-    s.proc.kill("SIGTERM");
-    await new Promise((r) => setTimeout(r, 300));
-    if (!s.proc.killed) s.proc.kill("SIGKILL");
-  }
+  await Promise.all(
+    [offServer, onServer]
+      .filter((s) => s?.proc)
+      .map((s) => killAndWait(s.proc))
+  );
   await rm(TEST_DATA_DIR_OFF, { recursive: true, force: true });
   await rm(TEST_DATA_DIR_ON, { recursive: true, force: true });
 });

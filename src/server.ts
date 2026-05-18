@@ -166,20 +166,11 @@ app.post("/mcp", async (c) => {
   const start = Date.now();
   const logResponseBodies = process.env.LOG_RESPONSE_BODIES === "true";
 
-  // Inspect the request body once for the tool label and JSON-RPC id. We
-  // clone the underlying Request so the transport still sees an unread body.
-  let toolLabel: string | null = null;
-  let requestId: unknown = null;
-  try {
-    const cloned = c.req.raw.clone();
-    const parsed = await cloned.json();
-    toolLabel = deriveToolLabel(parsed);
-    if (parsed && typeof parsed === "object") {
-      requestId = (parsed as Record<string, unknown>).id ?? null;
-    }
-  } catch {
-    // Malformed JSON — transport will reject; log entry just lacks the label.
-  }
+  // Tee the request body so the logger can derive the tool label and JSON-RPC
+  // id without blocking the request path. The clone itself is a cheap Request
+  // wrapper — the expensive .json() buffer/parse happens inside the
+  // queueMicrotask below, after the response is already on the wire.
+  const requestClone = c.req.raw.clone();
 
   const server = createMcpServer();
   let response: Response;
@@ -216,12 +207,11 @@ app.post("/mcp", async (c) => {
   const httpStatus = response.status;
   queueMicrotask(() => {
     void logMcpResponse({
+      requestClone,
       cloned,
       handlerError,
       logResponseBodies,
       correlationId,
-      toolLabel,
-      requestId,
       httpStatus,
       start,
     });
@@ -231,12 +221,11 @@ app.post("/mcp", async (c) => {
 });
 
 interface ResponseLogOptions {
+  requestClone: Request;
   cloned: Response;
   handlerError: Error | null;
   logResponseBodies: boolean;
   correlationId: string;
-  toolLabel: string | null;
-  requestId: unknown;
   httpStatus: number;
   start: number;
 }
@@ -248,6 +237,21 @@ interface ResponseLogOptions {
  * affect what the client receives.
  */
 async function logMcpResponse(opts: ResponseLogOptions): Promise<void> {
+  // Parse the cloned request body here (off the hot path) to derive the tool
+  // label and JSON-RPC id for the log entry. A malformed body just means the
+  // log line lacks those fields — the transport rejected it on its own clone.
+  let toolLabel: string | null = null;
+  let requestId: unknown = null;
+  try {
+    const parsedReq = await opts.requestClone.json();
+    toolLabel = deriveToolLabel(parsedReq);
+    if (parsedReq && typeof parsedReq === "object") {
+      requestId = (parsedReq as Record<string, unknown>).id ?? null;
+    }
+  } catch {
+    // Malformed JSON — leave label/id null.
+  }
+
   let resultStatus: "success" | "error" | "unknown" = opts.handlerError ? "error" : "unknown";
   let sizeBytes = 0;
   let bodyForLog: string | null = null;
@@ -283,8 +287,8 @@ async function logMcpResponse(opts: ResponseLogOptions): Promise<void> {
     level: opts.handlerError ? "error" : "info",
     type: "mcp_response",
     correlation_id: opts.correlationId,
-    tool: opts.toolLabel,
-    request_id: opts.requestId,
+    tool: toolLabel,
+    request_id: requestId,
     status: resultStatus,
     http_status: opts.httpStatus,
     duration_ms: Date.now() - opts.start,

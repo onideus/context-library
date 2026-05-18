@@ -433,7 +433,7 @@ Parameters:
   - active_context (optional): Partial object — keys provided overwrite, others preserved
   - tone_notes (optional): String to replace, or null to preserve
   - timezone (optional): IANA timezone string to replace, or null to preserve
-  - final (optional, default false): Set true on the last write of a session. Marks the patched handoff with session_closed=true plus a session_closed_at timestamp. Setting final=true alone (with no other field) is a valid session-close patch. Future get_latest_handoff calls read this to derive session_continuity (cold start vs. resume). If unsure whether this is the final write, omit — false is the safe default.
+  - final (optional, default false): Set true on the last write of a session. Marks the patched handoff with session_closed=true plus a session_closed_at timestamp. Setting final=true alone (with no other field) is a valid session-close patch. Future get_latest_handoff calls read this to derive session_continuity (cold start vs. resume). If unsure whether this is the final write, omit — false is the safe default. Note: a patch without final=true clears any session_closed/session_closed_at markers carried over from the source handoff — patching a previously closed session reopens it.
 
 Content routing — what belongs in active_context (handoff):
 - Working state: current branch, where you stopped, next steps in this session
