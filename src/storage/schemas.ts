@@ -29,6 +29,15 @@ export const HandoffSchema = z
     timezone: z.string().optional(),
     stored_at: z.string().optional(),
     schema_version: z.string().optional(),
+    /**
+     * Session-close marker. Set by store_handoff / patch_handoff when the
+     * caller passes `final: true` on the last write of a session. Future
+     * get_latest_handoff calls read this to derive the session_continuity
+     * signal (cold start vs. resume). Absence is interpreted as an open
+     * session (existing clients that pre-date the flag are unaffected).
+     */
+    session_closed: z.boolean().optional(),
+    session_closed_at: z.string().optional(),
   })
   .passthrough();
 

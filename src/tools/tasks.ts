@@ -78,18 +78,25 @@ function validateTaskFields(args: {
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const statusEnum = z.enum(["open", "completed", "deferred", "cancelled"]);
-const scopeEnum = z.enum(["work", "personal"]);
+// 'shared' matches the notes scope enum — see migration 010_task_scope_shared.sql.
+const scopeEnum = z.enum(["work", "personal", "shared"]);
 const priorityEnum = z.enum(["critical", "high", "normal", "low"]);
 const orderByEnum = z.enum(["created_at", "updated_at", "due_date", "scheduled_date", "priority"]);
 const orderDirEnum = z.enum(["asc", "desc"]);
 
 // ── Tool Descriptions ────────────────────────────────────────────
 
-const CREATE_TASK_DESC = `Create a new task with title, scope, and optional metadata. Tasks start as 'open' by default. Use scope to separate work from personal items. Tags provide free-form categorization. Set blocked_reason if the task can't proceed yet.
+const CREATE_TASK_DESC = `Create a new task with title, scope, and optional metadata. Tasks start as 'open' by default. Use scope to separate work, personal, and shared items. Tags provide free-form categorization. Set blocked_reason if the task can't proceed yet.
 
 Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with open/completed lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles tasks. Route content to the appropriate primitive — use create_note for decisions and insights, store_artifact for generated outputs, and store_handoff for working session state.
 
-This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems. All task tracking should flow through create_task, update_task, and list_tasks.`;
+This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems. All task tracking should flow through create_task, update_task, and list_tasks.
+
+Scope values:
+- 'work': work-related tasks (engineering projects, OSS contributions, employer obligations).
+- 'personal': personal tasks (health, family, finance, life admin).
+- 'shared': reusable across contexts (architecture follow-ups, OSS project work, cross-context infrastructure tasks).
+Pass scope explicitly. When the user's request is clearly personal (health, family, finance), pass 'personal'. When clearly work-related, pass 'work'. When the task is reusable across contexts, pass 'shared'. When ambiguous, ask before creating.`;
 
 const GET_TASK_DESC = `Retrieve a single task by its UUID. Returns all fields including timestamps and tags.
 
@@ -99,11 +106,16 @@ const LIST_TASKS_DESC = `List tasks with optional filters. Defaults to showing o
 
 WHEN TO PULL TASKS: Before any evaluative response (performance reviews, weekly check-ins, compensation assessments, progress reports), pull task data to ground your assessment in tracked work — not memory alone.
 
-SCOPE AWARENESS: If you called get_latest_handoff with a scope filter (work or personal), apply the same scope here unless the user explicitly asks for cross-scope results. Staying inside the session's scope prevents leaking personal items into a work-scoped response (and vice versa).
+Scope filter:
+- When scope is omitted, this tool returns tasks across all scopes (work, personal, shared) — no scope filtering is applied.
+- Pass scope='work' to restrict to work tasks, 'personal' for personal items, or 'shared' for reusable/cross-context items.
+- If the user's request is clearly personal (health, family, finance), pass scope='personal'. If clearly work-related, pass scope='work'. If the user wants cross-context items only, pass scope='shared'. When ambiguous, omit and let the user clarify.
 
 This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems.`;
 
-const UPDATE_TASK_DESC = `Update a task's fields and/or apply a lifecycle action. Actions are convenience shortcuts: 'complete' marks done with timestamp, 'cancel' marks cancelled, 'defer' parks the task, 'reopen' returns to open. Field updates can accompany any action. Tags are full-replacement (provide complete array). Set blocked_reason to null to unblock.`;
+const UPDATE_TASK_DESC = `Update a task's fields and/or apply a lifecycle action. Actions are convenience shortcuts: 'complete' marks done with timestamp, 'cancel' marks cancelled, 'defer' parks the task, 'reopen' returns to open. Field updates can accompany any action. Tags are full-replacement (provide complete array). Set blocked_reason to null to unblock.
+
+Scope values accept 'work', 'personal', or 'shared' — match the contract documented on create_task.`;
 
 const SEARCH_TASKS_DESC = `Full-text search across task titles and context. Uses PostgreSQL FTS with English stemming. Filter by status and scope. Results ranked by relevance.
 
@@ -118,7 +130,10 @@ DO NOT CALL WHEN:
 
 CONSEQUENCE OF SKIPPING: Duplicate tasks will be created or completed work will be re-opened.
 
-SCOPE AWARENESS: If you called get_latest_handoff with a scope filter (work or personal), apply the same scope here unless the user explicitly asks for cross-scope results. Staying inside the session's scope prevents leaking personal items into a work-scoped response (and vice versa).`;
+Scope filter:
+- When scope is omitted, this tool searches across all scopes (work, personal, shared) — no scope filtering is applied.
+- Pass scope='work' to restrict to work tasks, 'personal' for personal items, or 'shared' for reusable/cross-context items.
+- If the user's request is clearly personal (health, family, finance), pass scope='personal'. If clearly work-related, pass scope='work'. When ambiguous, omit and let the user clarify.`;
 
 // ── Tool Registration ────────────────────────────────────────────
 
@@ -130,7 +145,9 @@ export function registerTaskTools(mcpServer: McpServer): void {
     {
       title: z.string().describe("Task title (required)"),
       context: z.string().optional().describe("Additional context or notes"),
-      scope: scopeEnum.describe("'work' or 'personal' (required)"),
+      scope: scopeEnum.describe(
+        "'work', 'personal', or 'shared' (required). 'shared' covers items that are reusable across contexts (architecture decisions, OSS project follow-ups)."
+      ),
       priority: priorityEnum.nullable().optional().describe("Priority level, or null for unranked"),
       tags: z.array(z.string()).optional().describe("Free-form tags for categorization"),
       blocked_reason: z.string().nullable().optional().describe("If set, task is blocked with this reason"),

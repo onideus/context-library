@@ -150,11 +150,26 @@ describe("Health", () => {
     expect(body.uptime as number).toBeGreaterThanOrEqual(0);
   });
 
-  it("response contains ONLY status, version, and uptime", async () => {
+  it("response contains status, version, uptime, and embedding_status", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     const body = await res.json() as Record<string, unknown>;
     const keys = Object.keys(body).sort();
-    expect(keys).toEqual(["status", "uptime", "version"].sort());
+    expect(keys).toEqual(
+      ["embedding_status", "status", "uptime", "version"].sort()
+    );
+  });
+
+  it("embedding_status has a boolean-or-null 'available' field", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.embedding_status).toBeDefined();
+    const embStatus = body.embedding_status as Record<string, unknown>;
+    expect("available" in embStatus).toBe(true);
+    // TEI is offline in this integration suite — available may be false or
+    // null. Never assert true unless a real TEI is reachable from the runner.
+    expect(
+      typeof embStatus.available === "boolean" || embStatus.available === null
+    ).toBe(true);
   });
 
   // Negative test (proxy-side): verifies the auth bypass is scoped to /health.

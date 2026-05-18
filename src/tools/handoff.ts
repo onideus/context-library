@@ -172,6 +172,30 @@ export function computeSameCalendarDay(storedAt?: string, tz?: string): boolean 
 }
 
 /**
+ * Derive a coarse session-continuity signal for the next caller.
+ *
+ *  - "cold_start"   : the previous session was explicitly closed via
+ *                     store_handoff/patch_handoff with final=true. The next
+ *                     conversation should treat operational_state and
+ *                     active_context as historical context, not live state.
+ *  - "resume"       : the previous session never set final=true. The next
+ *                     conversation may be a continuation; load the active
+ *                     context with that framing.
+ *  - "unknown"      : no stored_at is parseable (e.g., corrupted handoff).
+ *
+ * Returned as advisory information — callers decide how to weight it.
+ * Handoffs that pre-date the flag report "resume" because they have no
+ * session_closed marker. That matches the old default behaviour.
+ */
+export function computeSessionContinuity(handoff: {
+  stored_at?: string;
+  session_closed?: boolean;
+}): "cold_start" | "resume" | "unknown" {
+  if (!handoff.stored_at) return "unknown";
+  return handoff.session_closed === true ? "cold_start" : "resume";
+}
+
+/**
  * Filter a handoff payload by scope, tracking which fields were removed.
  *
  * Note: legacy task arrays (tasks.completed/open/blocked) and memory_deltas
@@ -322,8 +346,9 @@ Parameters:
   - active_context (optional): Free-form object for session context, conversation arc, key decisions, and prompts generated. Supports an optional session_meta sub-object: {label, surface, model} to record which instance/surface/model produced this handoff.
   - tone_notes (optional): Guidance for the next instance on how to approach the user
   - timezone (optional): IANA timezone identifier (e.g., 'America/New_York')
+  - final (optional, default false): Set true on the last write of a session. The stored handoff is marked session_closed=true with a session_closed_at timestamp so the next get_latest_handoff returns session_continuity='cold_start' instead of 'resume'. The flag is also reserved as the trigger for future compaction of the session's handoff chain. If unsure whether this is the final write, omit — false is the safe default.
 
-Returns: {success, stored_at, filename, task_summary, schema_version}
+Returns: {success, stored_at, filename, task_summary, schema_version, session_closed, session_closed_at}
 
 Response Format:
 - Reasoning-capable models (extended thinking enabled): Use structured reflection before confirming the store. Evaluate whether the captured state reflects the actual session. Note any gaps in active_context or tasks explicitly.
@@ -337,7 +362,12 @@ After loading the handoff, check for durable decisions by calling search_context
 
 CONSEQUENCE OF SKIPPING: You will operate without session context, miss open tasks, duplicate completed work, or contradict the conversation arc documented in the handoff.
 
-Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, artifact_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled.
+Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, artifact_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled, session_closed, session_closed_at, session_continuity.
+
+Session continuity:
+- session_closed (boolean): true when the previous write set final=true. Implies the user explicitly ended that session.
+- session_closed_at (ISO timestamp or null): when the session was closed (matches stored_at on the closing handoff).
+- session_continuity ('cold_start' | 'resume' | 'unknown'): coarse signal for whether this conversation is picking up a still-open session ('resume') or starting after a closed one ('cold_start'). Use this to frame how literally to apply operational_state and active_context — a closed session's working state is historical, not live.
 
 embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
 
@@ -383,6 +413,7 @@ Parameters:
   - active_context (optional): Partial object — keys provided overwrite, others preserved
   - tone_notes (optional): String to replace, or null to preserve
   - timezone (optional): IANA timezone string to replace, or null to preserve
+  - final (optional, default false): Set true on the last write of a session. Marks the patched handoff with session_closed=true plus a session_closed_at timestamp. Setting final=true alone (with no other field) is a valid session-close patch. Future get_latest_handoff calls read this to derive session_continuity (cold start vs. resume). If unsure whether this is the final write, omit — false is the safe default.
 
 Content routing — what belongs in active_context (handoff):
 - Working state: current branch, where you stopped, next steps in this session
@@ -396,7 +427,7 @@ What belongs elsewhere:
 
 If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
 
-Returns: {success, patched_fields, stored_at, source_handoff, task_summary, schema_version}
+Returns: {success, patched_fields, stored_at, source_handoff, task_summary, schema_version, session_closed, session_closed_at}
 
 Response Format:
 - Reasoning-capable models (extended thinking enabled): Use structured reflection before patching. Evaluate whether the patch is consistent with the loaded state. Note any gaps or conflicts explicitly.
@@ -471,6 +502,12 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .describe(
           "IANA timezone identifier (e.g., 'America/New_York'). Used to format retrieved_at in the user's local timezone."
         ),
+      final: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true on the last write of a session. Marks the stored handoff with session_closed=true and a session_closed_at timestamp. Default false (safe default for mid-session writes)."
+        ),
     },
     async (args) => {
       const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
@@ -521,16 +558,22 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       if (hasTaskArrays(args as Record<string, unknown>)) {
         logTaskArrayDeprecation("store_handoff");
       }
-      const { tasks: _droppedTasks, ...sanitizedArgs } = args as typeof args & {
-        tasks?: unknown;
-      };
+      // Strip the deprecated tasks array and the transport-only `final` flag
+      // before persistence: `final` lives in args to signal session close, but
+      // the stored payload carries session_closed/session_closed_at instead.
+      const { tasks: _droppedTasks, final: finalFlag, ...sanitizedArgs } =
+        args as typeof args & { tasks?: unknown; final?: boolean };
       void _droppedTasks;
 
       const storedAt = new Date().toISOString();
+      const sessionClosed = finalFlag === true;
       const handoff: Handoff = {
         ...sanitizedArgs,
         stored_at: storedAt,
         schema_version: SCHEMA_VERSION,
+        ...(sessionClosed
+          ? { session_closed: true, session_closed_at: storedAt }
+          : {}),
       };
 
       // Capture previous latest BEFORE writing so we know what to compact.
@@ -575,6 +618,8 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               filename,
               task_summary: taskSummary,
               schema_version: SCHEMA_VERSION,
+              session_closed: sessionClosed,
+              session_closed_at: sessionClosed ? storedAt : null,
               next_step: computeNextStep(handoff, taskSummary),
             }),
           },
@@ -648,6 +693,14 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         dynamicSummary !== null ? await computeDynamicArtifactSummary(handoff.stored_at) : null;
       const taskSummary = dynamicSummary ?? computeTaskSummary(handoff);
 
+      // Session continuity signal — read straight from the stored markers so
+      // the answer is the same whether scope is full/work/personal. Stale
+      // markers are dropped on patch_handoff, so a "cold_start" result here
+      // always reflects the most recent write.
+      const sessionClosed = handoff.session_closed === true;
+      const sessionClosedAt = handoff.session_closed_at ?? null;
+      const sessionContinuity = computeSessionContinuity(handoff);
+
       return {
         content: [
           {
@@ -666,6 +719,9 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               handoff_count: handoffCount,
               embedding_status: embeddingStatus,
               evidence_pulled: true,
+              session_closed: sessionClosed,
+              session_closed_at: sessionClosedAt,
+              session_continuity: sessionContinuity,
               next_step: computeNextStep(handoff, taskSummary),
             }),
           },
@@ -703,12 +759,25 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .optional(),
       tone_notes: z.string().nullable().optional(),
       timezone: z.string().nullable().optional(),
+      final: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true on the last write of a session. Marks the patched handoff with session_closed=true and a session_closed_at timestamp. Default false (safe default for mid-session patches)."
+        ),
     },
     async (args) => {
       const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
       console.log(`[patch_handoff] args size: ${argsBytes} bytes`);
 
-      if (!hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)) {
+      // `final: true` on its own is a valid session-close signal even without
+      // other content. Treat it as sufficient content so callers don't have
+      // to dummy-set tone_notes purely to close a session.
+      const finalOnly = args.final === true;
+      if (
+        !finalOnly &&
+        !hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)
+      ) {
         return {
           content: [
             {
@@ -717,7 +786,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 code: "EMPTY_PATCH",
                 message:
-                  "patch_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone). Null values are treated as no-op.",
+                  "patch_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone) or final=true. Null values are treated as no-op.",
               }),
             },
           ],
@@ -788,22 +857,46 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       if (patchHasTasks) {
         logTaskArrayDeprecation("patch_handoff");
       }
-      const { tasks: _patchTasks, ...patchWithoutTasks } = args as typeof args & {
-        tasks?: unknown;
-      };
+      // Strip the deprecated tasks array and the transport-only `final` flag
+      // from the patch payload. `final` is not merged into the handoff body;
+      // it sets session_closed/session_closed_at directly.
+      const {
+        tasks: _patchTasks,
+        final: finalFlag,
+        ...patchWithoutTasks
+      } = args as typeof args & { tasks?: unknown; final?: boolean };
       void _patchTasks;
-      const { tasks: _origTasks, ...handoffWithoutTasks } = handoff as Handoff & {
+      // Also drop any prior session_closed markers from the source so the
+      // merged result reflects the current write — closing a session here
+      // shouldn't echo a stale close from an earlier handoff.
+      const {
+        tasks: _origTasks,
+        session_closed: _origClosed,
+        session_closed_at: _origClosedAt,
+        ...handoffWithoutTasks
+      } = handoff as Handoff & {
         tasks?: unknown;
+        session_closed?: boolean;
+        session_closed_at?: string;
       };
       void _origTasks;
+      void _origClosed;
+      void _origClosedAt;
 
       // Merge
       const { merged, patchedFields } = mergeHandoff(handoffWithoutTasks, patchWithoutTasks);
 
       // Set new stored_at, schema_version, and patched_from reference
-      merged.stored_at = new Date().toISOString();
+      const newStoredAt = new Date().toISOString();
+      merged.stored_at = newStoredAt;
       (merged as Record<string, unknown>).schema_version = SCHEMA_VERSION;
       (merged as Record<string, unknown>).patched_from = sourceFilename;
+
+      const sessionClosed = finalFlag === true;
+      if (sessionClosed) {
+        (merged as Record<string, unknown>).session_closed = true;
+        (merged as Record<string, unknown>).session_closed_at = newStoredAt;
+      }
 
       // Write as new handoff file (append-only)
       const newFilename = await writeHandoff(merged);
@@ -837,6 +930,8 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               source_handoff: sourceFilename,
               task_summary: taskSummary,
               schema_version: SCHEMA_VERSION,
+              session_closed: sessionClosed,
+              session_closed_at: sessionClosed ? newStoredAt : null,
             }),
           },
         ],

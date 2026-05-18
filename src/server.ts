@@ -18,7 +18,9 @@ import { createApiProviderFromConfig } from "./entities/providers/api.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
+import { isEmbeddingAvailable } from "./embeddings/client.js";
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 // Read version: prefer APP_VERSION env var, fall back to package.json
 function getVersion(): string {
@@ -58,14 +60,25 @@ app.use("/*", async (c, next) => {
 // in-process auth middleware. This is the only route that must remain
 // reachable without going through that proxy. Response is intentionally
 // minimal — no user data, no system state, no infrastructure topology —
-// to limit exposure on this unauthenticated surface.
-app.get("/health", (c) =>
-  c.json({
+// to limit exposure on this unauthenticated surface. Do NOT add additional
+// unauthenticated paths; this exception is scoped to operational monitoring.
+app.get("/health", async (c) => {
+  // embedding_status.available is a fast HEAD-style check (~2s cap) with
+  // graceful failure — wrap in try/catch so a TEI outage cannot break the
+  // health endpoint that load balancers and watchdogs rely on.
+  let embeddingAvailable: boolean | null;
+  try {
+    embeddingAvailable = await isEmbeddingAvailable();
+  } catch {
+    embeddingAvailable = null;
+  }
+  return c.json({
     status: "ok",
     version,
     uptime: Math.floor(process.uptime()),
-  })
-);
+    embedding_status: { available: embeddingAvailable },
+  });
+});
 
 // ── MCP transport route (authenticated) ─────────────────────
 // Factory for stateless MCP server instances (one per request, per SDK pattern)
@@ -85,26 +98,134 @@ function createMcpServer(): McpServer {
   return server;
 }
 
+/**
+ * Extract the SSE `data:` payload from a buffered MCP response body so we
+ * can derive the JSON-RPC status (success vs. error) for structured response
+ * logs. Returns null when the body is not parseable — callers fall back to
+ * the "unknown" status.
+ */
+function parseSseDataPayload(text: string): Record<string, unknown> | null {
+  const dataLine = text.split("\n").find((line) => line.startsWith("data:"));
+  if (!dataLine) return null;
+  try {
+    return JSON.parse(dataLine.slice(5).trim()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inspect a parsed JSON-RPC envelope to derive a friendly tool label for
+ * logs. For tools/call, returns the tool name. For other methods (tools/list,
+ * initialize, etc.), returns the bare method. Null when shape is unrecognized.
+ */
+function deriveToolLabel(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const env = body as Record<string, unknown>;
+  const method = typeof env.method === "string" ? env.method : null;
+  if (method === "tools/call") {
+    const params = env.params as Record<string, unknown> | undefined;
+    const name = params?.name;
+    return typeof name === "string" ? name : method;
+  }
+  return method;
+}
+
 app.post("/mcp", async (c) => {
+  const correlationId = randomUUID();
+  const start = Date.now();
+  const logResponseBodies = process.env.LOG_RESPONSE_BODIES === "true";
+
+  // Inspect the request body once for the tool label and JSON-RPC id. We
+  // clone the underlying Request so the transport still sees an unread body.
+  let toolLabel: string | null = null;
+  let requestId: unknown = null;
+  try {
+    const cloned = c.req.raw.clone();
+    const parsed = await cloned.json();
+    toolLabel = deriveToolLabel(parsed);
+    if (parsed && typeof parsed === "object") {
+      requestId = (parsed as Record<string, unknown>).id ?? null;
+    }
+  } catch {
+    // Malformed JSON — transport will reject; log entry just lacks the label.
+  }
+
   const server = createMcpServer();
+  let response: Response;
+  let handlerError: Error | null = null;
   try {
     const transport = new StreamableHTTPTransport();
     await server.connect(transport);
-    const response = await transport.handleRequest(c);
-    if (response) {
-      return response;
+    const transportResponse = await transport.handleRequest(c);
+    if (transportResponse) {
+      response = transportResponse;
+    } else {
+      console.error(`[${new Date().toISOString()}] [mcp] transport.handleRequest returned undefined`);
+      server.close();
+      response = c.json(
+        { jsonrpc: "2.0", error: { code: -32603, message: "No response" }, id: null },
+        500
+      );
     }
-    console.error(`[${new Date().toISOString()}] [mcp] transport.handleRequest returned undefined`);
-    server.close();
-    return c.json({ jsonrpc: "2.0", error: { code: -32603, message: "No response" }, id: null }, 500);
   } catch (err) {
+    handlerError = err as Error;
     console.error(`[${new Date().toISOString()}] [mcp] Handler error:`, err);
     server.close();
-    return c.json(
+    response = c.json(
       { jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null },
       500
     );
   }
+
+  // Structured response logging. Body logging is gated on
+  // LOG_RESPONSE_BODIES=true because response bodies may contain
+  // user-supplied content (handoff state, notes, search hits).
+  let resultStatus: "success" | "error" | "unknown" = handlerError ? "error" : "unknown";
+  let sizeBytes = 0;
+  let bodySnippet: string | null = null;
+  try {
+    // Response.clone() tees the body so the caller still receives the
+    // original stream. Reading the clone is safe for our buffered SSE
+    // payloads — the transport does not stream chunks in stateless mode.
+    const cloned = response.clone();
+    const bodyText = await cloned.text();
+    sizeBytes = Buffer.byteLength(bodyText, "utf-8");
+    if (logResponseBodies) bodySnippet = bodyText;
+
+    const sseData = parseSseDataPayload(bodyText);
+    if (sseData) {
+      if (sseData.error) resultStatus = "error";
+      else if (sseData.result) resultStatus = "success";
+    } else {
+      // Non-SSE responses (transport errors, 405s) are plain JSON.
+      try {
+        const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+        if (parsed.error) resultStatus = "error";
+        else if (parsed.result) resultStatus = "success";
+      } catch {
+        // Best-effort — leave resultStatus as is.
+      }
+    }
+  } catch {
+    // Cloning/reading must never break the response we already produced.
+  }
+
+  const logEntry: Record<string, unknown> = {
+    level: handlerError ? "error" : "info",
+    type: "mcp_response",
+    correlation_id: correlationId,
+    tool: toolLabel,
+    request_id: requestId,
+    status: resultStatus,
+    http_status: response.status,
+    duration_ms: Date.now() - start,
+    size_bytes: sizeBytes,
+  };
+  if (bodySnippet !== null) logEntry.body = bodySnippet;
+  console.log(JSON.stringify(logEntry));
+
+  return response;
 });
 
 // Stateless mode: GET and DELETE are not supported
@@ -139,7 +260,7 @@ async function main() {
     await runMigrations();
   } catch (err) {
     console.warn(
-      "[startup] Postgres migrations skipped \u2014 database not available:",
+      "[startup] Postgres migrations skipped — database not available:",
       (err as Error).message
     );
   }
@@ -172,7 +293,6 @@ async function main() {
 
   // Drain any pending embeddings queued during a previous TEI outage (best-effort).
   try {
-    const { isEmbeddingAvailable } = await import("./embeddings/client.js");
     if (await isEmbeddingAvailable()) {
       const { drainPendingEmbeddings } = await import("./embeddings/indexer.js");
       const result = await drainPendingEmbeddings();
