@@ -150,11 +150,21 @@ describe("Health", () => {
     expect(body.uptime as number).toBeGreaterThanOrEqual(0);
   });
 
-  it("response contains ONLY status, version, and uptime", async () => {
+  it("response contains ONLY status, version, uptime, and embedding_status", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     const body = await res.json() as Record<string, unknown>;
     const keys = Object.keys(body).sort();
-    expect(keys).toEqual(["status", "uptime", "version"].sort());
+    expect(keys).toEqual(
+      ["status", "uptime", "version", "embedding_status"].sort()
+    );
+  });
+
+  it("embedding_status on /health has expected shape", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    const embeddingStatus = body.embedding_status as Record<string, unknown>;
+    expect(embeddingStatus).toBeDefined();
+    expect(typeof embeddingStatus.available).toBe("boolean");
   });
 
   // Negative test (proxy-side): verifies the auth bypass is scoped to /health.
