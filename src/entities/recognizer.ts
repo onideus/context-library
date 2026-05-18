@@ -42,6 +42,8 @@ export async function recognizeEntities(
   try {
     // Pull all canonical names. At single-user scale entity_nodes typically
     // has < 10k rows and a full scan beats per-row LIKE in round-trip cost.
+    // TODO: when entity_nodes grows past ~10k rows, switch to a server-side
+    // WHERE canonical_name ~* '<alternation>' to avoid pulling the full table.
     const result = await queryFn(
       `SELECT id, canonical_name, entity_type, mention_count FROM entity_nodes`
     );
@@ -57,8 +59,7 @@ export async function recognizeEntities(
   // mention-count rows of the same canonical/type don't yield dup matches.
   const seen = new Set<string>();
   for (const row of rows) {
-    // Single-character canonicals are too ambiguous to match safely.
-    if (!row.canonical_name || row.canonical_name.length < 2) continue;
+    // matchesWordBoundary rejects empty/single-character names internally.
     if (!matchesWordBoundary(query, row.canonical_name)) continue;
     const key = `${row.canonical_name}::${row.entity_type}`;
     if (seen.has(key)) continue;

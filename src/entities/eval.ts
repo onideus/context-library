@@ -1,16 +1,17 @@
 /**
  * Retrieval-quality measurement for graph-augmented search.
  *
- * `measureGraphImpact` runs each query with the entity-graph signal enabled
- * and disabled, then reports per-query and aggregate precision@k, recall@k,
- * and mean reciprocal rank. The caller supplies a ground-truth map of
- * query -> relevant content IDs, derived from manual labeling or from
- * synthetic test data.
+ * `measureGraphImpact` runs each query twice — once with the entity-graph
+ * signal threaded in and once without — then reports per-query and aggregate
+ * precision@k, recall@k, and mean reciprocal rank. The caller supplies a
+ * ground-truth map of query -> relevant content IDs, derived from manual
+ * labeling or from synthetic test data.
  *
- * The function is intentionally self-contained: it temporarily flips the
- * config flag, runs the search via the same code paths as production, and
- * restores the flag before returning. Failures in any single query are
- * captured per-query so the rest of the suite still produces a comparison.
+ * Implementation note: the harness owns a local `runSearch` that mirrors the
+ * SQL and weighting in src/tools/search.ts. This duplication is a known
+ * drift risk — if production search changes, this file must be updated in
+ * lockstep. Failures in any single query are captured per-query so the rest
+ * of the suite still produces a comparison.
  */
 
 import { config } from "../config.js";

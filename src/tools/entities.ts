@@ -36,9 +36,12 @@ interface EntityRow {
 /**
  * Word-boundary-aware case-insensitive match. Avoids substring false
  * positives like "Ian" matching "Kubernetes" or "CB" matching "SCBRS".
+ * Single-character names are rejected unconditionally — they are too
+ * ambiguous and produce too many false positives to ever match safely.
  * Exported for unit testing.
  */
 export function matchesWordBoundary(text: string, name: string): boolean {
+  if (typeof name !== "string" || name.length < 2) return false;
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(`\\b${escaped}\\b`, "i");
   return pattern.test(text);
@@ -93,9 +96,7 @@ export async function lookupEntities(texts: string[]): Promise<EntityInfo[]> {
 
     const matched: EntityInfo[] = [];
     for (const row of result.rows) {
-      const names = [row.canonical_name, ...(row.aliases || [])]
-        // Single-character names are too ambiguous — too many false positives.
-        .filter((n) => typeof n === "string" && n.length > 1);
+      const names = [row.canonical_name, ...(row.aliases || [])];
       const found = names.some((name) => matchesWordBoundary(combined, name));
       if (found) {
         matched.push({

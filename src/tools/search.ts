@@ -585,13 +585,16 @@ export function registerSearchTools(mcpServer: McpServer): void {
         // Only surface entity_matches when graph actually fired and contributed
         // candidates. Clutters responses otherwise.
         if (graphContributed && recognizedEntities.length > 0) {
-          const relationCounts = new Map<string, number>();
+          // candidate_count = how many graph candidates surfaced for this
+          // entity. NOT the entity's total relation count in entity_relations —
+          // use list_entities for that.
+          const candidateCounts = new Map<string, number>();
           for (const c of graphCandidates) {
             for (const step of c.path) {
               if (!step.entityName) continue;
-              relationCounts.set(
+              candidateCounts.set(
                 step.entityName,
-                (relationCounts.get(step.entityName) ?? 0) + 1
+                (candidateCounts.get(step.entityName) ?? 0) + 1
               );
             }
           }
@@ -600,7 +603,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
             entities: recognizedEntities.map((e) => ({
               name: e.canonicalName,
               type: e.entityType,
-              relation_count: relationCounts.get(e.canonicalName) ?? 0,
+              candidate_count: candidateCounts.get(e.canonicalName) ?? 0,
             })),
           };
         }

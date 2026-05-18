@@ -397,6 +397,7 @@ export async function getGraphCandidates(
           gw.confidence,
           gw.relation_type,
           gw.hop_distance,
+          gw.visited,
           en.name AS entity_name,
           en.mention_count
         FROM graph_walk gw
@@ -407,7 +408,9 @@ export async function getGraphCandidates(
         source_content_id,
         MIN(hop_distance) AS min_hops,
         MAX(confidence) AS max_confidence,
-        COUNT(*) AS path_count,
+        -- Count distinct walks (collapse path expansions that visit the same
+        -- set of entities) so popular nodes don't inflate the divisor below.
+        COUNT(DISTINCT array_to_string(visited, ',')) AS path_count,
         SUM(
           confidence
           * (1.0 / hop_distance)
