@@ -174,24 +174,37 @@ export function computeSameCalendarDay(storedAt?: string, tz?: string): boolean 
 /**
  * Filter a handoff payload by scope, tracking which fields were removed.
  *
- * Note: legacy task arrays (tasks.completed/open/blocked) are no longer
- * surfaced in any scope since schema 1.3 — task_summary, computed from
- * Postgres, is authoritative. Historical handoffs on disk may still contain
- * the field; it is dropped from the response, never written back.
+ * Note: legacy task arrays (tasks.completed/open/blocked) and memory_deltas
+ * are no longer surfaced in any scope since schema 1.3. task_summary,
+ * computed from Postgres, is the authoritative task replacement. Historical
+ * handoffs on disk may still contain these fields; they are dropped from
+ * the response, never written back.
  */
 export function filterByScope(
   handoff: Handoff,
   scope: "full" | "work" | "personal"
 ): { result: Record<string, unknown>; filteredFields: string[] } {
+  const handoffRecord = handoff as Record<string, unknown>;
+
   if (scope === "full") {
-    // Strip the deprecated tasks key from the response without mutating
-    // the input. The on-disk file is untouched.
-    const { tasks: _tasks, ...rest } = handoff as Handoff & { tasks?: unknown };
+    // Strip the deprecated tasks and memory_deltas keys from the response
+    // without mutating the input. The on-disk file is untouched.
+    const { tasks: _tasks, memory_deltas: _memDeltas, ...rest } =
+      handoffRecord as Record<string, unknown> & {
+        tasks?: unknown;
+        memory_deltas?: unknown;
+      };
     void _tasks;
+    void _memDeltas;
     return { result: rest, filteredFields: [] };
   }
 
   const filteredFields: string[] = [];
+
+  // Track deprecated fields excluded from work/personal scopes so callers
+  // can see they existed on the underlying handoff even when not returned.
+  if (handoff.tasks) filteredFields.push("tasks");
+  if (handoffRecord.memory_deltas !== undefined) filteredFields.push("memory_deltas");
 
   if (scope === "work") {
     // Exclude personal health/financial data
@@ -219,7 +232,6 @@ export function filterByScope(
   }
 
   // scope === "personal" — exclude work-specific items
-  const filteredPersonal: string[] = [];
   const result: Record<string, unknown> = {
     operational_state: handoff.operational_state,
     tone_notes: handoff.tone_notes,
@@ -228,12 +240,12 @@ export function filterByScope(
   };
 
   if (handoff.active_context) {
-    filteredPersonal.push("active_context");
+    filteredFields.push("active_context");
   }
 
   return {
     result,
-    filteredFields: filteredPersonal,
+    filteredFields,
   };
 }
 
@@ -329,7 +341,7 @@ Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_s
 
 embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
 
-Response shape: operational_state, active_context, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled. Legacy handoff task arrays (tasks.completed/open/blocked) are NOT returned since schema 1.3 — task_summary is the authoritative replacement, computed live from the Postgres tasks table. Call search_tasks or list_tasks for full task detail.
+Response shape: operational_state, active_context, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled. Legacy handoff task arrays (tasks.completed/open/blocked) and memory_deltas are NOT returned since schema 1.3 — they are stripped from the response in every scope even when present on the underlying historical file. task_summary is the authoritative replacement for task arrays, computed live from the Postgres tasks table. Call search_tasks or list_tasks for full task detail.
 
 task_summary shape:
 When Postgres is available, task_summary is computed live from the authoritative tasks table and returns:
@@ -403,14 +415,13 @@ const arrayOpSchema = z
 /**
  * Fields treated as user-supplied content on store_handoff / patch_handoff.
  *
- * tasks is still accepted on input for backwards compatibility (so the
- * empty-content guard doesn't reject a callers-only-sent-tasks payload), but
- * the field is stripped server-side before storage.
+ * tasks is intentionally excluded since schema 1.3: it is stripped server-side
+ * and never persisted, so a tasks-only payload is effectively empty and must
+ * fail the empty-content guard rather than write a metadata-only file.
  */
 const STORE_CONTENT_FIELDS = [
   "operational_state",
   "active_context",
-  "tasks",
   "tone_notes",
   "timezone",
 ] as const;

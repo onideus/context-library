@@ -960,6 +960,24 @@ describe("MCP Tools", () => {
       expect(result.code).toBe("EMPTY_HANDOFF");
     });
 
+    it("store_handoff with only a deprecated tasks field returns EMPTY_HANDOFF", async () => {
+      // Since schema 1.3, tasks are stripped server-side and do not count
+      // as content — a payload that contains only tasks must fail the
+      // empty-content guard, not write a metadata-only handoff file.
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: {
+            tasks: { open: ["legacy-task"], completed: [], blocked: [] },
+          },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_HANDOFF");
+    });
+
     it("store_handoff with a single content field (timezone) succeeds", async () => {
       const res = await mcpPost(
         jsonrpc("tools/call", {

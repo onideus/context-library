@@ -77,6 +77,16 @@ describe("compactHandoff", () => {
     expect(ctx.compacted_summary).toMatch(/Rolled back the migration/);
   });
 
+  it("removes memory_deltas entirely on legacy historical handoffs", () => {
+    const h = makeHandoff();
+    (h as Record<string, unknown>).memory_deltas = [
+      { slot: 1, action: "add", content: "delta-1" },
+    ];
+    const { compacted, archived_keys } = compactHandoff(h);
+    expect((compacted as Record<string, unknown>).memory_deltas).toBeUndefined();
+    expect(archived_keys).toContain("memory_deltas");
+  });
+
   it("preserves operational_state, tone_notes, tasks.open, tasks.blocked, and metadata", () => {
     const h = makeHandoff();
     const { compacted } = compactHandoff(h);
