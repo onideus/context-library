@@ -7,6 +7,8 @@ import { generateEmbedding, isEmbeddingAvailable, rerankResults } from "../embed
 import { indexAllHandoffs, indexAllTasks, indexAllNotes, indexAllArtifacts, drainPendingEmbeddings } from "../embeddings/indexer.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 import { expandQuery } from "./search-aliases.js";
+import { recognizeEntities, type RecognizedEntity } from "../entities/recognizer.js";
+import { getGraphCandidates, type GraphCandidate } from "../entities/store.js";
 
 /**
  * Normalize text for fingerprinting: lowercase, collapse whitespace, take first 500 chars, then SHA-256.
@@ -27,13 +29,67 @@ function sourceFileTimestamp(sourceFile: string): string {
   return match ? match[1] : "9999"; // unknown files sort last
 }
 
-interface SearchResultRow {
+export interface SearchResultRow {
   content_type: string;
   content_id: string;
   content_text: string;
   metadata: Record<string, unknown>;
   similarity?: number;
   rrf_score?: number;
+  semantic_rank?: number | null;
+  fulltext_rank?: number | null;
+  graph_rank?: number | null;
+  graph_score?: number;
+  graph_path?: GraphCandidate["path"];
+}
+
+/**
+ * Apply weighted Reciprocal Rank Fusion across three retrieval signals:
+ * semantic (vector), full-text, and entity-graph. Each signal contributes
+ * `w_i * 1 / (60 + rank_i)`; a missing rank contributes zero. The result is
+ * written back onto `row.rrf_score` and graph metadata is attached when the
+ * row appeared in `graphRankMap`.
+ *
+ * Pure function — no I/O — so the fusion math can be unit-tested in
+ * isolation from the SQL/query layer.
+ */
+export interface FusionWeights {
+  vector: number;
+  fulltext: number;
+  graph: number;
+}
+
+export interface GraphRankEntry {
+  rank: number;
+  cand: GraphCandidate;
+}
+
+export function fuseRrf(
+  rows: SearchResultRow[],
+  graphRankMap: Map<string, GraphRankEntry>,
+  weights: FusionWeights
+): { contributed: boolean; matchedKeys: Set<string> } {
+  let contributed = false;
+  const matchedKeys = new Set<string>();
+  for (const r of rows) {
+    const key = `${r.content_type}::${r.content_id}`;
+    matchedKeys.add(key);
+    const semRank = r.semantic_rank ?? null;
+    const ftsRank = r.fulltext_rank ?? null;
+    const graphMatch = graphRankMap.get(key);
+
+    const semTerm = semRank != null ? weights.vector * (1.0 / (60 + Number(semRank))) : 0;
+    const ftsTerm = ftsRank != null ? weights.fulltext * (1.0 / (60 + Number(ftsRank))) : 0;
+    const graphTerm = graphMatch ? weights.graph * (1.0 / (60 + graphMatch.rank)) : 0;
+    r.rrf_score = semTerm + ftsTerm + graphTerm;
+    if (graphMatch) {
+      r.graph_rank = graphMatch.rank;
+      r.graph_score = graphMatch.cand.score;
+      r.graph_path = graphMatch.cand.path;
+      contributed = true;
+    }
+  }
+  return { contributed, matchedKeys };
 }
 
 /**
@@ -264,6 +320,8 @@ export function registerSearchTools(mcpServer: McpServer): void {
               LIMIT 100
             )
             SELECT s.content_type, s.content_id, s.content_text, s.metadata, s.similarity,
+                   s.rank AS semantic_rank,
+                   f.rank AS fulltext_rank,
                    COALESCE(1.0/(60 + s.rank), 0) + COALESCE(1.0/(60 + f.rank), 0) AS rrf_score
             FROM semantic s
             LEFT JOIN fulltext f ON s.id = f.id
@@ -299,8 +357,114 @@ export function registerSearchTools(mcpServer: McpServer): void {
         }
 
         const result = await query(sql, params);
+        let rows = result.rows as unknown as SearchResultRow[];
 
-        if (result.rows.length === 0) {
+        // ── Graph-augmented retrieval (third RRF signal) ────────────────
+        // Only fires when (1) feature flag enabled, (2) hybrid mode, (3)
+        // recognized entities in the query, and (4) graph traversal returns
+        // at least one candidate. Failure at any step is silent — we fall
+        // back to the FTS+vector behavior unchanged.
+        let recognizedEntities: RecognizedEntity[] = [];
+        let graphCandidates: GraphCandidate[] = [];
+        let graphContributed = false;
+
+        if (config.entityGraphEnabled && useHybrid) {
+          try {
+            recognizedEntities = await recognizeEntities(args.query);
+          } catch {
+            recognizedEntities = [];
+          }
+          if (recognizedEntities.length > 0) {
+            try {
+              graphCandidates = await getGraphCandidates(
+                recognizedEntities.map((e) => e.id),
+                config.entityGraphHops,
+                config.entityGraphMaxCandidates
+              );
+            } catch {
+              graphCandidates = [];
+            }
+          }
+        }
+
+        // Fold graph contribution into rrf_score using weighted RRF.
+        // The SQL currently emits rrf_score = 1/(60+sem_rank) + 1/(60+fts_rank)
+        // with implicit weight=1 for each. We re-derive it here so the three
+        // signals share a single weighted formula. Pure-vector (non-hybrid)
+        // mode skips this — it has no rrf_score and we leave similarity-only
+        // ranking alone.
+        if (useHybrid) {
+          const weights: FusionWeights = {
+            vector: config.entityGraphVectorWeight,
+            fulltext: config.entityGraphFtsWeight,
+            graph: config.entityGraphRrfWeight,
+          };
+          // (content_type, content_id) -> graph rank (1-based)
+          const graphRankMap = new Map<string, GraphRankEntry>();
+          graphCandidates.forEach((c, idx) => {
+            graphRankMap.set(`${c.contentType}::${c.contentId}`, { rank: idx + 1, cand: c });
+          });
+
+          const fusion = fuseRrf(rows, graphRankMap, weights);
+          if (fusion.contributed) graphContributed = true;
+
+          // Graph-only candidates: content that the graph surfaced but neither
+          // FTS nor vector retrieved. Fetch their text/metadata so they can
+          // join the result set rather than be silently dropped.
+          const graphOnlyKeys = [...graphRankMap.keys()].filter((k) => !fusion.matchedKeys.has(k));
+          if (graphOnlyKeys.length > 0) {
+            const types: string[] = [];
+            const ids: string[] = [];
+            for (const k of graphOnlyKeys) {
+              const sep = k.indexOf("::");
+              types.push(k.slice(0, sep));
+              ids.push(k.slice(sep + 2));
+            }
+            try {
+              const extraSql = `
+                SELECT content_type, content_id,
+                       LEFT(content_text, 500) AS content_text, metadata
+                FROM embeddings
+                WHERE (content_type, content_id::text) IN (
+                  SELECT unnest($1::text[]), unnest($2::text[])
+                )
+              `;
+              const extraResult = await query<{
+                content_type: string;
+                content_id: string;
+                content_text: string;
+                metadata: Record<string, unknown>;
+              }>(extraSql, [types, ids]);
+              for (const row of extraResult.rows) {
+                const key = `${row.content_type}::${row.content_id}`;
+                const match = graphRankMap.get(key);
+                if (!match) continue;
+                const graphTerm = weights.graph * (1.0 / (60 + match.rank));
+                rows.push({
+                  content_type: row.content_type,
+                  content_id: row.content_id,
+                  content_text: row.content_text,
+                  metadata: row.metadata,
+                  similarity: 0,
+                  rrf_score: graphTerm,
+                  semantic_rank: null,
+                  fulltext_rank: null,
+                  graph_rank: match.rank,
+                  graph_score: match.cand.score,
+                  graph_path: match.cand.path,
+                });
+                graphContributed = true;
+              }
+            } catch (err) {
+              console.warn(
+                "[search_context] graph-only fetch failed:",
+                (err as Error).message
+              );
+            }
+          }
+        }
+
+        if (rows.length === 0) {
           return {
             content: [{
               type: "text" as const,
@@ -318,7 +482,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
         }
 
         // Deduplicate: collapse near-identical content to oldest source
-        const { deduped, preDedupCount } = deduplicateResults(result.rows as unknown as SearchResultRow[]);
+        const { deduped, preDedupCount } = deduplicateResults(rows);
 
         // Re-sort by original ranking and truncate to requested limit
         const sortKey = useHybrid ? "rrf_score" : "similarity";
@@ -387,7 +551,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
           nextStep += ` Artifacts found (${artifactIds}) -- check their status before creating related work.`;
         }
 
-        const responseData = {
+        const responseData: Record<string, unknown> = {
           results: finalRows.map((r: SearchResultRow & { rerank_score?: number }) => ({
             content_type: r.content_type,
             content_id: r.content_id,
@@ -397,6 +561,13 @@ export function registerSearchTools(mcpServer: McpServer): void {
             ...(r.rrf_score ? { rrf_score: Math.round(r.rrf_score * 10000) / 10000 } : {}),
             ...(r.rerank_score !== undefined
               ? { rerank_score: Math.round(r.rerank_score * 10000) / 10000 }
+              : {}),
+            ...(r.graph_rank != null
+              ? {
+                  graph_rank: r.graph_rank,
+                  graph_score: Math.round((r.graph_score ?? 0) * 10000) / 10000,
+                  graph_path: r.graph_path,
+                }
               : {}),
             ...(r.metadata?.chunk_index != null ? { chunk_index: r.metadata.chunk_index } : {}),
             ...(r.metadata?.source_file ? { source_file: r.metadata.source_file } : {}),
@@ -410,6 +581,29 @@ export function registerSearchTools(mcpServer: McpServer): void {
           context_envelope: envelope,
           next_step: nextStep,
         };
+
+        // Only surface entity_matches when graph actually fired and contributed
+        // candidates. Clutters responses otherwise.
+        if (graphContributed && recognizedEntities.length > 0) {
+          const relationCounts = new Map<string, number>();
+          for (const c of graphCandidates) {
+            for (const step of c.path) {
+              if (!step.entityName) continue;
+              relationCounts.set(
+                step.entityName,
+                (relationCounts.get(step.entityName) ?? 0) + 1
+              );
+            }
+          }
+          responseData.entity_matches = {
+            graph_contributed: true,
+            entities: recognizedEntities.map((e) => ({
+              name: e.canonicalName,
+              type: e.entityType,
+              relation_count: relationCounts.get(e.canonicalName) ?? 0,
+            })),
+          };
+        }
 
         // Build MCP content array — prepend boundary notice if detected
         const contentItems: { type: "text"; text: string }[] = [];

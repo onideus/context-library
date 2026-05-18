@@ -282,6 +282,172 @@ export async function getRelationsForEntity(
   }
 }
 
+// ── Graph candidate retrieval ────────────────────────────────────────
+
+export interface GraphPathStep {
+  entityName: string;
+  relation: string;
+  hops: number;
+}
+
+export interface GraphCandidate {
+  contentType: string;
+  contentId: string;
+  score: number;
+  path: GraphPathStep[];
+}
+
+interface GraphCandidateRow {
+  source_content_type: string;
+  source_content_id: string;
+  min_hops: number;
+  max_confidence: number;
+  path_count: number;
+  total_score: number;
+  // Aggregated path metadata for explanation
+  example_entity_name: string | null;
+  example_relation_type: string | null;
+}
+
+/**
+ * Traverse entity_relations up to `hops` levels from the given entity IDs and
+ * return content (handoff/note/task/artifact) candidates ranked by graph
+ * relevance.
+ *
+ * Score formula:
+ *   per-row contribution = relation.confidence * (1 / hop_distance) * mention_weight
+ *   final score = sum(contributions for this content) / path_count
+ *
+ * where mention_weight = ln(1 + mention_count) so very popular entities don't
+ * fully dominate but are still favored.
+ *
+ * Cycle prevention: the recursive walk tracks visited entity IDs in a path
+ * array and refuses to re-enter them. Hops are clamped to [1, 3].
+ */
+export async function getGraphCandidates(
+  entityIds: string[],
+  hops: number,
+  limit: number
+): Promise<GraphCandidate[]> {
+  if (entityIds.length === 0 || limit <= 0) return [];
+  const depth = Math.min(Math.max(1, hops), 3);
+  const cappedLimit = Math.min(Math.max(1, limit), 500);
+
+  try {
+    // The CTE walks entity → relation → entity, accumulating one "candidate
+    // row" per (content, source entity) it touches. Aggregation outside the
+    // recursion picks the best (min hops, max confidence) per content_id and
+    // sums per-path contributions.
+    const sql = `
+      WITH RECURSIVE graph_walk AS (
+        -- Seed: any relation that touches one of the matched entities.
+        SELECT
+          er.source_content_type,
+          er.source_content_id,
+          er.confidence,
+          er.relation_type,
+          1 AS hop_distance,
+          ARRAY[er.source_entity_id, er.target_entity_id]::uuid[] AS visited,
+          CASE
+            WHEN er.source_entity_id = ANY($1::uuid[]) THEN er.source_entity_id
+            ELSE er.target_entity_id
+          END AS seed_entity_id,
+          CASE
+            WHEN er.source_entity_id = ANY($1::uuid[]) THEN er.target_entity_id
+            ELSE er.source_entity_id
+          END AS frontier_entity_id
+        FROM entity_relations er
+        WHERE er.source_entity_id = ANY($1::uuid[])
+           OR er.target_entity_id = ANY($1::uuid[])
+
+        UNION ALL
+
+        -- Recurse: from the current frontier entity, follow any relation that
+        -- leads to an entity we haven't visited yet.
+        SELECT
+          er.source_content_type,
+          er.source_content_id,
+          er.confidence,
+          er.relation_type,
+          gw.hop_distance + 1,
+          gw.visited || (CASE
+            WHEN er.source_entity_id = gw.frontier_entity_id THEN er.target_entity_id
+            ELSE er.source_entity_id
+          END),
+          gw.seed_entity_id,
+          CASE
+            WHEN er.source_entity_id = gw.frontier_entity_id THEN er.target_entity_id
+            ELSE er.source_entity_id
+          END
+        FROM entity_relations er
+        JOIN graph_walk gw ON (
+          er.source_entity_id = gw.frontier_entity_id
+          OR er.target_entity_id = gw.frontier_entity_id
+        )
+        WHERE gw.hop_distance < $2
+          AND NOT (CASE
+            WHEN er.source_entity_id = gw.frontier_entity_id THEN er.target_entity_id
+            ELSE er.source_entity_id
+          END = ANY(gw.visited))
+      ),
+      enriched AS (
+        SELECT
+          gw.source_content_type,
+          gw.source_content_id,
+          gw.confidence,
+          gw.relation_type,
+          gw.hop_distance,
+          en.name AS entity_name,
+          en.mention_count
+        FROM graph_walk gw
+        LEFT JOIN entity_nodes en ON en.id = gw.seed_entity_id
+      )
+      SELECT
+        source_content_type,
+        source_content_id,
+        MIN(hop_distance) AS min_hops,
+        MAX(confidence) AS max_confidence,
+        COUNT(*) AS path_count,
+        SUM(
+          confidence
+          * (1.0 / hop_distance)
+          * LN(1 + COALESCE(mention_count, 1))
+        ) AS total_score,
+        (ARRAY_AGG(entity_name ORDER BY hop_distance ASC, confidence DESC))[1] AS example_entity_name,
+        (ARRAY_AGG(relation_type ORDER BY hop_distance ASC, confidence DESC))[1] AS example_relation_type
+      FROM enriched
+      GROUP BY source_content_type, source_content_id
+      ORDER BY total_score DESC, min_hops ASC
+      LIMIT $3
+    `;
+
+    const result = await query<GraphCandidateRow>(sql, [entityIds, depth, cappedLimit]);
+
+    return result.rows.map((row) => {
+      const pathCount = Number(row.path_count) || 1;
+      const totalScore = Number(row.total_score) || 0;
+      const score = totalScore / pathCount;
+      const step: GraphPathStep = {
+        entityName: row.example_entity_name ?? "",
+        relation: row.example_relation_type ?? "",
+        hops: Number(row.min_hops) || 1,
+      };
+      return {
+        contentType: row.source_content_type,
+        contentId: row.source_content_id,
+        score,
+        path: [step],
+      };
+    });
+  } catch (err) {
+    console.warn(
+      "[entity-store] getGraphCandidates failed:",
+      (err as Error).message
+    );
+    return [];
+  }
+}
+
 // ── Run comparison ───────────────────────────────────────────────────
 
 export interface RunComparison {
