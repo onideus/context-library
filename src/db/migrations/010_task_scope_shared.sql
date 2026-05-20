@@ -1,0 +1,16 @@
+-- Extend the task_scope enum to include 'shared'.
+--
+-- Notes have supported scope='shared' since migration 005_notes.sql. Tasks
+-- only supported 'work' and 'personal' (see 001_tasks.sql), which forced
+-- models to either drop scope when filing cross-context tasks or pick one of
+-- the wrong values. Adding 'shared' here keeps the scope contract consistent
+-- across primitives.
+--
+-- ALTER TYPE ... ADD VALUE is supported in PostgreSQL 12+ and runs in
+-- autocommit (it cannot run inside an explicit transaction block). The
+-- migration runner (src/db/migrate.ts) executes each .sql file via a single
+-- pool.query() call without a surrounding BEGIN/COMMIT — node-postgres
+-- treats that as autocommit, so this ALTER TYPE statement runs outside any
+-- transaction block and succeeds.
+-- IF NOT EXISTS makes the statement idempotent across reruns.
+ALTER TYPE task_scope ADD VALUE IF NOT EXISTS 'shared';

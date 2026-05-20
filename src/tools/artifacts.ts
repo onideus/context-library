@@ -187,7 +187,7 @@ This is the primary retrieval tool for execution sessions. Calling list_artifact
 Filters (all optional):
 - artifact_type — e.g., 'cc-prompt', 'research', 'blog-post'
 - status — 'draft' | 'ready' | 'executing' | 'completed' | 'superseded'
-- scope — 'work' | 'personal' | 'shared'
+- scope — 'work' | 'personal' | 'shared'. When omitted, returns artifacts across all scopes.
 - tags — ANY-match array`;
 
 const UPDATE_ARTIFACT_DESC = `Update fields on an existing artifact. All fields are optional — only provided fields are modified. Tags, dependencies, and related_task_ids are full-replacement (provide complete arrays). Metadata merges at the top level (provided keys overwrite; omitted keys are preserved).
@@ -219,7 +219,7 @@ CONSEQUENCE OF SKIPPING: Duplicate or superseded artifacts will be recreated.
 
 For cross-type semantic search that finds artifacts alongside handoffs, tasks, and notes, use search_context with content_types: ['artifact'] instead — this tool only searches within the artifacts table.
 
-Filters: artifact_type, status, scope.`;
+Filters: artifact_type, status, scope. When scope is omitted, searches across all scopes (work, personal, shared).`;
 
 // ── Tool Registration ────────────────────────────────────────────
 
@@ -231,7 +231,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     {
       title: z.string().describe("Short descriptive title for the artifact"),
       artifact_type: z.string().describe("Kind of artifact, e.g., 'cc-prompt', 'research', 'blog-post', 'template', 'presentation'. Free-form — new types are valid."),
-      scope: scopeEnum.describe("'work', 'personal', or 'shared'"),
+      scope: scopeEnum.describe(
+        "'work', 'personal', or 'shared' (required). Pass 'shared' when the artifact is reusable across contexts (architecture templates, OSS artifacts)."
+      ),
       content: z.string().optional().describe("Inline artifact body. Required if pointer is not provided."),
       pointer: pointerSchema.optional().describe("External storage pointer: {type: 'git', repo, branch, path} | {type: 'local', path} | {type: 'url', href}. Required if content is not provided."),
       status: statusEnum.optional().describe("Lifecycle state (default 'draft')"),

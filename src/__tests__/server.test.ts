@@ -150,11 +150,21 @@ describe("Health", () => {
     expect(body.uptime as number).toBeGreaterThanOrEqual(0);
   });
 
-  it("response contains ONLY status, version, and uptime", async () => {
+  it("response contains ONLY status, version, uptime, and embedding_status", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     const body = await res.json() as Record<string, unknown>;
     const keys = Object.keys(body).sort();
-    expect(keys).toEqual(["status", "uptime", "version"].sort());
+    expect(keys).toEqual(
+      ["status", "uptime", "version", "embedding_status"].sort()
+    );
+  });
+
+  it("embedding_status on /health has expected shape", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    const embeddingStatus = body.embedding_status as Record<string, unknown>;
+    expect(embeddingStatus).toBeDefined();
+    expect(typeof embeddingStatus.available).toBe("boolean");
   });
 
   // Negative test (proxy-side): verifies the auth bypass is scoped to /health.
@@ -960,6 +970,27 @@ describe("MCP Tools", () => {
       expect(result.code).toBe("EMPTY_HANDOFF");
     });
 
+    it("store_handoff with only a deprecated tasks field succeeds (backwards-compatible)", async () => {
+      // Pre-schema-1.3 callers that send tasks-only payloads must still
+      // receive a success response — silently turning these into
+      // EMPTY_HANDOFF would be a breaking change. The legacy task arrays
+      // are stripped server-side and a deprecation warning is logged, but
+      // the empty-content guard treats `tasks` as content for compatibility.
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: {
+            tasks: { open: ["legacy-task"], completed: [], blocked: [] },
+          },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(typeof result.filename).toBe("string");
+    });
+
     it("store_handoff with a single content field (timezone) succeeds", async () => {
       const res = await mcpPost(
         jsonrpc("tools/call", {
@@ -1441,5 +1472,195 @@ describe("search_context — graceful degradation", () => {
     const result = JSON.parse(data.result.content[0].text);
     expect(result.error).toBe(true);
     expect(result.code).toBe("EMBEDDING_UNAVAILABLE");
+  });
+});
+
+// ────────────────────────────────────────────────
+// Session close — final flag, session_closed, session_continuity
+// ────────────────────────────────────────────────
+describe("Session close — final flag", () => {
+  it("store_handoff with final=true marks the response session_closed=true", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "store_handoff",
+        arguments: { tone_notes: "close-test", final: true },
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.success).toBe(true);
+    expect(result.session_closed).toBe(true);
+    expect(typeof result.session_closed_at).toBe("string");
+    expect(result.session_closed_at).toBe(result.stored_at);
+  });
+
+  it("store_handoff without final returns session_closed=false (default)", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "store_handoff",
+        arguments: { tone_notes: "open-session-default" },
+      })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.success).toBe(true);
+    expect(result.session_closed).toBe(false);
+    expect(result.session_closed_at).toBeNull();
+  });
+
+  it("stored handoff file persists session_closed and session_closed_at", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "store_handoff",
+        arguments: { tone_notes: "persisted-close", final: true },
+      })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
+    const raw = await readFile(filepath, "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.session_closed).toBe(true);
+    expect(parsed.session_closed_at).toBe(parsed.stored_at);
+  });
+
+  it("get_latest_handoff returns session_continuity='resume' immediately after a closed write (elapsed gate)", async () => {
+    // Per spec, cold_start requires session_closed=true AND a significant
+    // elapsed_seconds gap. A session that was just closed (seconds ago) is
+    // still effectively warm — operational_state is fresh.
+    await storeAndVerify({ tone_notes: "closing-write", final: true });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.session_closed).toBe(true);
+    expect(typeof result.session_closed_at).toBe("string");
+    expect(result.session_continuity).toBe("resume");
+  });
+
+  // The cold_start case (closed session past the elapsed threshold) is
+  // exercised at the unit level in session-continuity.test.ts. An integration
+  // test for it would need to backdate a synthetic handoff file into a
+  // TEST_DATA_DIR that is shared with the surrounding tests in this describe
+  // block, where newer handoffs from earlier tests would outrank the synthetic
+  // one. The unit coverage is sufficient.
+
+  it("get_latest_handoff returns session_continuity='resume' after an open write", async () => {
+    await storeAndVerify({ tone_notes: "still-open-write" });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.session_closed).toBe(false);
+    expect(result.session_closed_at).toBeNull();
+    expect(result.session_continuity).toBe("resume");
+  });
+
+  it("patch_handoff with final=true alone is a valid session-close patch", async () => {
+    await storeAndVerify({ tone_notes: "open-before-close-patch" });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "patch_handoff",
+        arguments: { final: true },
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.success).toBe(true);
+    expect(result.session_closed).toBe(true);
+    expect(typeof result.session_closed_at).toBe("string");
+
+    // The new handoff carries session_closed=true. cold_start only flips
+    // once enough elapsed time has passed; immediately after the close
+    // continuity is still 'resume' (no gap yet).
+    const getRes = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const getData = (await parseSseResponse(getRes)) as any;
+    const retrieved = JSON.parse(getData.result.content[0].text);
+    expect(retrieved.session_closed).toBe(true);
+    expect(retrieved.session_continuity).toBe("resume");
+  });
+
+  it("patch_handoff WITHOUT final or content fails with EMPTY_PATCH", async () => {
+    await storeAndVerify({ tone_notes: "baseline-for-empty-patch" });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "patch_handoff",
+        arguments: {},
+      })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.error).toBe(true);
+    expect(result.code).toBe("EMPTY_PATCH");
+  });
+
+  it("a subsequent open patch clears the session_closed marker", async () => {
+    // 1. Close a session.
+    await storeAndVerify({ tone_notes: "close-1", final: true });
+    let getRes = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    let result = JSON.parse(((await parseSseResponse(getRes)) as any).result.content[0].text);
+    expect(result.session_closed).toBe(true);
+
+    // 2. Open patch — should drop the stale close marker.
+    const patchRes = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "patch_handoff",
+        arguments: { tone_notes: "resumed" },
+      })
+    );
+    const patchResult = JSON.parse(
+      ((await parseSseResponse(patchRes)) as any).result.content[0].text
+    );
+    expect(patchResult.session_closed).toBe(false);
+
+    // 3. get_latest_handoff should now report a resume.
+    getRes = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    result = JSON.parse(((await parseSseResponse(getRes)) as any).result.content[0].text);
+    expect(result.session_continuity).toBe("resume");
+    expect(result.session_closed).toBe(false);
+  });
+});
+
+// ────────────────────────────────────────────────
+// Tool description language — SCOPE AWARENESS removed
+// ────────────────────────────────────────────────
+describe("Tool descriptions — scope guidance", () => {
+  it("no tool description contains the SCOPE AWARENESS block", async () => {
+    const res = await mcpPost(jsonrpc("tools/list"));
+    const data = (await parseSseResponse(res)) as any;
+    const tools: Array<{ name: string; description: string }> = data.result.tools;
+    for (const t of tools) {
+      expect(
+        t.description,
+        `tool '${t.name}' still mentions SCOPE AWARENESS`
+      ).not.toMatch(/SCOPE AWARENESS/);
+    }
+  });
+
+  it("create_task scope enum now includes 'shared'", async () => {
+    const res = await mcpPost(jsonrpc("tools/list"));
+    const data = (await parseSseResponse(res)) as any;
+    const tools = data.result.tools as Array<{
+      name: string;
+      inputSchema: Record<string, unknown>;
+    }>;
+    const createTask = tools.find((t) => t.name === "create_task");
+    expect(createTask).toBeDefined();
+    const scope = (createTask!.inputSchema as any).properties?.scope;
+    expect(scope?.enum).toEqual(["work", "personal", "shared"]);
   });
 });

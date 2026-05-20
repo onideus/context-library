@@ -28,6 +28,8 @@ const COMPLETED_TASKS_KEEP = 3;
  *   (historical only; new handoffs never store this).
  * - active_context — collapsed to {session_meta?, compacted_summary}. Full text
  *   was embedded during the original store, so it remains searchable.
+ * - memory_deltas — removed when present on legacy historical handoffs
+ *   (deprecated; deltas were already applied at the original store time).
  * - Idempotent: a handoff with _compacted=true passes through unchanged.
  */
 export function compactHandoff(handoff: Handoff): CompactionResult {
@@ -60,6 +62,14 @@ export function compactHandoff(handoff: Handoff): CompactionResult {
     if (sessionMeta) next.session_meta = sessionMeta;
     compacted.active_context = next;
     archived_keys.push("active_context");
+  }
+
+  // Drop deprecated memory_deltas from historical (pre-1.3) files. The field
+  // is no longer on the Handoff type, so access through the record cast.
+  const compactedRecord = compacted as Record<string, unknown>;
+  if (compactedRecord.memory_deltas !== undefined) {
+    delete compactedRecord.memory_deltas;
+    archived_keys.push("memory_deltas");
   }
 
   (compacted as Record<string, unknown>)[COMPACTED_FLAG] = true;
