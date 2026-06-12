@@ -33,4 +33,31 @@ export const config = {
   entityApiBaseUrl: process.env.ENTITY_API_BASE_URL ?? "https://api.anthropic.com",
   entityApiModel: process.env.ENTITY_API_MODEL ?? "claude-sonnet-4-20250514",
   entityApiFormat: (process.env.ENTITY_API_FORMAT ?? "anthropic") as "anthropic" | "openai",
+  // Graph-augmented retrieval — third RRF signal in search_context.
+  // Disabled by default; enable once an extraction run has populated entity_nodes/entity_relations.
+  entityGraphEnabled: process.env.ENTITY_GRAPH_ENABLED === "true",
+  entityGraphHops: (function () {
+    const v = parseInt(process.env.ENTITY_GRAPH_HOPS ?? "1", 10);
+    if (!Number.isFinite(v)) return 1;
+    return Math.min(Math.max(1, v), 3);
+  })(),
+  entityGraphRrfWeight: (function () {
+    const v = parseFloat(process.env.ENTITY_GRAPH_RRF_WEIGHT ?? "0.3");
+    if (!Number.isFinite(v)) return 0.3;
+    return Math.min(Math.max(0, v), 1);
+  })(),
+  entityGraphFtsWeight: (function () {
+    const v = parseFloat(process.env.ENTITY_GRAPH_FTS_WEIGHT ?? "1.0");
+    if (!Number.isFinite(v)) return 1.0;
+    return Math.min(Math.max(0, v), 1);
+  })(),
+  entityGraphVectorWeight: (function () {
+    const v = parseFloat(process.env.ENTITY_GRAPH_VECTOR_WEIGHT ?? "1.0");
+    if (!Number.isFinite(v)) return 1.0;
+    return Math.min(Math.max(0, v), 1);
+  })(),
+  entityGraphMaxCandidates: (function () {
+    const v = parseInt(process.env.ENTITY_GRAPH_MAX_CANDIDATES ?? "50", 10);
+    return Number.isFinite(v) && v > 0 ? v : 50;
+  })(),
 } as const;

@@ -11,6 +11,13 @@ export const HandoffSchema = z
       })
       .optional(),
     active_context: z.record(z.string(), z.unknown()).optional(),
+    /**
+     * @deprecated Handoff task arrays are deprecated since schema 1.3. The
+     * Postgres tasks table is authoritative; use create_task / update_task.
+     * Accepted on input for backwards compatibility but stripped server-side
+     * before storage. Historical handoffs on disk may still contain this
+     * field — read it defensively, never write it.
+     */
     tasks: z
       .object({
         completed: z.array(z.string()).optional(),
@@ -18,19 +25,19 @@ export const HandoffSchema = z
         blocked: z.array(z.string()).optional(),
       })
       .optional(),
-    memory_deltas: z
-      .array(
-        z.object({
-          slot: z.number(),
-          action: z.enum(["add", "replace", "remove"]),
-          content: z.string().optional(),
-        })
-      )
-      .optional(),
     tone_notes: z.string().optional(),
     timezone: z.string().optional(),
     stored_at: z.string().optional(),
     schema_version: z.string().optional(),
+    /**
+     * Session-close marker. Set by store_handoff / patch_handoff when the
+     * caller passes `final: true` on the last write of a session. Future
+     * get_latest_handoff calls read this to derive the session_continuity
+     * signal (cold start vs. resume). Absence is interpreted as an open
+     * session (existing clients that pre-date the flag are unaffected).
+     */
+    session_closed: z.boolean().optional(),
+    session_closed_at: z.string().optional(),
   })
   .passthrough();
 

@@ -758,7 +758,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(result.code).toBe("CANNOT_MODIFY_LOCKED_ARTIFACT");
     });
 
-    it("update_artifact clears content_hash when reverting 'ready' → 'draft'", async () => {
+    it("update_artifact preserves content_hash when reverting 'ready' → 'draft'", async () => {
       const created = await callTool("store_artifact", {
         title: "Revert-to-draft",
         artifact_type: "cc-prompt",
@@ -767,14 +767,17 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         status: "ready",
       });
       const locked = await callTool("get_artifact", { id: created.id });
-      expect(locked.metadata.content_hash).toBeDefined();
+      const originalHash = locked.metadata.content_hash;
+      expect(originalHash).toBeDefined();
 
       const reverted = await callTool("update_artifact", {
         id: created.id,
         status: "draft",
       });
       expect(reverted.status).toBe("draft");
-      expect(reverted.metadata.content_hash).toBeUndefined();
+      // Rule: if the artifact has content, it has a hash. Draft revert no
+      // longer strips the hash — pipeline consumers rely on it being present.
+      expect(reverted.metadata.content_hash).toBe(originalHash);
     });
 
     it("update_artifact preserves existing metadata keys when setting content_hash", async () => {
@@ -814,9 +817,9 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(updated.status).toBe("draft");
     });
 
-    it("content_hash is recomputed when promoting after revert-to-draft cleared it", async () => {
+    it("content_hash is stable across a revert-to-draft and re-promote cycle", async () => {
       const created = await callTool("store_artifact", {
-        title: "Hash-recompute-on-repromote",
+        title: "Hash-stable-across-cycle",
         artifact_type: "cc-prompt",
         scope: "work",
         content: "stable content",
@@ -830,7 +833,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         id: created.id,
         status: "draft",
       });
-      expect(reverted.metadata.content_hash).toBeUndefined();
+      // Hash is preserved on draft revert under the simplified rule.
+      expect(reverted.metadata.content_hash).toBe(originalHash);
 
       const repromoted = await callTool("update_artifact", {
         id: created.id,
@@ -963,11 +967,42 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(updated.metadata.extra).toBe("ok");
     });
 
-    it("ready -> draft -> ready via status-only updates recomputes content_hash", async () => {
-      // Regression: the exact path called out in the sweep spec. Reverting to
-      // draft clears content_hash; a subsequent status-only promotion back to
-      // a locked status must recompute it from the row's current content,
-      // because the caller did not provide content or metadata on either call.
+    it("clearing content on a draft artifact strips stale content_hash", async () => {
+      // When a draft artifact with both content and pointer has its content
+      // cleared (content: null), the row becomes pointer-only. The hash that
+      // described the now-removed content must not survive — otherwise the
+      // metadata advertises a content_hash that no longer corresponds to any
+      // stored content.
+      const created = await callTool("store_artifact", {
+        title: "Clear-content-strip-hash",
+        artifact_type: "research",
+        scope: "work",
+        content: "will be cleared",
+        pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.pdf" },
+      });
+      const original = await callTool("get_artifact", { id: created.id });
+      expect(original.metadata.content_hash).toBeDefined();
+
+      const cleared = await callTool("update_artifact", {
+        id: created.id,
+        content: null,
+      });
+      expect(cleared.error).toBeUndefined();
+      expect(cleared.content).toBeNull();
+      expect(cleared.metadata.content_hash).toBeUndefined();
+
+      // Re-fetch to confirm the row itself dropped the hash, not just the
+      // update response.
+      const refetched = await callTool("get_artifact", { id: created.id });
+      expect(refetched.metadata.content_hash).toBeUndefined();
+    });
+
+    it("ready -> draft -> ready via status-only updates keeps content_hash present", async () => {
+      // Regression: under the simplified rule, every write path ensures the
+      // hash is present whenever the artifact has content. Status-only
+      // updates (no content, no metadata supplied) must never leave the row
+      // in a state where content exists but content_hash does not — the
+      // pipeline rejects such artifacts as malformed.
       const created = await callTool("store_artifact", {
         title: "Hash-status-only-roundtrip",
         artifact_type: "cc-prompt",
@@ -979,25 +1014,24 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const originalHash = locked.metadata.content_hash;
       expect(originalHash).toBeDefined();
 
-      // Step 1: revert to draft via status-only update — hash should be cleared.
+      // Step 1: revert to draft via status-only update — hash is preserved.
       const reverted = await callTool("update_artifact", {
         id: created.id,
         status: "draft",
       });
       expect(reverted.status).toBe("draft");
-      expect(reverted.metadata.content_hash).toBeUndefined();
+      expect(reverted.metadata.content_hash).toBe(originalHash);
 
       // Re-fetch to prove the persisted row (not just the update response)
-      // has content_hash cleared. Guards against a future refactor that
-      // returns the right shape from update_artifact but fails to actually
-      // strip the hash from the database row.
+      // retains the hash. Guards against a future refactor that returns the
+      // right shape from update_artifact but fails to actually write the
+      // hash into the database row.
       const refetched = await callTool("get_artifact", { id: created.id });
       expect(refetched.status).toBe("draft");
-      expect(refetched.metadata.content_hash).toBeUndefined();
+      expect(refetched.metadata.content_hash).toBe(originalHash);
 
-      // Step 2: re-promote to ready via status-only update (no content, no
-      // metadata) — the server must recompute content_hash from the row's
-      // existing content. The artifact must not end up in ready with no hash.
+      // Step 2: re-promote to ready via status-only update — hash is still
+      // present and unchanged (recomputed from unchanged content).
       const repromoted = await callTool("update_artifact", {
         id: created.id,
         status: "ready",

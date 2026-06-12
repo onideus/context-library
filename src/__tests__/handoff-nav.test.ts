@@ -177,11 +177,13 @@ describe("list_handoffs", () => {
 
     // Extracted metadata values
     expect(entry.session_label).toBe("nav-label-third");
-    expect(entry.has_tasks).toBe(true);
+    // Since schema 1.3, store_handoff drops legacy task arrays on write, so
+    // newly stored handoffs never contain a tasks key — has_tasks is true
+    // only for pre-1.3 files already on disk.
+    expect(entry.has_tasks).toBe(false);
     expect(entry.size_bytes).toBeGreaterThan(0);
-    expect(entry.schema_version).toBe("1.2");
+    expect(entry.schema_version).toBe("1.3");
 
-    // Second handoff had no tasks key
     expect(result.handoffs[1].session_label).toBe("nav-label-second");
     expect(result.handoffs[1].has_tasks).toBe(false);
 
@@ -321,7 +323,7 @@ describe("get_handoff", () => {
     expect(result.active_context.session_meta.label).toBe("nav-label-first");
     expect(result.applied_scope).toBe("full");
     expect(result.filtered_fields).toBeUndefined();
-    expect(result.schema_version).toBe("1.2");
+    expect(result.schema_version).toBe("1.3");
     expect(typeof result.retrieved_at).toBe("string");
     expect(typeof result.elapsed_seconds).toBe("number");
     expect(result.elapsed_seconds).toBeGreaterThanOrEqual(0);

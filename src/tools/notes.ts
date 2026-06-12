@@ -75,13 +75,17 @@ Context Library has four content primitives — tasks, handoffs, artifacts, and 
 
 Use the 'domain' field to categorize (e.g., 'architecture', 'security', 'career', 'health'). Tags are free-form and compose with domain. The 'scope' field separates work/personal/shared knowledge. Provide 'source_url' when capturing takeaways from external material. Set 'related_task_ids' to link a note back to the tasks that produced it.
 
+Scope routing: scope is required. If the user's request is clearly personal (health, family, finance), pass scope='personal'. If clearly work-related, pass scope='work'. If the note is reusable across contexts (architecture decisions, OSS project notes, language patterns), pass scope='shared'. When ambiguous, ask before storing.
+
 Content can be long — notes do not compact.`;
 
 const GET_NOTE_DESC = `Retrieve a single note by its UUID. Returns the full note object including content.`;
 
 const LIST_NOTES_DESC = `List knowledge entries with optional filters and pagination. Returns metadata only (id, title, domain, scope, tags, timestamps) — NOT the full content. Call get_note for the body.
 
-Defaults to newest-first by created_at. Filter by scope, domain, or tags (ANY-match). Use search_notes or search_context when you want relevance ranking instead of filtered browsing.`;
+Defaults to newest-first by created_at. Filter by scope, domain, or tags (ANY-match). Use search_notes or search_context when you want relevance ranking instead of filtered browsing.
+
+Scope filter: when scope is omitted, this tool returns notes across all scopes (work, personal, shared). Pass scope='work', 'personal', or 'shared' to restrict results.`;
 
 const SEARCH_NOTES_DESC = `Full-text search across note titles and content. Uses PostgreSQL FTS with English stemming, ranked by relevance. Returns matching notes WITH full content (unlike list_notes).
 
@@ -99,6 +103,8 @@ DO NOT CALL WHEN:
 
 CONSEQUENCE OF SKIPPING: You will re-derive decisions that were already made, potentially reaching different conclusions.
 
+Scope filter: when scope is omitted, this tool searches notes across all scopes. Pass scope='work', 'personal', or 'shared' to restrict results to a single context.
+
 Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
 
 const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified. Tags and related_task_ids are full-replacement (provide complete arrays). Re-embeds on content change.`;
@@ -115,7 +121,9 @@ export function registerNoteTools(mcpServer: McpServer): void {
     {
       title: z.string().describe("Short descriptive title for the knowledge entry"),
       content: z.string().describe("The knowledge content — decisions, insights, patterns, takeaways. Can be long."),
-      scope: scopeEnum.describe("'work', 'personal', or 'shared'"),
+      scope: scopeEnum.describe(
+        "'work', 'personal', or 'shared' (required). Pass 'shared' when the knowledge is reusable across contexts (architecture decisions, OSS project notes)."
+      ),
       domain: z.string().optional().describe("Knowledge domain for categorization (e.g., 'architecture', 'security', 'career', 'health')"),
       tags: z.array(z.string()).optional().describe("Free-form tags for categorization"),
       source_url: z.string().optional().describe("URL of the source material, if applicable"),

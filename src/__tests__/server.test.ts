@@ -160,11 +160,21 @@ describe("Health", () => {
     expect(body.uptime as number).toBeGreaterThanOrEqual(0);
   });
 
-  it("response contains ONLY status, version, and uptime", async () => {
+  it("response contains ONLY status, version, uptime, and embedding_status", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     const body = await res.json() as Record<string, unknown>;
     const keys = Object.keys(body).sort();
-    expect(keys).toEqual(["status", "uptime", "version"].sort());
+    expect(keys).toEqual(
+      ["status", "uptime", "version", "embedding_status"].sort()
+    );
+  });
+
+  it("embedding_status on /health has expected shape", async () => {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json() as Record<string, unknown>;
+    const embeddingStatus = body.embedding_status as Record<string, unknown>;
+    expect(embeddingStatus).toBeDefined();
+    expect(typeof embeddingStatus.available).toBe("boolean");
   });
 
   it("GET /health/ready returns 200 with writable=true when data dir is writable", async () => {
@@ -265,8 +275,9 @@ describe("MCP Tools", () => {
   });
 
   describe("get_latest_handoff — round trip", () => {
-    it("retrieves the exact payload that was stored, plus stored_at", async () => {
-      // Store a known payload
+    it("retrieves the exact payload that was stored, plus stored_at (task arrays stripped)", async () => {
+      // Store a known payload. Task arrays in the payload are accepted but
+      // stripped server-side (schema 1.3) — assert they do NOT round trip.
       const payload = {
         operational_state: {
           sleep_hours: "8",
@@ -280,9 +291,6 @@ describe("MCP Tools", () => {
           open: ["phase 2"],
           blocked: [],
         },
-        memory_deltas: [
-          { slot: 1, action: "add" as const, content: "test memory" },
-        ],
         tone_notes: "Round-trip test payload",
       };
 
@@ -309,14 +317,16 @@ describe("MCP Tools", () => {
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
 
-      // The retrieved payload should contain everything we sent plus stored_at
-      // stored_at may differ by <=1ms due to ISO serialization rounding, so compare loosely
+      // Non-deprecated fields round trip exactly.
       expect(Math.abs(new Date(retrieved.stored_at).getTime() - new Date(storedAt).getTime())).toBeLessThanOrEqual(1);
       expect(retrieved.operational_state).toEqual(payload.operational_state);
       expect(retrieved.active_context).toEqual(payload.active_context);
-      expect(retrieved.tasks).toEqual(payload.tasks);
-      expect(retrieved.memory_deltas).toEqual(payload.memory_deltas);
       expect(retrieved.tone_notes).toBe(payload.tone_notes);
+      // Deprecated fields are not surfaced.
+      expect(retrieved.tasks).toBeUndefined();
+      expect(retrieved.memory_deltas).toBeUndefined();
+      // task_summary is the authoritative replacement.
+      expect(retrieved.task_summary).toBeDefined();
     });
   });
 
@@ -338,7 +348,7 @@ describe("MCP Tools", () => {
       // Store first handoff
       const payload1 = {
         tone_notes: "First handoff",
-        tasks: { open: ["task-alpha"] },
+        active_context: { session_meta: { label: "first-handoff-alpha" } },
       };
       const res1 = await mcpPost(
         jsonrpc("tools/call", { name: "store_handoff", arguments: payload1 })
@@ -355,7 +365,7 @@ describe("MCP Tools", () => {
       // Store second handoff
       const payload2 = {
         tone_notes: "Second handoff",
-        tasks: { open: ["task-beta"] },
+        active_context: { session_meta: { label: "second-handoff-beta" } },
       };
       const res2 = await mcpPost(
         jsonrpc("tools/call", { name: "store_handoff", arguments: payload2 })
@@ -381,7 +391,7 @@ describe("MCP Tools", () => {
       const retrieved = JSON.parse(getData.result.content[0].text);
       expect(retrieved.stored_at).toBe(storedAt2);
       expect(retrieved.tone_notes).toBe("Second handoff");
-      expect(retrieved.tasks.open).toEqual(["task-beta"]);
+      expect(retrieved.active_context?.session_meta?.label).toBe("second-handoff-beta");
     });
   });
 
@@ -407,7 +417,6 @@ describe("MCP Tools", () => {
       // Store baseline
       const baseline = {
         operational_state: { sleep_hours: "7", mood: "focused", energy_level: "high" },
-        tasks: { completed: ["setup"], open: ["write tests"], blocked: [] },
         tone_notes: "Original tone",
         timezone: "America/New_York",
       };
@@ -439,7 +448,6 @@ describe("MCP Tools", () => {
       expect(retrieved.tone_notes).toBe("Updated tone");
       expect(retrieved.operational_state.sleep_hours).toBe("7");
       expect(retrieved.operational_state.mood).toBe("focused");
-      expect(retrieved.tasks.open).toEqual(["write tests"]);
     });
 
     it("deep merges operational_state, preserving unpatched keys", async () => {
@@ -490,89 +498,56 @@ describe("MCP Tools", () => {
       expect(retrieved.active_context.conversation_arc).toBe("deploying");
     });
 
-    it("appends to tasks.open, preserving existing items", async () => {
-      // Store baseline with tasks
-      await storeAndVerify({ tasks: { open: ["task-a", "task-b"], completed: [], blocked: [] } });
-
-      const patchRes = await mcpPost(
-        jsonrpc("tools/call", {
-          name: "patch_handoff",
-          arguments: { tasks: { open: { op: "append", items: ["task-c"] } } },
-        })
-      );
-      const patchData = (await parseSseResponse(patchRes)) as any;
-      const patchResult = JSON.parse(patchData.result.content[0].text);
-      expect(patchResult.success).toBe(true);
-
-      const getRes = await mcpPost(
-        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
-      );
-      const getData = (await parseSseResponse(getRes)) as any;
-      const retrieved = JSON.parse(getData.result.content[0].text);
-      expect(retrieved.tasks.open).toEqual(["task-a", "task-b", "task-c"]);
-    });
-
-    it("removes specific items from tasks.open", async () => {
-      // Store baseline with known tasks
-      await storeAndVerify({ tasks: { open: ["task-a", "task-b", "task-c"], completed: [], blocked: [] } });
-
-      const patchRes = await mcpPost(
-        jsonrpc("tools/call", {
-          name: "patch_handoff",
-          arguments: { tasks: { open: { op: "remove", items: ["task-b"] } } },
-        })
-      );
-      const patchData = (await parseSseResponse(patchRes)) as any;
-      const patchResult = JSON.parse(patchData.result.content[0].text);
-      expect(patchResult.success).toBe(true);
-
-      const getRes = await mcpPost(
-        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
-      );
-      const getData = (await parseSseResponse(getRes)) as any;
-      const retrieved = JSON.parse(getData.result.content[0].text);
-      expect(retrieved.tasks.open).toEqual(["task-a", "task-c"]);
-    });
-
-    it("replaces tasks.completed entirely", async () => {
-      // Store baseline
-      await storeAndVerify({ tasks: { completed: ["old-a", "old-b"], open: [], blocked: [] } });
+    it("legacy task array operations are accepted but become no-ops (deprecation)", async () => {
+      // Schema 1.3 deprecation: patch_handoff still accepts a tasks
+      // argument (so existing clients don't break) but task array operations
+      // (append/remove/replace) do not apply — the legacy arrays are not
+      // surfaced, and task_summary reflects the authoritative Postgres state.
+      await storeAndVerify({ tone_notes: "Deprecation baseline" });
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
           name: "patch_handoff",
           arguments: {
-            tasks: { completed: { op: "replace", items: ["done-x", "done-y"] } },
+            tone_notes: "patched",
+            tasks: { open: { op: "append", items: ["legacy-1", "legacy-2"] } },
           },
         })
       );
+      expect(patchRes.status).toBe(200);
       const patchData = (await parseSseResponse(patchRes)) as any;
       const patchResult = JSON.parse(patchData.result.content[0].text);
       expect(patchResult.success).toBe(true);
+      expect(patchResult.patched_fields).toContain("tone_notes");
+      // tasks ops do not surface as a patched field — they are no-ops.
+      expect(patchResult.patched_fields).not.toContain("tasks");
+      expect(patchResult.task_summary).toBeDefined();
 
       const getRes = await mcpPost(
         jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
       );
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
-      expect(retrieved.tasks.completed).toEqual(["done-x", "done-y"]);
+      // The deprecated task arrays never propagate into the response.
+      expect(retrieved.tasks).toBeUndefined();
+      expect(retrieved.tone_notes).toBe("patched");
     });
 
     it("preserves original value when null is sent for a field", async () => {
       // Store with tone_notes
-      await storeAndVerify({ tone_notes: "Keep this tone", tasks: { open: ["persist-me"], completed: [], blocked: [] } });
+      await storeAndVerify({ tone_notes: "Keep this tone" });
 
       // Patch with null tone_notes — should preserve
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
           name: "patch_handoff",
-          arguments: { tone_notes: null, tasks: { open: { op: "append", items: ["new-task"] } } },
+          arguments: { tone_notes: null, operational_state: { mood: "patched" } },
         })
       );
       const patchData = (await parseSseResponse(patchRes)) as any;
       const patchResult = JSON.parse(patchData.result.content[0].text);
       expect(patchResult.patched_fields).not.toContain("tone_notes");
-      expect(patchResult.patched_fields).toContain("tasks");
+      expect(patchResult.patched_fields).toContain("operational_state");
 
       const getRes = await mcpPost(
         jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
@@ -586,7 +561,7 @@ describe("MCP Tools", () => {
       // Store baseline
       await storeAndVerify({
         operational_state: { mood: "neutral", energy_level: "medium" },
-        tasks: { open: ["task-1", "task-2"], completed: ["done-1"], blocked: [] },
+        active_context: { phase: "alpha" },
       });
 
       const patchRes = await mcpPost(
@@ -594,10 +569,7 @@ describe("MCP Tools", () => {
           name: "patch_handoff",
           arguments: {
             operational_state: { mood: "energized" },
-            tasks: {
-              open: { op: "remove", items: ["task-1"] },
-              completed: { op: "append", items: ["task-1"] },
-            },
+            active_context: { phase: "beta" },
           },
         })
       );
@@ -605,7 +577,7 @@ describe("MCP Tools", () => {
       const patchResult = JSON.parse(patchData.result.content[0].text);
       expect(patchResult.success).toBe(true);
       expect(patchResult.patched_fields).toContain("operational_state");
-      expect(patchResult.patched_fields).toContain("tasks");
+      expect(patchResult.patched_fields).toContain("active_context");
 
       const getRes = await mcpPost(
         jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
@@ -614,8 +586,7 @@ describe("MCP Tools", () => {
       const retrieved = JSON.parse(getData.result.content[0].text);
       expect(retrieved.operational_state.mood).toBe("energized");
       expect(retrieved.operational_state.energy_level).toBe("medium");
-      expect(retrieved.tasks.open).toEqual(["task-2"]);
-      expect(retrieved.tasks.completed).toEqual(["done-1", "task-1"]);
+      expect(retrieved.active_context.phase).toBe("beta");
     });
 
     it("includes patched_from reference to source handoff filename", async () => {
@@ -635,30 +606,26 @@ describe("MCP Tools", () => {
       expect(patchResult.source_handoff).toMatch(/\.json$/);
     });
 
-    it("returns correct task_summary counts in response", async () => {
-      await storeAndVerify({
-        tasks: {
-          open: ["a", "b"],
-          completed: ["c"],
-          blocked: ["d"],
-        },
-      });
+    it("returns task_summary shape in response", async () => {
+      // Schema 1.3: task_summary is authoritative (Postgres-backed) and
+      // shares only the count contract across the dynamic and fallback
+      // paths. Counts come from Postgres when available, otherwise from
+      // the handoff arrays — which are stripped on storage, so the
+      // fallback path returns zeros for new handoffs.
+      await storeAndVerify({ tone_notes: "task_summary shape baseline" });
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
           name: "patch_handoff",
-          arguments: {
-            tasks: { open: { op: "append", items: ["e"] } },
-          },
+          arguments: { tone_notes: "task_summary shape patched" },
         })
       );
       const patchData = (await parseSseResponse(patchRes)) as any;
       const patchResult = JSON.parse(patchData.result.content[0].text);
-      expect(patchResult.task_summary).toEqual({
-        open_count: 3,
-        blocked_count: 1,
-        completed_count: 1,
-      });
+      expect(patchResult.task_summary).toBeDefined();
+      expect(typeof patchResult.task_summary.open_count).toBe("number");
+      expect(typeof patchResult.task_summary.blocked_count).toBe("number");
+      expect(typeof patchResult.task_summary.completed_count).toBe("number");
     });
   });
 
@@ -693,20 +660,19 @@ describe("MCP Tools", () => {
     });
 
     it("task_summary exposes numeric counts (shape is stable across fallback and dynamic sources)", async () => {
-      // When Postgres is unavailable, task_summary is the fallback shape derived from handoff
-      // arrays: {open_count, blocked_count, completed_count}. When Postgres is available, counts
-      // come from the tasks table and the shape is enriched with item arrays. This test asserts
-      // the minimum contract both paths share. Exact-count fallback behavior is covered by the
-      // patch_handoff "task_summary counts in response" test, which stays on handoff arrays.
-      await storeAndVerify({
-        tasks: { open: ["x", "y"], completed: ["z"], blocked: [] },
-      });
+      // task_summary shape contract: {open_count, blocked_count, completed_count}.
+      // When Postgres is available it is enriched with item arrays; the
+      // numeric count fields stay present across both paths. Task arrays in
+      // the payload are stripped server-side (schema 1.3) but the response
+      // shape is unaffected.
+      await storeAndVerify({ tone_notes: "task_summary shape test" });
 
       const getRes = await mcpPost(
         jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
       );
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
+      expect(retrieved.task_summary).toBeDefined();
       expect(typeof retrieved.task_summary.open_count).toBe("number");
       expect(typeof retrieved.task_summary.blocked_count).toBe("number");
       expect(typeof retrieved.task_summary.completed_count).toBe("number");
@@ -724,13 +690,13 @@ describe("MCP Tools", () => {
       expect(retrieved.applied_scope).toBe("work");
     });
 
-    it("schema_version is present and is '1.2'", async () => {
+    it("schema_version is present and is '1.3'", async () => {
       const getRes = await mcpPost(
         jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
       );
       const getData = (await parseSseResponse(getRes)) as any;
       const retrieved = JSON.parse(getData.result.content[0].text);
-      expect(retrieved.schema_version).toBe("1.2");
+      expect(retrieved.schema_version).toBe("1.3");
     });
 
     it("handoff_count is a positive integer", async () => {
@@ -781,12 +747,12 @@ describe("MCP Tools", () => {
   // ────────────────────────────────────────────────
 
   describe("schema_version — stored file contents", () => {
-    it("stored handoff file contains schema_version '1.2'", async () => {
+    it("stored handoff file contains schema_version '1.3'", async () => {
       const result = await storeAndVerify({ tone_notes: "schema_version file test" });
       const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
       const raw = await readFile(filepath, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.schema_version).toBe("1.2");
+      expect(parsed.schema_version).toBe("1.3");
     });
 
     it("patch preserves schema_version on the merged result file", async () => {
@@ -800,7 +766,7 @@ describe("MCP Tools", () => {
       );
       const patchData = (await parseSseResponse(patchRes)) as any;
       const patchResult = JSON.parse(patchData.result.content[0].text);
-      expect(patchResult.schema_version).toBe("1.2");
+      expect(patchResult.schema_version).toBe("1.3");
 
       const handoffsDir = join(TEST_DATA_DIR, "handoffs");
       const files = (await readdir(handoffsDir))
@@ -808,7 +774,7 @@ describe("MCP Tools", () => {
         .sort();
       const latestPath = join(handoffsDir, files[files.length - 1]);
       const parsed = JSON.parse(await readFile(latestPath, "utf-8"));
-      expect(parsed.schema_version).toBe("1.2");
+      expect(parsed.schema_version).toBe("1.3");
     });
   });
 
@@ -821,10 +787,7 @@ describe("MCP Tools", () => {
       const res = await mcpPost(
         jsonrpc("tools/call", {
           name: "store_handoff",
-          arguments: {
-            tasks: { open: ["a"], completed: ["b", "c"], blocked: [] },
-            tone_notes: "enrichment test",
-          },
+          arguments: { tone_notes: "enrichment test" },
         })
       );
       const data = (await parseSseResponse(res)) as any;
@@ -833,12 +796,15 @@ describe("MCP Tools", () => {
       expect(result.filename).toBeDefined();
       expect(typeof result.filename).toBe("string");
       expect(result.filename).toMatch(/\.json$/);
-      expect(result.task_summary).toEqual({
-        open_count: 1,
-        blocked_count: 0,
-        completed_count: 2,
-      });
-      expect(result.schema_version).toBe("1.2");
+      // task_summary shape is stable regardless of source (Postgres dynamic
+      // vs. handoff-array fallback). With Postgres unavailable in this
+      // suite, the fallback returns zeros because task arrays are stripped
+      // before storage (schema 1.3).
+      expect(result.task_summary).toBeDefined();
+      expect(typeof result.task_summary.open_count).toBe("number");
+      expect(typeof result.task_summary.blocked_count).toBe("number");
+      expect(typeof result.task_summary.completed_count).toBe("number");
+      expect(result.schema_version).toBe("1.3");
     });
 
     it("tool description does not contain 'Overwrites' or 'overwrites'", async () => {
@@ -865,16 +831,25 @@ describe("MCP Tools", () => {
       expect(result.next_step.length).toBeGreaterThan(0);
     });
 
-    it("store_handoff next_step mentions open task count when tasks.open is non-empty", async () => {
+    it("store_handoff next_step does not mention legacy task arrays (schema 1.3)", async () => {
+      // Legacy task arrays are stripped server-side since schema 1.3, so
+      // even if a caller still sends tasks.open, the response's next_step
+      // open-task hint reflects authoritative Postgres counts (zero when
+      // the suite runs without a Postgres backend). This test guards
+      // against accidentally regressing to handoff-array-derived counts.
       const res = await mcpPost(
         jsonrpc("tools/call", {
           name: "store_handoff",
-          arguments: { tasks: { open: ["task-a", "task-b"], completed: [], blocked: [] } },
+          arguments: {
+            tone_notes: "legacy-tasks deprecation test",
+            tasks: { open: ["task-a", "task-b"], completed: [], blocked: [] },
+          },
         })
       );
       const data = (await parseSseResponse(res)) as any;
       const result = JSON.parse(data.result.content[0].text);
-      expect(result.next_step).toMatch(/2.*open task|open task.*2/i);
+      expect(result.success).toBe(true);
+      expect(result.next_step).not.toMatch(/2 open tasks/i);
     });
   });
 
@@ -900,6 +875,208 @@ describe("MCP Tools", () => {
       const data = (await parseSseResponse(res)) as any;
       const result = JSON.parse(data.result.content[0].text);
       expect(result.next_step).toMatch(/tone_notes/i);
+    });
+  });
+
+  // ────────────────────────────────────────────────
+  // Defensive hardening: empty-content guards + pointer cleanup
+  // ────────────────────────────────────────────────
+
+  describe("Schema 1.3 deprecations (memory_deltas + task arrays)", () => {
+    it("store_handoff with task arrays succeeds but arrays are not in the stored file", async () => {
+      const result = await storeAndVerify({
+        tone_notes: "deprecation-store-tasks-test",
+        tasks: { open: ["x", "y"], completed: ["z"], blocked: ["b"] },
+      });
+
+      const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
+      const raw = await readFile(filepath, "utf-8");
+      const parsed = JSON.parse(raw);
+
+      expect(parsed.tone_notes).toBe("deprecation-store-tasks-test");
+      expect(parsed.tasks).toBeUndefined();
+      expect(parsed.schema_version).toBe("1.3");
+    });
+
+    it("store_handoff without task arrays continues to work normally", async () => {
+      const result = await storeAndVerify({
+        tone_notes: "no-tasks-baseline",
+        active_context: { phase: "alpha" },
+      });
+      const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
+      const raw = await readFile(filepath, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.tone_notes).toBe("no-tasks-baseline");
+      expect(parsed.active_context.phase).toBe("alpha");
+      expect(parsed.tasks).toBeUndefined();
+    });
+
+    it("get_latest_handoff response does not contain legacy task arrays", async () => {
+      await storeAndVerify({
+        tone_notes: "no-tasks-in-response",
+        tasks: { open: ["x"], completed: ["y"], blocked: [] },
+      });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const retrieved = JSON.parse(data.result.content[0].text);
+      expect(retrieved.tasks).toBeUndefined();
+      expect(retrieved.task_summary).toBeDefined();
+    });
+
+    it("memory_deltas in payload is not stored (field removed from schema)", async () => {
+      // The MCP SDK constructs the input schema with z.object() in strip
+      // mode, so memory_deltas is silently dropped before reaching the
+      // handler. Either way, it must not land in the stored file.
+      const result = await storeAndVerify({
+        tone_notes: "no-memory-deltas",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        memory_deltas: [{ slot: 1, action: "add", content: "ghost" }],
+      } as Record<string, unknown>);
+
+      const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
+      const raw = await readFile(filepath, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.memory_deltas).toBeUndefined();
+    });
+
+    it("historical handoffs with task arrays can be retrieved via get_handoff without error", async () => {
+      // Simulate a pre-1.3 handoff by writing one directly to disk with
+      // legacy task arrays + memory_deltas. get_handoff should return the
+      // file without erroring; the response simply omits the deprecated
+      // fields under the "full" scope filter.
+      const { writeFile } = await import("node:fs/promises");
+      const filename = "2026-04-01T12-00-00-000Z-deadbeef.json";
+      const legacyHandoff = {
+        operational_state: { mood: "calm" },
+        active_context: { session_meta: { label: "legacy-1.2-handoff" } },
+        tasks: {
+          completed: ["legacy-done-1"],
+          open: ["legacy-open-1"],
+          blocked: ["legacy-blocked-1"],
+        },
+        memory_deltas: [{ slot: 1, action: "add", content: "legacy" }],
+        tone_notes: "historical-handoff-retrieval",
+        stored_at: "2026-04-01T12:00:00.000Z",
+        schema_version: "1.2",
+      };
+      await writeFile(
+        join(TEST_DATA_DIR, "handoffs", filename),
+        JSON.stringify(legacyHandoff),
+        "utf-8"
+      );
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "get_handoff",
+          arguments: { filename },
+        })
+      );
+      expect(res.status).toBe(200);
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBeUndefined();
+      expect(result.tone_notes).toBe("historical-handoff-retrieval");
+      // Even when reading a pre-1.3 file, the response does not surface
+      // the legacy task arrays.
+      expect(result.tasks).toBeUndefined();
+    });
+  });
+
+  describe("Defensive hardening", () => {
+    it("store_handoff with no content fields returns EMPTY_HANDOFF", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "store_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_HANDOFF");
+    });
+
+    it("store_handoff with only a deprecated tasks field succeeds (backwards-compatible)", async () => {
+      // Pre-schema-1.3 callers that send tasks-only payloads must still
+      // receive a success response — silently turning these into
+      // EMPTY_HANDOFF would be a breaking change. The legacy task arrays
+      // are stripped server-side and a deprecation warning is logged, but
+      // the empty-content guard treats `tasks` as content for compatibility.
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: {
+            tasks: { open: ["legacy-task"], completed: [], blocked: [] },
+          },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(typeof result.filename).toBe("string");
+    });
+
+    it("store_handoff with a single content field (timezone) succeeds", async () => {
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "store_handoff",
+          arguments: { timezone: "America/Los_Angeles" },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("patch_handoff with no content fields returns EMPTY_PATCH", async () => {
+      // Ensure a handoff exists so the empty-guard runs before the NOT_FOUND check.
+      await storeAndVerify({ tone_notes: "empty-patch baseline" });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", { name: "patch_handoff", arguments: {} })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_PATCH");
+    });
+
+    it("patch_handoff with all null fields returns EMPTY_PATCH", async () => {
+      await storeAndVerify({ tone_notes: "all-null baseline" });
+
+      const res = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "patch_handoff",
+          arguments: {
+            operational_state: null,
+            active_context: null,
+            tasks: null,
+            tone_notes: null,
+            timezone: null,
+          },
+        })
+      );
+      const data = (await parseSseResponse(res)) as any;
+      const result = JSON.parse(data.result.content[0].text);
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("EMPTY_PATCH");
+    });
+
+    it("store_handoff does not write the deprecated handoff-latest.json pointer file", async () => {
+      await storeAndVerify({ tone_notes: "pointer cleanup test" });
+
+      const pointerPath = join(TEST_DATA_DIR, "handoff-latest.json");
+      const { access } = await import("node:fs/promises");
+      let exists = false;
+      try {
+        await access(pointerPath);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      expect(exists).toBe(false);
     });
   });
 });
@@ -965,6 +1142,9 @@ describe("Handoff Navigation", () => {
     });
 
     it("extracts session_label and has_tasks correctly", async () => {
+      // Schema 1.3: task arrays are stripped before storage, so new
+      // handoffs always report has_tasks=false. The field still exists in
+      // the metadata response (historical handoffs may carry tasks).
       await storeAndVerify({
         active_context: { session_meta: { label: "meta-label-test" } },
         tasks: { open: ["x"], completed: [], blocked: [] },
@@ -982,7 +1162,7 @@ describe("Handoff Navigation", () => {
         (h: any) => h.session_label === "meta-label-test"
       );
       expect(match).toBeDefined();
-      expect(match.has_tasks).toBe(true);
+      expect(match.has_tasks).toBe(false);
       expect(match.size_bytes).toBeGreaterThan(0);
     });
 
@@ -1066,7 +1246,7 @@ describe("Handoff Navigation", () => {
       expect(result.tone_notes).toBe("get_handoff target");
       expect(result.active_context.session_meta.label).toBe("get-handoff-test");
       expect(result.applied_scope).toBe("full");
-      expect(result.schema_version).toBe("1.2");
+      expect(result.schema_version).toBe("1.3");
       expect(result.task_summary).toBeDefined();
       expect(typeof result.elapsed_seconds).toBe("number");
     });
@@ -1163,7 +1343,12 @@ describe("Compaction — previous handoff is compacted after store_handoff", () 
   }
 
   it("marks the previous handoff as _compacted after a subsequent store", async () => {
-    // Store a rich handoff that has plenty to prune.
+    // Store a rich handoff that has plenty to prune. Schema 1.3: task
+    // arrays in the payload are stripped before storage, so the on-disk
+    // handoff has no tasks field — we exercise compaction via the rich
+    // active_context content instead. Detailed compaction rules for
+    // historical handoffs (task array trimming, memory_deltas removal)
+    // are covered by the unit tests in compaction.test.ts.
     const first = await storeAndVerify({
       operational_state: { sleep_hours: "7", mood: "focused" },
       active_context: {
@@ -1172,12 +1357,6 @@ describe("Compaction — previous handoff is compacted after store_handoff", () 
         key_decisions: ["Adopt three-tier schema", "Skip when pending"],
         research_notes: "Lots of filler content that should drop from the JSON.",
       },
-      tasks: {
-        completed: ["c1", "c2", "c3", "c4", "c5", "c6"],
-        open: ["keep-open"],
-        blocked: ["keep-blocked"],
-      },
-      memory_deltas: [{ slot: 1, action: "add", content: "delta" }],
       tone_notes: "preserve me",
     });
 
@@ -1210,11 +1389,9 @@ describe("Compaction — previous handoff is compacted after store_handoff", () 
     expect(compacted._compacted).toBe(true);
     expect(compacted.tone_notes).toBe("preserve me");
     expect(compacted.operational_state.mood).toBe("focused");
-    expect(compacted.tasks.open).toEqual(["keep-open"]);
-    expect(compacted.tasks.blocked).toEqual(["keep-blocked"]);
-    // completed trimmed from 6 → last 3
-    expect(compacted.tasks.completed).toEqual(["c4", "c5", "c6"]);
-    // memory_deltas removed
+    // No legacy task arrays are stored on new (1.3+) handoffs.
+    expect(compacted.tasks).toBeUndefined();
+    // No memory_deltas — field removed from the schema.
     expect(compacted.memory_deltas).toBeUndefined();
     // active_context collapsed to session_meta + compacted_summary
     expect(compacted.active_context.compacted_summary).toMatch(/compaction-test-first/);
@@ -1230,7 +1407,6 @@ describe("Compaction — previous handoff is compacted after store_handoff", () 
         session_meta: { label: "latest-full-fidelity" },
         conversation_arc: "Detailed arc for the latest session.",
       },
-      tasks: { completed: ["a", "b", "c", "d", "e"], open: [], blocked: [] },
     });
 
     // Read the latest handoff directly from disk — should NOT have _compacted.
@@ -1243,7 +1419,9 @@ describe("Compaction — previous handoff is compacted after store_handoff", () 
     expect(parsed.active_context.conversation_arc).toBe(
       "Detailed arc for the latest session."
     );
-    expect(parsed.tasks.completed).toEqual(["a", "b", "c", "d", "e"]);
+    // Schema 1.3: no legacy task arrays in the stored file even if the
+    // caller sent them.
+    expect(parsed.tasks).toBeUndefined();
   });
 
   it("compacted handoffs are still retrievable via get_handoff", async () => {
@@ -1254,7 +1432,6 @@ describe("Compaction — previous handoff is compacted after store_handoff", () 
         session_meta: { label: "retrievable-test" },
         conversation_arc: "An arc to be archived.",
       },
-      tasks: { completed: ["x1", "x2", "x3", "x4"], open: [], blocked: [] },
     });
 
     await new Promise((r) => setTimeout(r, 100));
@@ -1321,5 +1498,195 @@ describe("search_context — graceful degradation", () => {
     const result = JSON.parse(data.result.content[0].text);
     expect(result.error).toBe(true);
     expect(result.code).toBe("EMBEDDING_UNAVAILABLE");
+  });
+});
+
+// ────────────────────────────────────────────────
+// Session close — final flag, session_closed, session_continuity
+// ────────────────────────────────────────────────
+describe("Session close — final flag", () => {
+  it("store_handoff with final=true marks the response session_closed=true", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "store_handoff",
+        arguments: { tone_notes: "close-test", final: true },
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.success).toBe(true);
+    expect(result.session_closed).toBe(true);
+    expect(typeof result.session_closed_at).toBe("string");
+    expect(result.session_closed_at).toBe(result.stored_at);
+  });
+
+  it("store_handoff without final returns session_closed=false (default)", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "store_handoff",
+        arguments: { tone_notes: "open-session-default" },
+      })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.success).toBe(true);
+    expect(result.session_closed).toBe(false);
+    expect(result.session_closed_at).toBeNull();
+  });
+
+  it("stored handoff file persists session_closed and session_closed_at", async () => {
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "store_handoff",
+        arguments: { tone_notes: "persisted-close", final: true },
+      })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    const filepath = join(TEST_DATA_DIR, "handoffs", result.filename);
+    const raw = await readFile(filepath, "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.session_closed).toBe(true);
+    expect(parsed.session_closed_at).toBe(parsed.stored_at);
+  });
+
+  it("get_latest_handoff returns session_continuity='resume' immediately after a closed write (elapsed gate)", async () => {
+    // Per spec, cold_start requires session_closed=true AND a significant
+    // elapsed_seconds gap. A session that was just closed (seconds ago) is
+    // still effectively warm — operational_state is fresh.
+    await storeAndVerify({ tone_notes: "closing-write", final: true });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.session_closed).toBe(true);
+    expect(typeof result.session_closed_at).toBe("string");
+    expect(result.session_continuity).toBe("resume");
+  });
+
+  // The cold_start case (closed session past the elapsed threshold) is
+  // exercised at the unit level in session-continuity.test.ts. An integration
+  // test for it would need to backdate a synthetic handoff file into a
+  // TEST_DATA_DIR that is shared with the surrounding tests in this describe
+  // block, where newer handoffs from earlier tests would outrank the synthetic
+  // one. The unit coverage is sufficient.
+
+  it("get_latest_handoff returns session_continuity='resume' after an open write", async () => {
+    await storeAndVerify({ tone_notes: "still-open-write" });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.session_closed).toBe(false);
+    expect(result.session_closed_at).toBeNull();
+    expect(result.session_continuity).toBe("resume");
+  });
+
+  it("patch_handoff with final=true alone is a valid session-close patch", async () => {
+    await storeAndVerify({ tone_notes: "open-before-close-patch" });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "patch_handoff",
+        arguments: { final: true },
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.success).toBe(true);
+    expect(result.session_closed).toBe(true);
+    expect(typeof result.session_closed_at).toBe("string");
+
+    // The new handoff carries session_closed=true. cold_start only flips
+    // once enough elapsed time has passed; immediately after the close
+    // continuity is still 'resume' (no gap yet).
+    const getRes = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    const getData = (await parseSseResponse(getRes)) as any;
+    const retrieved = JSON.parse(getData.result.content[0].text);
+    expect(retrieved.session_closed).toBe(true);
+    expect(retrieved.session_continuity).toBe("resume");
+  });
+
+  it("patch_handoff WITHOUT final or content fails with EMPTY_PATCH", async () => {
+    await storeAndVerify({ tone_notes: "baseline-for-empty-patch" });
+
+    const res = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "patch_handoff",
+        arguments: {},
+      })
+    );
+    const data = (await parseSseResponse(res)) as any;
+    const result = JSON.parse(data.result.content[0].text);
+    expect(result.error).toBe(true);
+    expect(result.code).toBe("EMPTY_PATCH");
+  });
+
+  it("a subsequent open patch clears the session_closed marker", async () => {
+    // 1. Close a session.
+    await storeAndVerify({ tone_notes: "close-1", final: true });
+    let getRes = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    let result = JSON.parse(((await parseSseResponse(getRes)) as any).result.content[0].text);
+    expect(result.session_closed).toBe(true);
+
+    // 2. Open patch — should drop the stale close marker.
+    const patchRes = await mcpPost(
+      jsonrpc("tools/call", {
+        name: "patch_handoff",
+        arguments: { tone_notes: "resumed" },
+      })
+    );
+    const patchResult = JSON.parse(
+      ((await parseSseResponse(patchRes)) as any).result.content[0].text
+    );
+    expect(patchResult.session_closed).toBe(false);
+
+    // 3. get_latest_handoff should now report a resume.
+    getRes = await mcpPost(
+      jsonrpc("tools/call", { name: "get_latest_handoff", arguments: {} })
+    );
+    result = JSON.parse(((await parseSseResponse(getRes)) as any).result.content[0].text);
+    expect(result.session_continuity).toBe("resume");
+    expect(result.session_closed).toBe(false);
+  });
+});
+
+// ────────────────────────────────────────────────
+// Tool description language — SCOPE AWARENESS removed
+// ────────────────────────────────────────────────
+describe("Tool descriptions — scope guidance", () => {
+  it("no tool description contains the SCOPE AWARENESS block", async () => {
+    const res = await mcpPost(jsonrpc("tools/list"));
+    const data = (await parseSseResponse(res)) as any;
+    const tools: Array<{ name: string; description: string }> = data.result.tools;
+    for (const t of tools) {
+      expect(
+        t.description,
+        `tool '${t.name}' still mentions SCOPE AWARENESS`
+      ).not.toMatch(/SCOPE AWARENESS/);
+    }
+  });
+
+  it("create_task scope enum now includes 'shared'", async () => {
+    const res = await mcpPost(jsonrpc("tools/list"));
+    const data = (await parseSseResponse(res)) as any;
+    const tools = data.result.tools as Array<{
+      name: string;
+      inputSchema: Record<string, unknown>;
+    }>;
+    const createTask = tools.find((t) => t.name === "create_task");
+    expect(createTask).toBeDefined();
+    const scope = (createTask!.inputSchema as any).properties?.scope;
+    expect(scope?.enum).toEqual(["work", "personal", "shared"]);
   });
 });

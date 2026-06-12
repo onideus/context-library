@@ -20,11 +20,16 @@ const COMPLETED_TASKS_KEEP = 3;
  * Produce a compacted version of a stored handoff.
  *
  * Rules (see batch 5 prompt for full rationale):
- * - operational_state, tone_notes, tasks.open, tasks.blocked, metadata — preserved.
- * - tasks.completed — truncated to the last COMPLETED_TASKS_KEEP items.
+ * - operational_state, tone_notes, metadata — preserved.
+ * - tasks.open, tasks.blocked — preserved on historical handoffs that still
+ *   carry them. New handoffs (schema 1.3+) have no tasks field; tasks live
+ *   in the Postgres tasks table.
+ * - tasks.completed — truncated to the last COMPLETED_TASKS_KEEP items
+ *   (historical only; new handoffs never store this).
  * - active_context — collapsed to {session_meta?, compacted_summary}. Full text
  *   was embedded during the original store, so it remains searchable.
- * - memory_deltas — removed (already applied at store time).
+ * - memory_deltas — removed when present on legacy historical handoffs
+ *   (deprecated; deltas were already applied at the original store time).
  * - Idempotent: a handoff with _compacted=true passes through unchanged.
  */
 export function compactHandoff(handoff: Handoff): CompactionResult {
@@ -59,8 +64,11 @@ export function compactHandoff(handoff: Handoff): CompactionResult {
     archived_keys.push("active_context");
   }
 
-  if (compacted.memory_deltas !== undefined) {
-    delete compacted.memory_deltas;
+  // Drop deprecated memory_deltas from historical (pre-1.3) files. The field
+  // is no longer on the Handoff type, so access through the record cast.
+  const compactedRecord = compacted as Record<string, unknown>;
+  if (compactedRecord.memory_deltas !== undefined) {
+    delete compactedRecord.memory_deltas;
     archived_keys.push("memory_deltas");
   }
 

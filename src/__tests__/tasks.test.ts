@@ -236,6 +236,23 @@ describe.skipIf(!pgAvailable)("Task Tools", () => {
       expect(result.error).toBe(true);
       expect(result.code).toBe("VALIDATION_ERROR");
     });
+
+    it("accepts scope='shared' for cross-context tasks", async () => {
+      // Matches the notes scope contract — see migration 010_task_scope_shared.sql.
+      const result = await callTool("create_task", {
+        title: "Shared scope task",
+        scope: "shared",
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.scope).toBe("shared");
+
+      // Round-trip through list_tasks with the same filter to confirm it's queryable.
+      const listed = await callTool("list_tasks", { scope: "shared" });
+      const found = (listed.tasks as Array<{ id: string }>).find(
+        (t) => t.id === result.id
+      );
+      expect(found).toBeDefined();
+    });
   });
 
   describe("get_task", () => {

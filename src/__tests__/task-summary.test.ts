@@ -289,25 +289,24 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
       expect(allItemIds).not.toContain(deferred.id);
     });
 
-    it("store_handoff task_summary reflects handoff arrays, not the tasks table", async () => {
-      // store_handoff intentionally computes its task_summary from the
-      // payload's tasks arrays (computeTaskSummary), while get_latest_handoff
-      // prefers the dynamic Postgres summary. The table currently holds 4
-      // open tasks — the store response must still say 1.
+    it("store_handoff task_summary reflects the tasks table, not deprecated handoff arrays", async () => {
+      // Since schema 1.3, legacy task arrays are accepted on input but
+      // dropped, and store_handoff's task_summary comes from the Postgres
+      // tasks table. The table currently holds 4 open tasks — the deprecated
+      // array claiming a single open task must not influence the summary.
       const result = await callTool("store_handoff", {
         tone_notes: "store summary source test",
         tasks: { open: ["only-one"], completed: [], blocked: [] },
       });
       expect(result.success).toBe(true);
-      expect(result.task_summary).toEqual({
-        open_count: 1,
-        blocked_count: 0,
-        completed_count: 0,
-      });
+      expect(result.task_summary.open_count).toBe(4);
+      expect(result.task_summary.blocked_count).toBe(1);
+      expect(result.task_summary.completed_count).toBe(1);
     });
 
     it("get_latest_handoff prefers the dynamic Postgres summary over handoff arrays", async () => {
-      // The latest handoff (stored above) claims 1 open task; Postgres says 4.
+      // The latest handoff (stored above) was sent with a deprecated array
+      // claiming 1 open task; Postgres says 4.
       const result = await callTool("get_latest_handoff", {});
       const ts = result.task_summary;
       expect(ts.open_count).toBe(4);

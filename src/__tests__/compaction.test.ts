@@ -2,6 +2,10 @@ import { describe, it, expect } from "vitest";
 import { compactHandoff, COMPACTED_FLAG } from "../tools/compaction.js";
 import type { Handoff } from "../storage/schemas.js";
 
+// Compaction is exercised on historical handoff files that may still
+// contain legacy task arrays (deprecated since schema 1.3). The fixture
+// mimics that pre-1.3 shape so we can assert compaction's archival
+// behavior on real on-disk content.
 function makeHandoff(overrides: Partial<Handoff> = {}): Handoff {
   return {
     operational_state: {
@@ -20,7 +24,6 @@ function makeHandoff(overrides: Partial<Handoff> = {}): Handoff {
       open: ["next-up"],
       blocked: ["dep → waiting"],
     },
-    memory_deltas: [{ slot: 1, action: "add", content: "delta-1" }],
     tone_notes: "Be terse.",
     timezone: "America/New_York",
     stored_at: "2026-04-17T10:00:00.000-04:00",
@@ -74,9 +77,13 @@ describe("compactHandoff", () => {
     expect(ctx.compacted_summary).toMatch(/Rolled back the migration/);
   });
 
-  it("removes memory_deltas entirely", () => {
-    const { compacted, archived_keys } = compactHandoff(makeHandoff());
-    expect(compacted.memory_deltas).toBeUndefined();
+  it("removes memory_deltas entirely on legacy historical handoffs", () => {
+    const h = makeHandoff();
+    (h as Record<string, unknown>).memory_deltas = [
+      { slot: 1, action: "add", content: "delta-1" },
+    ];
+    const { compacted, archived_keys } = compactHandoff(h);
+    expect((compacted as Record<string, unknown>).memory_deltas).toBeUndefined();
     expect(archived_keys).toContain("memory_deltas");
   });
 
@@ -114,12 +121,11 @@ describe("compactHandoff", () => {
     expect(compacted_size).toBeLessThan(original_size);
   });
 
-  it("handles a handoff with no active_context or memory_deltas gracefully", () => {
+  it("handles a minimal handoff with no active_context gracefully", () => {
     const minimal: Handoff = {
-      tasks: { completed: [], open: ["a"], blocked: [] },
       tone_notes: "short",
       stored_at: "2026-04-17T10:00:00.000-04:00",
-      schema_version: "1.2",
+      schema_version: "1.3",
     };
     const { compacted, archived_keys } = compactHandoff(minimal);
     expect(compacted.tone_notes).toBe("short");
