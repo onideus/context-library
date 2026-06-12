@@ -21,8 +21,9 @@ const TEST_PORT = 3197;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_DATA_DIR = join(process.cwd(), "data", "test-tasks");
 
-// Use test-specific Postgres database to avoid conflicts
-const PG_DATABASE = "cl_test";
+// Dedicated per-suite database so count assertions and migrations cannot
+// race with the other Postgres-gated suites running in parallel.
+const PG_DATABASE = "cl_test_tasks";
 const PG_USER = process.env.PGUSER ?? "cl";
 const PG_PASSWORD = process.env.PGPASSWORD ?? "test";
 const PG_HOST = process.env.PGHOST ?? "localhost";
@@ -75,8 +76,26 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
 
 async function checkPostgres(): Promise<boolean> {
   try {
-    // Try to connect using pg to check if Postgres is available
     const pg = await import("pg");
+
+    // Ensure the test database exists — connect to default 'postgres' first.
+    const admin = new pg.default.Client({
+      host: PG_HOST,
+      port: parseInt(PG_PORT),
+      user: PG_USER,
+      password: PG_PASSWORD,
+      database: "postgres",
+    });
+    await admin.connect();
+    const exists = await admin.query(
+      "SELECT 1 FROM pg_database WHERE datname = $1",
+      [PG_DATABASE]
+    );
+    if (exists.rowCount === 0) {
+      await admin.query(`CREATE DATABASE ${PG_DATABASE}`);
+    }
+    await admin.end();
+
     const client = new pg.default.Client({
       host: PG_HOST,
       port: parseInt(PG_PORT),
@@ -86,12 +105,12 @@ async function checkPostgres(): Promise<boolean> {
     });
     await client.connect();
 
-    // Clean tasks table for test isolation
-    await client.query("DROP TABLE IF EXISTS tasks CASCADE");
-    await client.query("DROP TABLE IF EXISTS _migrations CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_status CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_scope CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_priority CASCADE");
+    // Clean slate for test isolation. Drop the whole schema rather than
+    // individual tables: dropping _migrations makes the server re-apply all
+    // migrations, and any table left over from a previous run would abort
+    // the migration runner with "already exists".
+    await client.query("DROP SCHEMA public CASCADE");
+    await client.query("CREATE SCHEMA public");
 
     await client.end();
     return true;

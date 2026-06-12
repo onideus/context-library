@@ -40,7 +40,7 @@ services:
     container_name: context-library-embeddings
     profiles: [embeddings-gpu]
     restart: always
-    ports: ['8090:80']
+    ports: ['127.0.0.1:8090:80']
     command: --model-id ${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v2-moe} --port 80
     volumes:
       - ./data/models:/data
@@ -67,7 +67,7 @@ services:
     container_name: context-library-embeddings
     profiles: [embeddings-cpu]
     restart: always
-    ports: ['8090:80']
+    ports: ['127.0.0.1:8090:80']
     command: --model-id ${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v2-moe} --port 80
     volumes:
       - ./data/models:/data
@@ -87,7 +87,7 @@ services:
     container_name: context-library-embeddings
     profiles: [embeddings-arm64]
     restart: always
-    ports: ['8090:80']
+    ports: ['127.0.0.1:8090:80']
     command: --model-id ${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v2-moe} --port 80
     volumes:
       - ./data/models:/data
@@ -111,7 +111,7 @@ services:
     container_name: context-library-reranker
     profiles: [reranker-gpu]
     restart: always
-    ports: ['8091:80']
+    ports: ['127.0.0.1:8091:80']
     command: --model-id ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2} --port 80
     volumes:
       - ./data/models:/data
@@ -137,7 +137,7 @@ services:
     container_name: context-library-reranker
     profiles: [reranker-cpu]
     restart: always
-    ports: ['8091:80']
+    ports: ['127.0.0.1:8091:80']
     command: --model-id ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2} --port 80
     volumes:
       - ./data/models:/data
@@ -156,7 +156,7 @@ services:
     container_name: context-library-reranker
     profiles: [reranker-arm64]
     restart: always
-    ports: ['8091:80']
+    ports: ['127.0.0.1:8091:80']
     command: --model-id ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2} --port 80
     volumes:
       - ./data/models:/data

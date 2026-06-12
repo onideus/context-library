@@ -440,7 +440,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       // Fire-and-forget background indexing — MUST NOT block or fail the handoff
       indexHandoff(filename, handoff).catch(err =>
-        console.warn("[store_handoff] Background indexing failed:", err.message)
+        console.warn("[store_handoff] Background indexing failed:", (err as Error).message)
       );
 
       // Fire-and-forget entity extraction
@@ -664,7 +664,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       // Fire-and-forget background indexing
       indexHandoff(newFilename, merged as Record<string, unknown>).catch(err =>
-        console.warn("[patch_handoff] Background indexing failed:", err.message)
+        console.warn("[patch_handoff] Background indexing failed:", (err as Error).message)
       );
 
       // Fire-and-forget entity extraction

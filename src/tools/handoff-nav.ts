@@ -58,7 +58,7 @@ Parameters:
 
 Returns: The handoff content filtered by scope plus retrieved_at, elapsed_seconds, same_calendar_day, task_summary, applied_scope, filtered_fields (if scope != full), schema_version.
 
-Errors: Returns {error: true, code: "NOT_FOUND"} if the filename doesn't exist or fails validation.`;
+Errors: Returns {error: true, code: "NOT_FOUND"} if the filename doesn't exist or fails validation, or {error: true, code: "PARSE_ERROR"} if the file exists but is not valid JSON.`;
 
 // ── Tool Registration ──────────────────────────────────────────────
 
@@ -188,7 +188,19 @@ export function registerHandoffNavTools(mcpServer: McpServer): void {
       }
 
       const filepath = join(HANDOFFS_DIR(), args.filename);
-      const handoff = await read<Handoff>(filepath);
+      // read() rethrows JSON.parse errors — a corrupt file must surface as a
+      // tool error, not an unhandled exception (list_handoffs tolerates the
+      // same case by returning null metadata)
+      let handoff: Handoff | null;
+      try {
+        handoff = await read<Handoff>(filepath);
+      } catch {
+        return jsonResponse({
+          error: true,
+          code: "PARSE_ERROR",
+          message: "Handoff file exists but could not be parsed",
+        });
+      }
       if (!handoff) {
         return jsonResponse({
           error: true,

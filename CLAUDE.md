@@ -1,6 +1,6 @@
 # Context Library
 
-> **Last verified:** May 2026 (v0.8.0, commit 21c0848). If this file seems wrong, it probably is — check the source.
+> **Last verified:** June 2026 (v0.10.0, commit 4151b25). If this file seems wrong, it probably is — check the source.
 
 ## What This Is
 
@@ -57,6 +57,10 @@ All four content layers are built and deployed.
 
 `search_context` and `reindex` provide hybrid semantic search (pgvector cosine similarity + FTS with Reciprocal Rank Fusion) across all indexed content types. Results are deduplicated by content fingerprint, keeping the oldest source file.
 
+### Entity Graph (Tier 4, optional)
+
+Not a fifth content primitive — a knowledge graph extracted *from* the four layers. When `ENTITY_EXTRACTION_ENABLED=true`, handoff and note writes trigger fire-and-forget extraction of entity triples (subject → relation → object) via a configured provider (Ollama, Anthropic/OpenAI-compatible API, or MCP sampling). Stored in `entity_nodes`/`entity_relations`/`extraction_runs` (migration `009_entity_graph.sql`). Tools: `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`. The server also registers MCP prompts (`session_start`, `architect`, `plan`) as workflow entry points.
+
 ## Tool Design
 
 Every tool description is a **cold-start briefing**. The model reads it with zero prior context about Context Library. Descriptions must be self-contained: explain what the tool does, what each parameter means, what the return shape looks like, and any usage guidance (e.g., "call get_latest_handoff before patching"). This is critical because different MCP clients inject tool descriptions differently and the model may have no system prompt context about this server.
@@ -85,8 +89,22 @@ src/
     search.ts              # search_context (hybrid), reindex
     search-aliases.ts      # Query alias expansion for semantic search
     entities.ts            # Entity seed loading + context_envelope generation
+    entity-tools.ts        # Entity graph tools: extract_entities, run_extraction,
+                           #   compare_extractions, list_extraction_runs,
+                           #   browse_entities, entity_relations
+    prompts.ts             # MCP prompts: session_start, architect, plan
     compaction.ts          # Handoff compaction logic
     validation.ts          # Shared input validation utilities
+  entities/
+    pipeline.ts            # Extraction pipeline (extractAndStore, fire-and-forget)
+    prompts.ts             # Extraction prompt templates
+    registry.ts            # Provider registry (registerProvider/getProvider)
+    store.ts               # entity_nodes/entity_relations persistence
+    types.ts               # Shared entity graph types
+    providers/
+      ollama.ts            # Ollama provider (local LLM extraction)
+      api.ts               # Anthropic/OpenAI-compatible API provider
+      sampling.ts          # MCP sampling provider (in-request only, no background jobs)
   db/
     client.ts              # pg.Pool singleton
     migrate.ts             # Sequential SQL migration runner
@@ -101,6 +119,7 @@ src/
       006_artifacts.sql    # artifacts table
       007_pending_embeddings_expand.sql  # Expand pending queue for notes/artifacts
       008_artifact_integrity.sql  # execution_order uniqueness, dependency validation
+      009_entity_graph.sql # entity_nodes, entity_relations, extraction_runs
   embeddings/
     client.ts              # TEI client
     indexer.ts             # Embedding indexer with pending queue
@@ -117,6 +136,8 @@ src/
     artifact-type-normalization.test.ts  # Unit: type normalization
     backfill-content-hashes.test.ts  # Integration: content_hash backfill (Postgres-gated)
     entities.test.ts       # Integration: entity seed + context_envelope
+    handoff-nav.test.ts    # Integration: list_handoffs/get_handoff + path traversal
+    task-summary.test.ts   # Integration: dynamic task_summary (Postgres-gated)
     compaction.test.ts     # Integration: handoff compaction
     pending-embeddings.test.ts  # Integration: dead letter queue
     rerank.test.ts         # Unit: reranker integration
@@ -132,6 +153,7 @@ The `scripts/` directory contains tooling for one-off operations, data migration
 - `extract-entities.ts` — Reads handoff JSON files from the configured data directory, batches them to the Anthropic API for entity extraction, and writes/merges a draft `entities.seed.json` for human review. Idempotent: an existing seed file is merged, preserving human-edited constraints. Exposed as `npm run extract-entities`. Requires `ANTHROPIC_API_KEY`.
 - `merge-entities.ts` — Pure merge logic for the entity seeding pipeline. Extracted from `extract-entities.ts` for testability. Not directly runnable.
 - `extract-entities.test.ts` — Test suite for the extraction and merge logic (lives in `scripts/`, not `src/__tests__/`).
+- `test-compose.sh` — Validates every supported Docker Compose stacking combination via `docker compose config -q`. Run before opening a PR that touches any `docker-compose*.yml` file (CI does not validate compose).
 
 ## Database
 
@@ -145,10 +167,13 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `notes` — UUID PK, title, content, scope, domain, tags (text[]), source_url, related_task_ids (uuid[]), timestamps. FTS on title+content.
 - `artifacts` — UUID PK, title, content, artifact_type, status (enum), scope, tags (text[]), pointer (JSONB), dependencies (uuid[]), execution_order (integer, unique per type), related_task_ids (uuid[]), metadata (JSONB), timestamps. FTS on title+content. `content_hash` (SHA-256 hex string) is auto-computed server-side and stored inside `metadata` whenever `content` is provided on `store_artifact` or `update_artifact`. The server-computed hash overrides any caller-supplied value. The hash is cleared on revert to `draft`. The tool layer strips any caller-supplied `content_hash` from metadata updates on all statuses when content is not changing in the same call. On promotion to a locked status, content_hash is recomputed from current row content if missing from metadata.
 - `entities` — Entity knowledge base for context_envelope generation. Seeded from deployment-local JSON.
+- `entity_nodes` — Canonical extracted entities, deduplicated across extraction runs. UNIQUE(canonical_name, entity_type), mention counting, first/last seen timestamps.
+- `entity_relations` — Knowledge graph triples (source → relation_type → target) with confidence, provider attribution, and back-reference to the source content item.
+- `extraction_runs` — One row per extraction invocation: provider, model, status, counts, timing. Enables compare_extractions across providers/models.
 - `pending_embeddings` — Dead letter queue for embeddings that failed during TEI outages. Drained on startup and on next successful search_context/reindex.
 - `_migrations` — filename PK, applied_at timestamp.
 
-**Migration count:** 8 migrations (001 through 008).
+**Migration count:** 9 migrations (001 through 009).
 
 **Connection:** `pg.Pool` singleton in `src/db/client.ts`. Max 5 connections, 3-second connect timeout (fail fast when Postgres is unavailable). Uses standard PG* env vars.
 
@@ -191,6 +216,7 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `docker-compose.postgres.yml` — Adds Postgres (pgvector/pgvector:pg16), healthcheck, PG* env vars injected into context-library. Data at `./data/postgres`.
 - `docker-compose.embeddings.yml` — Adds TEI via `--profile` flag: `embeddings-gpu` (CUDA/NVIDIA), `embeddings-cpu` (x86_64), `embeddings-arm64` (Apple Silicon/ARM servers). Reranker profiles: `reranker-gpu`, `reranker-cpu`, `reranker-arm64`. All profiles use network alias `embeddings`/`reranker` so URLs stay the same. With no profile, no TEI or reranker service starts.
 - `docker-compose.auth.yml` — Adds mcp-auth-proxy for OAuth 2.1. No ports published (needs tunnel). Mounts `./proxy-data` and `./proxy-certs`.
+- `docker-compose.entities.yml` — Passes entity extraction env vars (ENTITY_EXTRACTION_*, OLLAMA_*) into the context-library container for Tier 4 entity graph extraction. Adds no services — Ollama runs externally and is not managed by Compose. Extraction is disabled by default.
 
 **Postgres Dockerfile** (`postgres.Dockerfile`): Single line — `FROM pgvector/pgvector:pg16`. Referenced by `docker-compose.postgres.yml`.
 
@@ -205,7 +231,7 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned.
 - **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `image.yml` normally (GITHUB_TOKEN pushes do not trigger downstream workflows).
 - **`cleanup.yml`** — Cleans up old container images and stale resources.
 
-CI does NOT validate Docker Compose startup. See the compose-validation workflow (if present) or run `scripts/test-compose.sh` locally.
+CI does NOT validate Docker Compose configuration or startup. Run `scripts/test-compose.sh` locally before merging changes to any `docker-compose*.yml` file.
 
 ## Environment Variables
 
@@ -219,6 +245,7 @@ Key variables:
 - `CORS_ORIGINS` (default: `https://claude.ai,https://claude.com`) — Comma-separated allowed origins.
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.
+- `ENTITY_EXTRACTION_ENABLED` (default: `false`) — Enable background entity graph extraction on handoff/note writes. Related: `ENTITY_EXTRACTION_PROVIDER` (`ollama`/`api`/`none`), `ENTITY_EXTRACTION_ASYNC`, `ENTITY_MIN_CONFIDENCE`, `ENTITY_EXTRACTION_TIMEOUT_MS`, `OLLAMA_BASE_URL`, `OLLAMA_EXTRACTION_MODEL`, `ENTITY_API_KEY`, `ENTITY_API_BASE_URL`, `ENTITY_API_MODEL`, `ENTITY_API_FORMAT`. See the README env var tables for defaults.
 - `APP_VERSION` — Injected by Docker build; falls back to reading package.json at runtime.
 
 ## Development
@@ -239,10 +266,12 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 ```json
 {
   "status": "ok",       // string — always "ok" when the server is up
-  "version": "0.8.0",  // string — semver from package.json / APP_VERSION env var
+  "version": "0.10.0", // string — semver from package.json / APP_VERSION env var
   "uptime": 42          // integer — seconds since process start
 }
 ```
+
+Readiness at `/health/ready` — verifies the data directory is writable by round-tripping a temp file. Returns `{status: "ok", writable: true, uptime}` with HTTP 200, or `{status: "degraded", writable: false, uptime}` with HTTP 503.
 
 For contribution guidelines (PR process, branch naming, review expectations), see `CONTRIBUTING.md` in the repo root.
 

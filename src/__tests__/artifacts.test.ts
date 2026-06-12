@@ -102,16 +102,12 @@ async function checkPostgres(): Promise<boolean> {
     });
     await client.connect();
 
-    // Clean slate for test isolation
-    await client.query("DROP TABLE IF EXISTS artifacts CASCADE");
-    await client.query("DROP TABLE IF EXISTS notes CASCADE");
-    await client.query("DROP TABLE IF EXISTS tasks CASCADE");
-    await client.query("DROP TABLE IF EXISTS embeddings CASCADE");
-    await client.query("DROP TABLE IF EXISTS pending_embeddings CASCADE");
-    await client.query("DROP TABLE IF EXISTS _migrations CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_status CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_scope CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_priority CASCADE");
+    // Clean slate for test isolation. Drop the whole schema rather than
+    // individual tables: dropping _migrations makes the server re-apply all
+    // migrations, and any table left over from a previous run would abort
+    // the migration runner with "already exists".
+    await client.query("DROP SCHEMA public CASCADE");
+    await client.query("CREATE SCHEMA public");
 
     await client.end();
     return true;
@@ -722,7 +718,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         content: "attempted mutation",
       });
       expect(result.error).toBe(true);
-      expect(result.code).toBe("cannot_modify_locked_artifact");
+      expect(result.code).toBe("CANNOT_MODIFY_LOCKED_ARTIFACT");
     });
 
     it("update_artifact rejects content modification when status is 'executing'", async () => {
@@ -740,7 +736,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         content: "attempted mutation",
       });
       expect(result.error).toBe(true);
-      expect(result.code).toBe("cannot_modify_locked_artifact");
+      expect(result.code).toBe("CANNOT_MODIFY_LOCKED_ARTIFACT");
     });
 
     it("update_artifact rejects content modification when status is 'completed'", async () => {
@@ -759,7 +755,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         content: "attempted mutation",
       });
       expect(result.error).toBe(true);
-      expect(result.code).toBe("cannot_modify_locked_artifact");
+      expect(result.code).toBe("CANNOT_MODIFY_LOCKED_ARTIFACT");
     });
 
     it("update_artifact clears content_hash when reverting 'ready' → 'draft'", async () => {

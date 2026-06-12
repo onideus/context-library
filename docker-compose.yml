@@ -9,4 +9,6 @@ services:
     volumes:
       - ./data:/app/data
     env_file:
-      - .env
+      # Optional so a fresh checkout validates without a .env (requires Compose v2.24+)
+      - path: .env
+        required: false
