@@ -56,7 +56,7 @@ The store is append-only for three reasons that matter to the pipeline:
 2. **Recoverability from bad writes.** A model that hallucinates a handoff, or a client that sends a truncated payload, cannot destroy prior state. It can only append a new file that the operator can then reject or overwrite with a corrected `store_handoff`.
 3. **Embedding lineage.** Each handoff file is indexed separately. The semantic search index can be replayed against the history without reconstructing a mutation log.
 
-The trade-off is disk cost. That is what `RETENTION_COUNT` and [handoff compaction](../../src/tools/compaction.ts) address.
+The trade-off is disk cost. That is what `RETENTION_COUNT` and handoff compaction (`npm run compact-history`) address.
 
 ## Anti-patterns to avoid
 

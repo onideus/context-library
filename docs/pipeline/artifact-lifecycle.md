@@ -41,7 +41,7 @@ The interceptor's polling query is `list_artifacts({artifact_type: "cc-prompt", 
 
 ### executing — claimed by an executor
 
-`executing` doubles as a **mutex**. The interceptor claims work by transitioning `ready → executing` atomically; a second interceptor that queries afterward will not see the artifact in its result set. If two interceptors race, the losing update surfaces as an invalid status transition (`executing → executing` is a no-op at the tool layer but the row's existing state signals the race to a caller that expected `ready`).
+`executing` doubles as a **claim marker**. The interceptor claims work by transitioning `ready → executing`; a second interceptor that queries `status: "ready"` afterward will not see the artifact in its result set. Race detection is the interceptor's responsibility, not the tool layer's: `executing → executing` is treated as a valid no-op at the server, so a losing interceptor's `update_artifact` call still returns success. The pattern for detecting the race is to write a `metadata.claimed_by` identifier on the update and re-read the row — if the round-tripped value is not yours, another interceptor won the claim. See the claim pseudocode in [build-your-own-interceptor.md](build-your-own-interceptor.md).
 
 An `executing` artifact is a **claim**, not a proof of progress. If the executor crashes, the artifact stays `executing` until manual recovery. See the failure handling section in [build-your-own-interceptor.md](build-your-own-interceptor.md).
 

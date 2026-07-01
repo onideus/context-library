@@ -40,7 +40,7 @@ loop:
 
 Two contracts matter here.
 
-**Claiming is a status transition, not a lock table.** `update_artifact(id, status: "executing")` is the mutex. If two interceptors race, the second `update_artifact` will still succeed (the row is now `executing`), but you can detect the race by re-reading the row's `updated_at` immediately after and comparing to the value you saw on the polling read. If they differ by more than a jitter tolerance, back off. Alternatively, add a `metadata.claimed_by` field on the claim update and verify it round-trips.
+**Claiming is a status transition, not a lock table.** `update_artifact(id, status: "executing")` is the claim. The tool layer treats `executing → executing` as a valid no-op, so if two interceptors race, both updates will return success — the server does not fail one of them. Detect the race yourself by writing a `metadata.claimed_by` identifier on the claim update and re-reading the row: whichever interceptor's identifier round-trips wins the claim; the other backs off. This is the same detection story described under the `executing` state in [artifact-lifecycle.md](artifact-lifecycle.md).
 
 **Dependencies are your responsibility to honor.** `list_artifacts` does not filter by dependency status. Read the artifact, look up each dependency's status, skip if any are not `completed`, `superseded`, or explicitly waived. Re-poll — an artifact that isn't ready this cycle might be ready next cycle.
 

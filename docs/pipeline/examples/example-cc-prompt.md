@@ -2,6 +2,8 @@
 
 This is a complete, fabricated CC-prompt artifact. It illustrates the shape the interceptor consumes as documented in [build-your-own-interceptor.md](../build-your-own-interceptor.md). Everything below the `---` divider is what would live in the artifact's `content` field. The block above is the metadata the interceptor reads directly.
 
+The JSON block below shows the artifact's structured fields *as they exist in the row* — `title`, `status`, `tags`, `metadata`, etc. are stored as separate columns/JSONB, not parsed out of the artifact body. Only the prose after the divider is the `content` field the interceptor hands to the agent.
+
 ## Artifact metadata
 
 ```json

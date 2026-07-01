@@ -35,6 +35,6 @@
     }
   },
   "tone_notes": "Session was productive — operator prefers terse confirmations over restated plans. When resuming, don't recap the conversation arc; just report state of the ready batch.",
-  "timezone": "America/Denver",
+  "timezone": "UTC",
   "schema_version": "1.3"
 }
