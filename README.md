@@ -113,6 +113,12 @@ Extraction is disabled by default (`ENTITY_EXTRACTION_ENABLED=false`) and is ful
 
 Each component degrades gracefully when unavailable. If Postgres is down, handoffs still work. If the embedding server is unreachable, task, note, and artifact search still works via full-text search; failed embeddings are queued for automatic retry when TEI comes back.
 
+## The Autonomous Pipeline Pattern
+
+The four content primitives (handoffs, tasks, notes, artifacts) are enough substrate to run an autonomous build pipeline against your own repositories. A planning session stores `ready` artifacts. A separate interceptor process polls `list_artifacts`, claims work by transitioning status to `executing`, runs the artifact content as a prompt against a target repo, opens a PR, gates the merge behind adversarial review + CI, and writes a digest note back to Context Library.
+
+The reference implementation is private. What is documented here is the pattern — the contracts between planner, artifact store, interceptor, and review gate — so you can build your own on top of a Tier 2+ deployment. See [docs/pipeline/](docs/pipeline/README.md) for the full write-up: lifecycle rules, governance model, replication spec, and worked example.
+
 ## MCP Tools
 
 | Tool | Tier | Description |
