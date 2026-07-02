@@ -27,7 +27,7 @@ docker compose up -d
 
 **Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`, `list_handoffs`, `get_handoff`
 
-> Handoff files are retained indefinitely by default. To enable automatic pruning of old handoffs, set `RETENTION_COUNT` to a positive number (e.g., `5000`).
+> Handoff files are retained indefinitely by default (`RETENTION_COUNT=0`). For long-lived deployments, set `RETENTION_COUNT` to a positive number (e.g., `5000`) to cap disk growth — older handoffs are pruned along with their search-index entries. The tradeoff: higher retention keeps more history searchable; lower retention keeps the disk footprint tight. Compaction (automatic after each store) reduces per-file size either way.
 
 ### Tier 2: + PostgreSQL (Tasks + Knowledge + Artifacts + Full-Text Search)
 
@@ -89,6 +89,18 @@ When the reranker is not configured or unreachable, `search_context` falls back 
 >
 > Then set `EMBEDDING_URL=http://host.docker.internal:8090` (Docker) or `EMBEDDING_URL=http://localhost:8090` (local dev) so Context Library can reach it.
 
+### Tier 4: + Entity Extraction (Knowledge Graph)
+
+Adds background extraction of entity triples (subject → relation → object) from handoffs and notes into a queryable knowledge graph. Extraction runs against an external LLM provider — either a local Ollama instance or an Anthropic/OpenAI-compatible API.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.entities.yml up -d
+```
+
+Extraction is disabled by default (`ENTITY_EXTRACTION_ENABLED=false`) and is fully fire-and-forget: if the provider is unreachable, handoff and note writes still succeed and a warning is logged. Ollama itself is not managed by Compose — point `OLLAMA_BASE_URL` at wherever it runs.
+
+**Additional tools:** `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`
+
 ## Architecture
 
 - **Server:** Hono 4.x + StreamableHTTP MCP transport (Node.js 22, TypeScript)
@@ -134,22 +146,30 @@ The reference implementation is private. What is documented here is the pattern 
 | `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types |
 | `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, notes, and artifacts |
+| `extract_entities` | Entities | Trigger entity extraction on a single content item |
+| `run_extraction` | Entities | Batch-extract entities from multiple content items |
+| `compare_extractions` | Entities | Compare two extraction runs (e.g., different providers or models) |
+| `list_extraction_runs` | Entities | List recent entity extraction runs with stats |
+| `browse_entities` | Entities | Browse the extracted entity graph with type and name filters |
+| `entity_relations` | Entities | Retrieve the relation graph for a specific entity |
+
+The server also registers three MCP prompts as workflow entry points: `session_start` (load handoff state at conversation start), `architect` (load prior design decisions before architecture discussions), and `plan` (load task and artifact state before planning).
 
 ## Health Checks
 
 The server exposes two health endpoints:
 
 - **`GET /health`** — Basic liveness check. Returns server status, version, and uptime.
-- **`GET /health/ready`** — Readiness check. Verifies the data directory is writable. Returns `"ok"` or `"degraded"` accordingly.
+- **`GET /health/ready`** — Readiness check. Verifies the data directory is writable. Returns `"ok"` (HTTP 200) or `"degraded"` (HTTP 503) accordingly.
 
 Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after deployment to confirm the server can write data.
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.7.1","uptime":42}
+# {"status":"ok","version":"0.10.0","uptime":42}
 
 curl http://localhost:3100/health/ready
-# {"status":"ok","archive":true,"uptime":42}
+# {"status":"ok","writable":true,"uptime":42}
 ```
 
 ## Quick Start
@@ -261,7 +281,7 @@ After connecting, ask your AI assistant to call `get_latest_handoff`. If it retu
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.7.1","uptime":42}
+# {"status":"ok","version":"0.10.0","uptime":42}
 ```
 
 ## External Access with Auth Proxy
@@ -331,8 +351,8 @@ Insecure images never reach the registry — Snyk gates the push. By the time a 
 **To cut a release:**
 
 ```bash
-git tag v0.7.1
-git push origin v0.7.1
+git tag v0.10.0
+git push origin v0.10.0
 ```
 
 Old SHA-tagged images are pruned weekly (90-day retention), preserving any image referenced by a release tag.
@@ -464,6 +484,22 @@ See `.env.example` for all configuration options.
 | `RERANKER_URL` | — | Cross-encoder reranker endpoint (optional; leave unset to disable) |
 | `SEARCH_ALIAS_PATH` | `./data/search-aliases.json` | Deployment-local search alias expansion file (optional) |
 | `ENTITY_SEED_PATH` | `./data/entities.seed.json` | Entity seed file for context envelopes (optional) |
+
+### Entity Extraction (Tier 4)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENTITY_EXTRACTION_ENABLED` | `false` | Enable background entity extraction on handoff/note writes |
+| `ENTITY_EXTRACTION_PROVIDER` | `none` | Extraction provider: `ollama`, `api`, or `none` |
+| `ENTITY_EXTRACTION_ASYNC` | `true` | Run extraction fire-and-forget (recommended) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint for the `ollama` provider |
+| `OLLAMA_EXTRACTION_MODEL` | `sciphi/triplex` | Ollama model used for triple extraction |
+| `ENTITY_MIN_CONFIDENCE` | `0.5` | Minimum confidence threshold for extracted triples (0–1) |
+| `ENTITY_EXTRACTION_TIMEOUT_MS` | `30000` | Timeout per extraction call in milliseconds |
+| `ENTITY_API_KEY` | — | API key for the `api` provider (leave unset to disable) |
+| `ENTITY_API_BASE_URL` | `https://api.anthropic.com` | Base URL for the `api` provider |
+| `ENTITY_API_MODEL` | `claude-sonnet-4-20250514` | Model used by the `api` provider |
+| `ENTITY_API_FORMAT` | `anthropic` | API wire format: `anthropic` or `openai` |
 
 ### Auth Proxy (External Access)
 

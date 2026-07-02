@@ -61,7 +61,7 @@ Returns: The handoff content filtered by scope plus retrieved_at, elapsed_second
 
 artifact_summary scopes recently_completed to artifacts whose status transitioned to 'completed' after this handoff's stored_at — useful for spotting in-flight items the handoff narrates that have since finished. Null when Postgres is unavailable.
 
-Errors: Returns {error: true, code: "NOT_FOUND"} if the filename doesn't exist or fails validation.`;
+Errors: Returns {error: true, code: "NOT_FOUND"} if the filename doesn't exist or fails validation, or {error: true, code: "PARSE_ERROR"} if the file exists but is not valid JSON.`;
 
 // ── Tool Registration ──────────────────────────────────────────────
 
@@ -191,7 +191,19 @@ export function registerHandoffNavTools(mcpServer: McpServer): void {
       }
 
       const filepath = join(HANDOFFS_DIR(), args.filename);
-      const handoff = await read<Handoff>(filepath);
+      // read() rethrows JSON.parse errors — a corrupt file must surface as a
+      // tool error, not an unhandled exception (list_handoffs tolerates the
+      // same case by returning null metadata)
+      let handoff: Handoff | null;
+      try {
+        handoff = await read<Handoff>(filepath);
+      } catch {
+        return jsonResponse({
+          error: true,
+          code: "PARSE_ERROR",
+          message: "Handoff file exists but could not be parsed",
+        });
+      }
       if (!handoff) {
         return jsonResponse({
           error: true,

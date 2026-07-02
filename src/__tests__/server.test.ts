@@ -82,6 +82,16 @@ beforeAll(async () => {
         ...process.env,
         MCP_PORT: String(TEST_PORT),
         DATA_DIR: TEST_DATA_DIR,
+        // This suite is file-based — force the Postgres-unavailable path
+        // deterministically by pointing pg at a closed port (instant
+        // ECONNREFUSED). Without this the server inherits PG* env or pg's
+        // defaults (localhost:5432, OS user, no password) and, when a local
+        // Postgres is running, every query fails mid-SASL-auth — node-postgres
+        // leaks the socket and the backend sits in authentication until
+        // timeout, exhausting connection slots for the Postgres-gated suites
+        // running in parallel.
+        PGHOST: "127.0.0.1",
+        PGPORT: "1",
       };
       // Remove APP_VERSION so getVersion() falls back to package.json, keeping
       // the version test valid in CI where Docker may have injected APP_VERSION.
@@ -165,6 +175,22 @@ describe("Health", () => {
     const embeddingStatus = body.embedding_status as Record<string, unknown>;
     expect(embeddingStatus).toBeDefined();
     expect(typeof embeddingStatus.available).toBe("boolean");
+  });
+
+  it("GET /health/ready returns 200 with writable=true when data dir is writable", async () => {
+    const res = await fetch(`${BASE_URL}/health/ready`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.status).toBe("ok");
+    expect(body.writable).toBe(true);
+    expect(typeof body.uptime).toBe("number");
+  });
+
+  it("GET /health/ready response contains ONLY status, writable, and uptime", async () => {
+    const res = await fetch(`${BASE_URL}/health/ready`);
+    const body = await res.json() as Record<string, unknown>;
+    const keys = Object.keys(body).sort();
+    expect(keys).toEqual(["status", "uptime", "writable"].sort());
   });
 
   // Negative test (proxy-side): verifies the auth bypass is scoped to /health.

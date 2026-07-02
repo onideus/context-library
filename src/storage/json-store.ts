@@ -43,7 +43,7 @@ export async function write<T>(filepath: string, data: T): Promise<void> {
 }
 
 /**
- * Write a handoff to the append-only handoffs/ directory and update the pointer file.
+ * Write a handoff to the append-only handoffs/ directory.
  * Returns the filename of the written handoff.
  */
 export async function writeHandoff<T>(data: T): Promise<string> {
@@ -78,8 +78,8 @@ export async function writeHandoff<T>(data: T): Promise<string> {
 
 /**
  * Overwrite an existing handoff file in place (atomic via temp file + rename).
- * Unlike writeHandoff, this does NOT create a new timestamped file, does NOT
- * update the pointer file, and does NOT prune. It is used only by compaction
+ * Unlike writeHandoff, this does NOT create a new timestamped file and does
+ * NOT prune. It is used only by compaction
  * to rewrite a previously-stored handoff with archived content removed.
  * Throws ENOENT if the file doesn't exist.
  */

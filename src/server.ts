@@ -20,6 +20,8 @@ import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
 import { isEmbeddingAvailable } from "./embeddings/client.js";
 import { readFileSync } from "node:fs";
+import { writeFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // Read version: prefer APP_VERSION env var, fall back to package.json
@@ -95,6 +97,27 @@ app.get("/health", async (c) => {
     uptime: Math.floor(process.uptime()),
     embedding_status: { available: embeddingAvailable },
   });
+});
+
+// Readiness check — verifies the data directory is writable by round-tripping
+// a temp file. Same unauthenticated surface rules as /health apply.
+app.get("/health/ready", async (c) => {
+  let writable = true;
+  try {
+    const probePath = join(config.dataDir, `.ready-probe-${randomUUID()}`);
+    await writeFile(probePath, "ok", "utf-8");
+    await unlink(probePath);
+  } catch {
+    writable = false;
+  }
+  return c.json(
+    {
+      status: writable ? "ok" : "degraded",
+      writable,
+      uptime: Math.floor(process.uptime()),
+    },
+    writable ? 200 : 503
+  );
 });
 
 // ── MCP transport route (authenticated) ─────────────────────

@@ -330,7 +330,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           scope: row.scope,
           created_at: row.created_at,
         }).catch((err) =>
-          console.warn("[store_artifact] Background indexing failed:", err.message)
+          console.warn("[store_artifact] Background indexing failed:", (err as Error).message)
         );
         return jsonResponse({
           id: row.id,
@@ -562,7 +562,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       if (args.content !== undefined && LOCKED_STATUSES.has(current.status)) {
         return errorResponse(
           `Cannot modify content of a locked artifact (status: ${current.status})`,
-          "cannot_modify_locked_artifact"
+          "CANNOT_MODIFY_LOCKED_ARTIFACT"
         );
       }
 
@@ -717,7 +717,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
             scope: row.scope,
             created_at: row.created_at,
           }).catch((err) =>
-            console.warn("[update_artifact] Background indexing failed:", err.message)
+            console.warn("[update_artifact] Background indexing failed:", (err as Error).message)
           );
         }
 

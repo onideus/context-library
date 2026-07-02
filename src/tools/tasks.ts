@@ -184,7 +184,7 @@ export function registerTaskTools(mcpServer: McpServer): void {
         );
         const newTask = result.rows[0];
         indexTask(newTask.id, newTask.title, newTask.context, newTask.scope, newTask.tags, newTask.status, newTask.created_at)
-          .catch(err => console.warn("[create_task] Background indexing failed:", err.message));
+          .catch(err => console.warn("[create_task] Background indexing failed:", (err as Error).message));
         return jsonResponse(formatTask(newTask));
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
@@ -439,7 +439,7 @@ export function registerTaskTools(mcpServer: McpServer): void {
         );
         const row = result.rows[0];
         indexTask(row.id, row.title, row.context, row.scope, row.tags, row.status, row.created_at)
-          .catch(err => console.warn("[update_task] Background indexing failed:", err.message));
+          .catch(err => console.warn("[update_task] Background indexing failed:", (err as Error).message));
         return jsonResponse(formatTask(row));
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");

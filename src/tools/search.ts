@@ -129,7 +129,7 @@ export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchRe
   return { deduped, preDedupCount };
 }
 
-const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across all indexed content — handoffs, tasks, notes, artifacts, documents.
+const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across all indexed content — handoffs, tasks, notes, artifacts.
 
 CALL THIS WHEN:
 - The conversation touches architecture, strategy, infrastructure, pipeline, deployment, or design decisions
@@ -187,7 +187,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
     {
       query: z.string().describe("Natural language search query"),
       content_types: z
-        .array(z.enum(["handoff", "task", "note", "artifact", "document", "transcript"]))
+        .array(z.enum(["handoff", "task", "note", "artifact"]))
         .optional()
         .describe("Filter by content type. Default: search all."),
       limit: z

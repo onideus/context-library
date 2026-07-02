@@ -32,23 +32,22 @@ Tests use Vitest. The `dist/` directory is excluded from test discovery to preve
 
 ### PostgreSQL Tests
 
-Task-related tests (~29 tests) require a running PostgreSQL instance. Without Postgres, these tests are automatically skipped. To run the full suite:
+Database-backed tests (~130 tests covering tasks, notes, artifacts, and entity tools) require a running PostgreSQL instance. Without Postgres, these tests are automatically skipped. To run the full suite:
 
 ```bash
 docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16
 ```
+
+Each Postgres-gated test file auto-creates and resets its own dedicated database (e.g., `cl_test_tasks`, `cl_test_notes`), so the full suite is safe to run with Vitest's default file parallelism — plain `npm test` works.
 
 ## Pull Requests
 
 1. Branch from `main`
 2. Keep commits focused — one logical change per commit
 3. Ensure `npm run build` and `npm test` pass
-4. Verify all 4 Docker Compose combinations validate:
+4. Verify all Docker Compose combinations validate (covers base, postgres, embeddings, auth, and entities overlays):
    ```bash
-   docker compose config -q
-   docker compose -f docker-compose.yml -f docker-compose.postgres.yml config -q
-   docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.embeddings.yml config -q
-   docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.auth.yml config -q
+   ./scripts/test-compose.sh
    ```
 5. Open a PR against `main` with a clear description of what and why
 

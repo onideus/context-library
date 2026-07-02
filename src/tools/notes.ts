@@ -161,7 +161,7 @@ export function registerNoteTools(mcpServer: McpServer): void {
           scope: row.scope,
           created_at: row.created_at,
         }).catch((err) =>
-          console.warn("[create_note] Background indexing failed:", err.message)
+          console.warn("[create_note] Background indexing failed:", (err as Error).message)
         );
         if (config.entityExtractionEnabled && config.entityExtractionAsync) {
           const noteText = [row.title, row.content].filter(Boolean).join("\n");
@@ -416,7 +416,7 @@ export function registerNoteTools(mcpServer: McpServer): void {
             scope: row.scope,
             created_at: row.created_at,
           }).catch((err) =>
-            console.warn("[update_note] Background indexing failed:", err.message)
+            console.warn("[update_note] Background indexing failed:", (err as Error).message)
           );
           if (config.entityExtractionEnabled && config.entityExtractionAsync) {
             const noteText = [row.title, row.content].filter(Boolean).join("\n");

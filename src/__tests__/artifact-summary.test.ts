@@ -94,15 +94,12 @@ async function checkPostgres(): Promise<boolean> {
     });
     await client.connect();
 
-    await client.query("DROP TABLE IF EXISTS artifacts CASCADE");
-    await client.query("DROP TABLE IF EXISTS notes CASCADE");
-    await client.query("DROP TABLE IF EXISTS tasks CASCADE");
-    await client.query("DROP TABLE IF EXISTS embeddings CASCADE");
-    await client.query("DROP TABLE IF EXISTS pending_embeddings CASCADE");
-    await client.query("DROP TABLE IF EXISTS _migrations CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_status CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_scope CASCADE");
-    await client.query("DROP TYPE IF EXISTS task_priority CASCADE");
+    // Clean slate for test isolation. Drop the whole schema rather than
+    // individual tables: dropping _migrations makes the server re-apply all
+    // migrations, and any table left over from a previous run would abort
+    // the migration runner with "already exists".
+    await client.query("DROP SCHEMA public CASCADE");
+    await client.query("CREATE SCHEMA public");
 
     await client.end();
     return true;
