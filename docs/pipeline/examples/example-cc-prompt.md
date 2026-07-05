@@ -29,7 +29,7 @@ The JSON block below shows the artifact's structured fields *as they exist in th
 Three fields carry the pipeline contract (see the table in [artifact-lifecycle.md](../artifact-lifecycle.md#pipeline-metadata-contract)):
 
 - `target_repo` is **required**. An interceptor watching for `ready` cc-prompts will demote any artifact missing it back to `draft`, because it has no way to resolve where to execute. The prior `branch_target` key is deprecated in favor of this.
-- `target_org` is optional and falls back to the interceptor's configured default org when absent.
+- `target_org` is optional and defaults per interceptor config when omitted.
 - `content_hash` is **not shown here on purpose** — Context Library computes and stores it server-side on promotion to a locked status. Callers must not supply it; any caller-supplied value is stripped. The interceptor recomputes and verifies before executing (see the executor contract in [build-your-own-interceptor.md](../build-your-own-interceptor.md#3-the-executor-contract)).
 
 ---

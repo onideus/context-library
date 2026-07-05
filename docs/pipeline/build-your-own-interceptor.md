@@ -40,7 +40,7 @@ loop:
 
 Two contracts matter here.
 
-**Claiming is a status transition, not a lock table.** `update_artifact(id, status: "executing")` is the claim. The tool layer runs the write as a conditional UPDATE: it lands only if the row is still in the caller's expected status (defaulting to the status read at the top of the `update_artifact` call, overridable via `expected_status`). If two interceptors both read the artifact while it is `ready` and race to claim, the first UPDATE lands and returns the row; the second gets `STATUS_CONFLICT` with the current server state and re-polls. Optionally include a `metadata.claimed_by` identifier on the claim update as an audit-trail record of which interceptor holds the claim — it is a supplement to `STATUS_CONFLICT`, not the primary race signal. This matches the executing-state description in [artifact-lifecycle.md](artifact-lifecycle.md).
+**Claiming is a status transition, not a lock table.** `update_artifact(id, status: "executing")` is the claim. The tool layer runs the write as a conditional UPDATE: it lands only if the row is still in the caller's expected status (defaulting to the status read at the top of the `update_artifact` call, overridable via `expected_status`). If two interceptors both read the artifact while it is `ready` and race to claim, the first UPDATE lands and returns the row; the second gets `STATUS_CONFLICT` with the current server state and re-polls. Optionally include a `metadata.claimed_by` identifier on the claim update as an audit-trail record of which interceptor holds the claim — it is a supplement to `STATUS_CONFLICT`, not the primary race signal. Existing interceptors that detect races by reading back `metadata.claimed_by` remain correct; the server-side conditional UPDATE is a strict superset of that check, so no migration is required. This matches the executing-state description in [artifact-lifecycle.md](artifact-lifecycle.md).
 
 **Dependencies are your responsibility to honor.** `list_artifacts` does not filter by dependency status. Read the artifact, look up each dependency's status, skip if any are not `completed`, `superseded`, or explicitly waived. Re-poll — an artifact that isn't ready this cycle might be ready next cycle.
 
@@ -56,7 +56,7 @@ Why: if the interceptor decorates the prompt, then the behavior in production dr
 
 Steps the interceptor performs (not the agent):
 
-1. **Resolve the target repo.** The interceptor reads `metadata.target_repo` (required), optional `metadata.target_org` (defaults per your interceptor config when absent), `metadata.base_branch` (defaults to `main` or your convention), and `metadata.working_branch` (defaults to a derived name if absent). If `metadata.target_repo` is missing on a `ready` cc-prompt, demote it back to `draft` with a note in metadata explaining why — do not silently guess a target. `metadata.branch_target` is a deprecated legacy alias for `target_repo`; interceptors may fall back to it during the deprecation window, but new artifacts should not use it.
+1. **Resolve the target repo.** The interceptor reads `metadata.target_repo` (required), optional `metadata.target_org` (defaults per your interceptor config when absent), `metadata.base_branch` (defaults to `main` or your convention — this is an interceptor-side convention, not a server contract), and `metadata.working_branch` (defaults to a derived name if absent). If `metadata.target_repo` is missing on a `ready` cc-prompt, demote it back to `draft` with a note in metadata explaining why — do not silently guess a target. `metadata.branch_target` is a deprecated legacy alias for `target_repo`; interceptors may fall back to it during the deprecation window, but new artifacts should not use it.
 2. **Clone or worktree.** Fresh working directory per run. Never reuse.
 3. **Create the working branch** from the base branch.
 4. **Verify `content_hash`.** Recompute SHA-256 over the artifact's `content` and compare to `metadata.content_hash`. Context Library computes and locks this hash server-side on promotion to a locked status — the interceptor's job is only to verify. If they differ, abort and flag the artifact; it was mutated between poll and execution.
@@ -166,6 +166,9 @@ while (running) {
     if (!claimed) continue;
 
     try {
+      // artifact carries the fields we need for execution (metadata, content,
+      // etc.) — it was read at the top of the loop from list_artifacts and
+      // the claim above did not need to hand it back.
       await runPipeline(artifact);
     } catch (err) {
       await handleFailure(artifact, err);
@@ -179,13 +182,17 @@ async function claim(id: string): Promise<boolean> {
   // The conditional-UPDATE guard in update_artifact does the mutex work:
   // pass expected_status: "ready" and the write only lands if the row is
   // still ready. A racing interceptor gets STATUS_CONFLICT and re-polls.
+  //
+  // We treat "the row is now executing" as the claim signal — checking
+  // only for `code !== "STATUS_CONFLICT"` would silently classify unrelated
+  // errors (validation, transport, unknown codes) as a successful claim.
   const result = await mcp.callTool("update_artifact", {
     id,
     status: "executing",
     expected_status: "ready",
     metadata: { claimed_by: interceptorId, claimed_at: nowIso() },
   });
-  return result.code !== "STATUS_CONFLICT";
+  return result.status === "executing";
 }
 
 async function runPipeline(artifact: Artifact) {
