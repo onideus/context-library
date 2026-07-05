@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
+import { withTransaction, appendChange } from "../db/changes.js";
 import { indexArtifact } from "../embeddings/indexer.js";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -299,28 +300,32 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       }
 
       try {
-        const result = await query<ArtifactRow>(
-          `INSERT INTO artifacts (
-             title, artifact_type, content, pointer, status, scope,
-             tags, dependencies, execution_order, related_task_ids, metadata
-           )
-           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::uuid[], $9, $10::uuid[], $11::jsonb)
-           RETURNING *`,
-          [
-            args.title,
-            normalizedType,
-            args.content ?? null,
-            args.pointer ? JSON.stringify(args.pointer) : null,
-            status,
-            args.scope,
-            args.tags ?? [],
-            args.dependencies ?? [],
-            args.execution_order ?? null,
-            args.related_task_ids ?? [],
-            JSON.stringify(finalMetadata),
-          ]
-        );
-        const row = result.rows[0];
+        const row = await withTransaction(async (client) => {
+          const result = await client.query<ArtifactRow>(
+            `INSERT INTO artifacts (
+               title, artifact_type, content, pointer, status, scope,
+               tags, dependencies, execution_order, related_task_ids, metadata
+             )
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::uuid[], $9, $10::uuid[], $11::jsonb)
+             RETURNING *`,
+            [
+              args.title,
+              normalizedType,
+              args.content ?? null,
+              args.pointer ? JSON.stringify(args.pointer) : null,
+              status,
+              args.scope,
+              args.tags ?? [],
+              args.dependencies ?? [],
+              args.execution_order ?? null,
+              args.related_task_ids ?? [],
+              JSON.stringify(finalMetadata),
+            ]
+          );
+          const inserted = result.rows[0];
+          await appendChange(client, "artifact", inserted.id, "insert");
+          return inserted;
+        });
         indexArtifact(row.id, {
           title: row.title,
           content: row.content,
@@ -536,6 +541,9 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       execution_order: z.number().int().nullable().optional().describe("New execution_order, or null to clear"),
       related_task_ids: z.array(z.string()).optional().describe("New related task IDs (full replacement)"),
       metadata: z.record(z.unknown()).optional().describe("Metadata to merge (top-level keys)"),
+      expected_status: statusEnum.optional().describe(
+        "Optimistic concurrency precondition. When provided AND status is being changed, the UPDATE runs conditionally against this value — if the row is no longer in expected_status, returns STATUS_CONFLICT with current server state instead of silently overwriting a concurrent transition. When omitted, the row's current status (as of the read at the top of this call) is used as the precondition."
+      ),
     },
     async (args) => {
       let current: ArtifactRow;
@@ -696,11 +704,48 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           params.push(JSON.stringify(callerMeta ?? {}));
         }
 
-        const result = await query<ArtifactRow>(
-          `UPDATE artifacts SET ${sets.join(", ")} WHERE id = $${paramIdx} RETURNING *`,
-          [...params, args.id]
-        );
-        const row = result.rows[0];
+        // Conditional-UPDATE guard (item 3 from the June 10 review): when this
+        // update mutates status, gate the write on the row still being in the
+        // caller's expected status (defaults to whatever we just read). A
+        // concurrent transition means the caller's premise is wrong and we
+        // return STATUS_CONFLICT with the current server state, letting the
+        // caller reconcile instead of silently reverting the other writer.
+        const statusWillChange = args.status !== undefined && args.status !== current.status;
+        const expectedStatus = args.expected_status ?? current.status;
+        const idParamPos = paramIdx;
+        const conditionalClause = statusWillChange
+          ? ` AND status = $${paramIdx + 1}`
+          : "";
+        const finalParams = statusWillChange
+          ? [...params, args.id, expectedStatus]
+          : [...params, args.id];
+
+        const row = await withTransaction(async (client) => {
+          const upd = await client.query<ArtifactRow>(
+            `UPDATE artifacts SET ${sets.join(", ")} WHERE id = $${idParamPos}${conditionalClause} RETURNING *`,
+            finalParams
+          );
+          if (upd.rows.length === 0) return null;
+          await appendChange(client, "artifact", args.id, "update");
+          return upd.rows[0];
+        });
+
+        if (row === null) {
+          // Conditional lost — re-read so the caller sees whichever transition won.
+          const currentRes = await query<ArtifactRow>(
+            "SELECT * FROM artifacts WHERE id = $1",
+            [args.id]
+          );
+          if (currentRes.rows.length === 0) {
+            return errorResponse(`Artifact not found: ${args.id}`, "NOT_FOUND");
+          }
+          return jsonResponse({
+            error: true,
+            code: "STATUS_CONFLICT",
+            message: `Artifact status is no longer ${expectedStatus}; current status is ${currentRes.rows[0].status}`,
+            current: formatArtifact(currentRes.rows[0]),
+          });
+        }
 
         const contentChanged =
           args.title !== undefined ||

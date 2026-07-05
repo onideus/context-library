@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
+import { withTransaction, appendChange } from "../db/changes.js";
 import { indexTask } from "../embeddings/indexer.js";
 import { validateStringLength, PayloadTooLargeError, LIMITS } from "./validation.js";
 
@@ -167,22 +168,26 @@ export function registerTaskTools(mcpServer: McpServer): void {
       }
 
       try {
-        const result = await query<TaskRow>(
-          `INSERT INTO tasks (title, context, scope, priority, tags, blocked_reason, scheduled_date, due_date)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING *`,
-          [
-            args.title,
-            args.context ?? null,
-            args.scope,
-            args.priority ?? null,
-            args.tags ?? [],
-            args.blocked_reason ?? null,
-            args.scheduled_date ?? null,
-            args.due_date ?? null,
-          ]
-        );
-        const newTask = result.rows[0];
+        const newTask = await withTransaction(async (client) => {
+          const result = await client.query<TaskRow>(
+            `INSERT INTO tasks (title, context, scope, priority, tags, blocked_reason, scheduled_date, due_date)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [
+              args.title,
+              args.context ?? null,
+              args.scope,
+              args.priority ?? null,
+              args.tags ?? [],
+              args.blocked_reason ?? null,
+              args.scheduled_date ?? null,
+              args.due_date ?? null,
+            ]
+          );
+          const row = result.rows[0];
+          await appendChange(client, "task", row.id, "insert");
+          return row;
+        });
         indexTask(newTask.id, newTask.title, newTask.context, newTask.scope, newTask.tags, newTask.status, newTask.created_at)
           .catch(err => console.warn("[create_task] Background indexing failed:", (err as Error).message));
         return jsonResponse(formatTask(newTask));
@@ -349,6 +354,9 @@ export function registerTaskTools(mcpServer: McpServer): void {
       blocked_reason: z.string().nullable().optional().describe("Set blocked reason, or null to unblock"),
       scheduled_date: z.string().nullable().optional().describe("New scheduled date, or null to clear"),
       due_date: z.string().nullable().optional().describe("New due date, or null to clear"),
+      expected_status: statusEnum.optional().describe(
+        "Optimistic concurrency precondition. When provided AND the update mutates status (via 'action' or an explicit status change through sync), the UPDATE runs conditionally against this value — if the row is no longer in expected_status, returns STATUS_CONFLICT with current server state instead of silently overwriting a concurrent writer's change."
+      ),
     },
     async (args) => {
       try {
@@ -359,7 +367,9 @@ export function registerTaskTools(mcpServer: McpServer): void {
       }
 
       try {
-        // Check task exists
+        // Read-then-conditional-write: check existence, capture current status,
+        // and use it as the UPDATE precondition so concurrent status transitions
+        // return STATUS_CONFLICT instead of blindly overwriting.
         const existing = await query<TaskRow>(
           "SELECT * FROM tasks WHERE id = $1",
           [args.id]
@@ -367,10 +377,13 @@ export function registerTaskTools(mcpServer: McpServer): void {
         if (existing.rows.length === 0) {
           return errorResponse(`Task not found: ${args.id}`, "NOT_FOUND");
         }
+        const currentRow = existing.rows[0];
+        const expectedStatus = args.expected_status ?? currentRow.status;
 
         const sets: string[] = [];
         const params: unknown[] = [];
         let paramIdx = 1;
+        let statusWillChange = false;
 
         // Apply action shortcuts first
         if (args.action === "complete") {
@@ -380,19 +393,23 @@ export function registerTaskTools(mcpServer: McpServer): void {
           params.push(new Date().toISOString());
           sets.push(`blocked_reason = $${paramIdx++}`);
           params.push(null);
+          statusWillChange = true;
         } else if (args.action === "cancel") {
           sets.push(`status = $${paramIdx++}`);
           params.push("cancelled");
           sets.push(`blocked_reason = $${paramIdx++}`);
           params.push(null);
+          statusWillChange = true;
         } else if (args.action === "defer") {
           sets.push(`status = $${paramIdx++}`);
           params.push("deferred");
+          statusWillChange = true;
         } else if (args.action === "reopen") {
           sets.push(`status = $${paramIdx++}`);
           params.push("open");
           sets.push(`completed_at = $${paramIdx++}`);
           params.push(null);
+          statusWillChange = true;
         }
 
         // Apply field-level updates
@@ -433,11 +450,47 @@ export function registerTaskTools(mcpServer: McpServer): void {
           return errorResponse("No updates provided", "VALIDATION_ERROR");
         }
 
-        const result = await query<TaskRow>(
-          `UPDATE tasks SET ${sets.join(", ")} WHERE id = $${paramIdx} RETURNING *`,
-          [...params, args.id]
-        );
-        const row = result.rows[0];
+        // Conditional-UPDATE guard: when the update mutates status, gate the
+        // write on the row still being in the expected status. This is the
+        // "item 3" fix from the June 10 architecture review — a second writer
+        // that already advanced the status loses this write, and we return a
+        // typed STATUS_CONFLICT with the current server state so the caller
+        // (client sync push, or a chat racing the pipeline) can reconcile.
+        const idParam = `$${paramIdx++}`;
+        const conditional = statusWillChange
+          ? ` AND status = $${paramIdx++}`
+          : "";
+        const conditionalParams = statusWillChange ? [expectedStatus] : [];
+
+        const row = await withTransaction(async (client) => {
+          const upd = await client.query<TaskRow>(
+            `UPDATE tasks SET ${sets.join(", ")} WHERE id = ${idParam}${conditional} RETURNING *`,
+            [...params, args.id, ...conditionalParams]
+          );
+          if (upd.rows.length === 0) {
+            return null;
+          }
+          await appendChange(client, "task", args.id, "update");
+          return upd.rows[0];
+        });
+
+        if (row === null) {
+          // Re-read current state so the caller sees whatever status won.
+          const current = await query<TaskRow>(
+            "SELECT * FROM tasks WHERE id = $1",
+            [args.id]
+          );
+          if (current.rows.length === 0) {
+            return errorResponse(`Task not found: ${args.id}`, "NOT_FOUND");
+          }
+          return jsonResponse({
+            error: true,
+            code: "STATUS_CONFLICT",
+            message: `Task status is no longer ${expectedStatus}; current status is ${current.rows[0].status}`,
+            current: formatTask(current.rows[0]),
+          });
+        }
+
         indexTask(row.id, row.title, row.context, row.scope, row.tags, row.status, row.created_at)
           .catch(err => console.warn("[update_task] Background indexing failed:", (err as Error).message));
         return jsonResponse(formatTask(row));

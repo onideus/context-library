@@ -60,4 +60,17 @@ export const config = {
     const v = parseInt(process.env.ENTITY_GRAPH_MAX_CANDIDATES ?? "50", 10);
     return Number.isFinite(v) && v > 0 ? v : 50;
   })(),
+  // Sync bearer token for the reference authenticator. The repo commits the
+  // auth *boundary* (pluggable interface + static-token impl); deployments
+  // choose their own value via env. If unset, the /sync/* routes reject all
+  // requests — deployments must opt in to enable them.
+  syncBearerToken: process.env.SYNC_BEARER_TOKEN ?? null,
+  syncChangesMaxLimit: (function () {
+    const v = parseInt(process.env.SYNC_CHANGES_MAX_LIMIT ?? "500", 10);
+    return Number.isFinite(v) && v > 0 ? v : 500;
+  })(),
+  syncChangesDefaultLimit: (function () {
+    const v = parseInt(process.env.SYNC_CHANGES_DEFAULT_LIMIT ?? "100", 10);
+    return Number.isFinite(v) && v > 0 ? v : 100;
+  })(),
 } as const;

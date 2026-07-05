@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
+import { withTransaction, appendChange } from "../db/changes.js";
 import { indexNote } from "../embeddings/indexer.js";
 import { config } from "../config.js";
 import { extractAndStore } from "../entities/pipeline.js";
@@ -138,21 +139,25 @@ export function registerNoteTools(mcpServer: McpServer): void {
       }
 
       try {
-        const result = await query<NoteRow>(
-          `INSERT INTO notes (title, content, domain, tags, scope, source_url, related_task_ids)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING *`,
-          [
-            args.title,
-            args.content,
-            args.domain ?? null,
-            args.tags ?? [],
-            args.scope,
-            args.source_url ?? null,
-            args.related_task_ids ?? [],
-          ]
-        );
-        const row = result.rows[0];
+        const row = await withTransaction(async (client) => {
+          const result = await client.query<NoteRow>(
+            `INSERT INTO notes (title, content, domain, tags, scope, source_url, related_task_ids)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *`,
+            [
+              args.title,
+              args.content,
+              args.domain ?? null,
+              args.tags ?? [],
+              args.scope,
+              args.source_url ?? null,
+              args.related_task_ids ?? [],
+            ]
+          );
+          const inserted = result.rows[0];
+          await appendChange(client, "note", inserted.id, "insert");
+          return inserted;
+        });
         indexNote(row.id, {
           title: row.title,
           content: row.content,
@@ -396,11 +401,15 @@ export function registerNoteTools(mcpServer: McpServer): void {
           return errorResponse("No updates provided", "VALIDATION_ERROR");
         }
 
-        const result = await query<NoteRow>(
-          `UPDATE notes SET ${sets.join(", ")} WHERE id = $${paramIdx} RETURNING *`,
-          [...params, args.id]
-        );
-        const row = result.rows[0];
+        const row = await withTransaction(async (client) => {
+          const upd = await client.query<NoteRow>(
+            `UPDATE notes SET ${sets.join(", ")} WHERE id = $${paramIdx} RETURNING *`,
+            [...params, args.id]
+          );
+          const updated = upd.rows[0];
+          await appendChange(client, "note", args.id, "update");
+          return updated;
+        });
 
         const contentChanged =
           args.title !== undefined ||
@@ -442,11 +451,16 @@ export function registerNoteTools(mcpServer: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await query<{ id: string }>(
-          "DELETE FROM notes WHERE id = $1 RETURNING id",
-          [args.id]
-        );
-        if (result.rows.length === 0) {
+        const deleted = await withTransaction(async (client) => {
+          const result = await client.query<{ id: string }>(
+            "DELETE FROM notes WHERE id = $1 RETURNING id",
+            [args.id]
+          );
+          if (result.rows.length === 0) return null;
+          await appendChange(client, "note", args.id, "delete");
+          return result.rows[0];
+        });
+        if (deleted === null) {
           return errorResponse(`Note not found: ${args.id}`, "NOT_FOUND");
         }
 

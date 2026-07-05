@@ -96,6 +96,9 @@ src/
     prompts.ts             # MCP prompts: session_start, architect, plan
     compaction.ts          # Handoff compaction logic
     validation.ts          # Shared input validation utilities
+  db/
+    changes.ts             # Sync change-log helpers: appendChange (in-tx),
+                           #   withTransaction, appendChangeBestEffort (handoffs)
   entities/
     pipeline.ts            # Extraction pipeline (extractAndStore, fire-and-forget)
     prompts.ts             # Extraction prompt templates
@@ -121,6 +124,11 @@ src/
       007_pending_embeddings_expand.sql  # Expand pending queue for notes/artifacts
       008_artifact_integrity.sql  # execution_order uniqueness, dependency validation
       009_entity_graph.sql # entity_nodes, entity_relations, extraction_runs
+      010_task_scope_shared.sql  # Extends task_scope enum to include 'shared'
+      011_changes_log.sql  # changes table + sync_op_log for sync foundation
+  sync/
+    auth.ts                # SyncAuthenticator interface + StaticTokenAuthenticator + middleware
+    routes.ts              # GET /sync/changes, POST /sync/push (bearer-token protected)
   embeddings/
     client.ts              # TEI client
     indexer.ts             # Embedding indexer with pending queue
@@ -144,6 +152,10 @@ src/
     pending-embeddings.test.ts  # Integration: dead letter queue
     rerank.test.ts         # Unit: reranker integration
     validation.test.ts     # Unit: input validation
+    sync.test.ts           # Integration: change-log atomicity, cursor idempotency,
+                           #   push dedupe, individual stale rejection,
+                           #   conditional-UPDATE race, patch_handoff conflict
+                           #   (Postgres-gated)
 ```
 
 ### Operational scripts
@@ -173,9 +185,36 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `entity_relations` — Knowledge graph triples (source → relation_type → target) with confidence, provider attribution, and back-reference to the source content item.
 - `extraction_runs` — One row per extraction invocation: provider, model, status, counts, timing. Enables compare_extractions across providers/models.
 - `pending_embeddings` — Dead letter queue for embeddings that failed during TEI outages. Drained on startup and on next successful search_context/reindex.
+- `changes` — Append-only sync change log (see "Sync foundation" below). BIGSERIAL `seq` is the authoritative cursor; `changed_at` is display-only. One row per mutation to tasks/notes/artifacts (same transaction) and to handoffs (fire-and-forget best-effort). Tombstone rows for deletes.
+- `sync_op_log` — Server-side dedupe of client push ops. UNIQUE(op_uuid) so replays return the earlier outcome without re-applying.
 - `_migrations` — filename PK, applied_at timestamp.
 
-**Migration count:** 9 migrations (001 through 009).
+**Migration count:** 11 migrations (001 through 011). New migrations must be added as the next numbered file — count what exists before naming.
+
+## Sync foundation (Phase 1a)
+
+The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't participate in the interactive OAuth flow the MCP transport requires, so sync rides plain HTTP with its own auth boundary (see `src/sync/auth.ts`).
+
+**Endpoints (both require `Authorization: Bearer <token>`):**
+- `GET /sync/changes?cursor=N&limit=M` — Returns changes rows after cursor N plus current row snapshots per referenced entity. Snapshot application on the client MUST be idempotent (pulling the same range twice reaches the same end state). Deletes appear as tombstone rows.
+- `POST /sync/push` — Applies a batch of client mutations. Each op has a client-generated `op_uuid` (server dedupes replays), an entity reference, an op kind, a payload, and an optional precondition (task/note edits carry `base_updated_at`; artifact transitions carry `expected_status`). Stale ops are rejected INDIVIDUALLY — each rejection returns current server state; the batch never fails as a whole.
+
+**Protocol invariants (see design-doc §3–§4):**
+- `seq` (BIGSERIAL) is the authoritative cursor. `changed_at` is display-only — never make sync decisions from timestamps.
+- Change-log inserts happen in the SAME transaction as the entity mutation for tasks/notes/artifacts. Handoff appends are fire-and-forget so the file-mode graceful-degradation path stays working under Postgres outage.
+- Individual push ops process independently; a rejected precondition never poisons the batch.
+- Replays are harmless: the second push with the same `op_uuid` returns `dedup` plus the earlier `seq`.
+
+**Concurrency hardening baked in with the sync foundation:**
+- `update_artifact` and `update_task` now use conditional-UPDATE for status transitions: `UPDATE ... WHERE id=$id AND status=$expected RETURNING ...`. Lost writes return `STATUS_CONFLICT` with the current server state.
+- `patch_handoff` accepts optional `expected_source` (the filename the caller intended to patch against). If the current latest handoff has moved, returns `HANDOFF_CONFLICT` — closes the read-merge-write lost-update race.
+
+**Auth boundary:** `SyncAuthenticator` is a pluggable interface. `StaticTokenAuthenticator` is the reference implementation (constant-time comparison against `SYNC_BEARER_TOKEN` env var). Deployments swap in JWT/HMAC/mTLS by calling `setSyncAuthenticator(...)` at startup. When `SYNC_BEARER_TOKEN` is unset the reference authenticator rejects every request — deployments must opt in.
+
+**What's explicitly OUT of Phase 1a:**
+- Device/pairing tables and APNs push (comes in the mobile push-notification phase).
+- Exposing sync via MCP tools (plain HTTP only).
+- Resilience batch, pointer lock, reindex true rebuild (separate artifacts).
 
 **Connection:** `pg.Pool` singleton in `src/db/client.ts`. Max 5 connections, 3-second connect timeout (fail fast when Postgres is unavailable). Uses standard PG* env vars.
 
@@ -295,7 +334,9 @@ For contribution guidelines (PR process, branch naming, review expectations), se
 
 8. **Don't use `z.any()` in new code.** Existing uses are flagged for migration to `z.unknown()` in the roadmap. Use `z.unknown()` or specific types for new schemas.
 
-9. **Don't modify the migration runner to skip or reorder migrations.** Migrations are sequential and tracked in `_migrations`. Add new migrations as the next numbered file.
+9. **Don't modify the migration runner to skip or reorder migrations.** Migrations are sequential and tracked in `_migrations`. Add new migrations as the next numbered file. **Count what exists in `src/db/migrations/` first** — don't assume the number from CLAUDE.md is current. A migration-number collision aborts every subsequent migration.
+
+    **Never make sync decisions from `changed_at` timestamps.** The change log's BIGSERIAL `seq` is the only authoritative cursor; timestamps exist for humans reading the log. Clock skew, NTP corrections, and multi-writer races make timestamps unsafe. The push handler must reject stale ops INDIVIDUALLY — batch-fail is a protocol violation.
 
 10. **Don't publish the MCP port to the internet without mcp-auth-proxy.** The server has no authentication. It trusts its network boundary. Use a Cloudflare Tunnel with mcp-auth-proxy as the exposure path.
 

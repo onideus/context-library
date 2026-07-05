@@ -12,6 +12,7 @@ import { registerArtifactTools } from "./tools/artifacts.js";
 import { registerSearchTools } from "./tools/search.js";
 import { registerPrompts } from "./tools/prompts.js";
 import { registerEntityTools } from "./tools/entity-tools.js";
+import { registerSyncRoutes } from "./sync/routes.js";
 import { registerProvider } from "./entities/registry.js";
 import { createOllamaProviderFromConfig } from "./entities/providers/ollama.js";
 import { createApiProviderFromConfig } from "./entities/providers/api.js";
@@ -119,6 +120,14 @@ app.get("/health/ready", async (c) => {
     writable ? 200 : 503
   );
 });
+
+// ── Sync HTTP routes (bearer-token auth boundary) ──────────
+// These are plain HTTP endpoints, not MCP tools — the mobile client can't
+// participate in the interactive OAuth flow used by mcp-auth-proxy, so sync
+// has its own pluggable auth boundary. The routes are inert (401 on every
+// request) until SYNC_BEARER_TOKEN is set OR a deployment installs its own
+// SyncAuthenticator implementation.
+registerSyncRoutes(app);
 
 // ── MCP transport route (authenticated) ─────────────────────
 // Factory for stateless MCP server instances (one per request, per SDK pattern)
