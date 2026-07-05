@@ -155,7 +155,8 @@ src/
     validation.test.ts     # Unit: input validation
     sync.test.ts           # Integration: change-log atomicity, cursor idempotency,
                            #   push dedupe, individual stale rejection,
-                           #   conditional-UPDATE race, patch_handoff conflict
+                           #   conditional-UPDATE race, patch_handoff conflict,
+                           #   GET /sync/content/:content_hash content-on-demand
                            #   (Postgres-gated)
 ```
 
@@ -196,9 +197,10 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 
 The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't participate in the interactive OAuth flow the MCP transport requires, so sync rides plain HTTP with its own auth boundary (see `src/sync/auth.ts`).
 
-**Endpoints (both require `Authorization: Bearer <token>`):**
+**Endpoints (all require `Authorization: Bearer <token>`):**
 - `GET /sync/changes?cursor=N&limit=M` — Returns changes rows after cursor N plus current row snapshots per referenced entity. Snapshot application on the client MUST be idempotent (pulling the same range twice reaches the same end state). Deletes appear as tombstone rows.
 - `POST /sync/push` — Applies a batch of client mutations. Each op has a client-generated `op_uuid` (server dedupes replays), an entity reference, an op kind, a payload, and an optional precondition (task/note edits carry `base_updated_at`; task/artifact status transitions carry `expected_status`). Stale ops are rejected INDIVIDUALLY — each rejection returns current server state; the batch never fails as a whole. Whole-request body is capped by `SYNC_PUSH_MAX_BYTES` (default 5 MiB) and each op by `SYNC_PUSH_MAX_OP_BYTES` (default 128 KiB) — over-cap requests return HTTP 413.
+- `GET /sync/content/:content_hash` — Content-on-demand fetch for artifacts. Snapshot rows carry `content_hash` (in `metadata`) but never raw `content`; the mobile client caches content addressed by hash so status flips don't invalidate the cache. This endpoint materialises the body given a hash. Read-only — no change-log row, no side effects. Response shape on success: `{"content_hash": "...", "content": "..."}` with `Content-Type: application/json`. Errors: `400 INVALID_CONTENT_HASH` if the path parameter is not 64 lowercase hex chars (validated pre-query); `404 CONTENT_NOT_FOUND` if no artifact carries that hash; `404 CONTENT_NOT_INLINE` if a match exists but the artifact's content lives behind a `pointer` with no inline body — treat as not-viewable-on-device rather than resolving the pointer server-side. Content is content-addressed: multiple artifacts may share a hash, and the endpoint returns the content once regardless.
 
 **Protocol invariants (see design-doc §3–§4):**
 - `seq` (BIGSERIAL) is the authoritative cursor. `changed_at` is display-only — never make sync decisions from timestamps.

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 /**
@@ -573,6 +573,130 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       });
       expect(patchResult.error).toBeUndefined();
       expect(patchResult.success).toBe(true);
+    });
+  });
+
+  describe("GET /sync/content/:content_hash", () => {
+    // Phase 2b content-on-demand endpoint. Snapshots delivered via
+    // /sync/changes carry content_hash but never raw content — this endpoint
+    // is how the mobile client materialises the body when the user opens
+    // an artifact. Read-only, auth-gated the same as the other /sync/* routes.
+
+    async function fetchContent(hash: string, headers: Record<string, string> = {}) {
+      return fetch(`${BASE_URL}/sync/content/${hash}`, {
+        headers: { Authorization: `Bearer ${BEARER}`, ...headers },
+      });
+    }
+
+    it("returns 401 when unauthenticated", async () => {
+      const validButUnused = "a".repeat(64);
+      const res = await fetch(`${BASE_URL}/sync/content/${validButUnused}`);
+      expect(res.status).toBe(401);
+    });
+
+    it("returns 400 on malformed hash before touching SQL", async () => {
+      // Wrong length, non-hex characters, and uppercase all rejected pre-query.
+      for (const bad of [
+        "not-a-hash",
+        "z".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64), // hash format is lowercase hex
+      ]) {
+        const res = await fetchContent(bad);
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.code).toBe("INVALID_CONTENT_HASH");
+      }
+    });
+
+    it("returns 404 CONTENT_NOT_FOUND for an unknown but well-formed hash", async () => {
+      const unknown = createHash("sha256").update("never-stored-anywhere").digest("hex");
+      const res = await fetchContent(unknown);
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(body.code).toBe("CONTENT_NOT_FOUND");
+      expect(body.content_hash).toBe(unknown);
+    });
+
+    it("returns the inline content for a stored artifact by content_hash", async () => {
+      const inline = "the quick brown fox jumps over the lazy dog";
+      const a = await callTool("store_artifact", {
+        title: "Content-on-demand happy path",
+        artifact_type: "cc-prompt",
+        scope: "personal",
+        content: inline,
+      });
+      expect(a.error).toBeUndefined();
+      const expectedHash = createHash("sha256").update(inline).digest("hex");
+
+      const res = await fetchContent(expectedHash);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      const body = await res.json();
+      expect(body.content_hash).toBe(expectedHash);
+      expect(body.content).toBe(inline);
+    });
+
+    it("two artifacts sharing the same content_hash both resolve to the same content", async () => {
+      // Content-addressed: identical bodies produce identical hashes, so both
+      // artifacts point to the same content. The endpoint returns the content
+      // regardless of which row matched first.
+      const shared = "artifacts with identical bodies share a hash";
+      const a1 = await callTool("store_artifact", {
+        title: "Shared-hash artifact one",
+        artifact_type: "cc-prompt",
+        scope: "personal",
+        content: shared,
+      });
+      const a2 = await callTool("store_artifact", {
+        title: "Shared-hash artifact two",
+        artifact_type: "research",
+        scope: "personal",
+        content: shared,
+      });
+      expect(a1.id).not.toBe(a2.id);
+      const hash = createHash("sha256").update(shared).digest("hex");
+
+      const res = await fetchContent(hash);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.content_hash).toBe(hash);
+      expect(body.content).toBe(shared);
+    });
+
+    it("returns 404 CONTENT_NOT_INLINE when the matched artifact is pointer-only", async () => {
+      // Construct via direct SQL — the MCP write path strips content_hash from
+      // metadata when content is null, so a pointer-only artifact created
+      // through the tools never carries a hash. We simulate the case a client
+      // could encounter via a hand-authored migration or a future upload flow.
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      const hash = createHash("sha256").update("pointer-only-content-hash").digest("hex");
+      await client.query(
+        `INSERT INTO artifacts (title, artifact_type, content, pointer, status, scope, metadata)
+         VALUES ($1, $2, NULL, $3::jsonb, 'draft', 'personal', $4::jsonb)`,
+        [
+          "Pointer-only artifact",
+          "research",
+          JSON.stringify({ type: "url", href: "https://example.com/some-report" }),
+          JSON.stringify({ content_hash: hash }),
+        ]
+      );
+      await client.end();
+
+      const res = await fetchContent(hash);
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(body.code).toBe("CONTENT_NOT_INLINE");
+      expect(body.content_hash).toBe(hash);
     });
   });
 });
