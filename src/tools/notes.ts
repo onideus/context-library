@@ -406,10 +406,20 @@ export function registerNoteTools(mcpServer: McpServer): void {
             `UPDATE notes SET ${sets.join(", ")} WHERE id = $${paramIdx} RETURNING *`,
             [...params, args.id]
           );
-          const updated = upd.rows[0];
+          if (upd.rows.length === 0) {
+            // Concurrent DELETE landed between the SELECT above and this
+            // UPDATE. Skip the change-log write — mirrors update_task /
+            // update_artifact so we don't append a phantom `note:update`
+            // tombstone-adjacent row for a note that no longer exists.
+            return null;
+          }
           await appendChange(client, "note", args.id, "update");
-          return updated;
+          return upd.rows[0];
         });
+
+        if (row === null) {
+          return errorResponse(`Note not found: ${args.id}`, "NOT_FOUND");
+        }
 
         const contentChanged =
           args.title !== undefined ||

@@ -174,7 +174,12 @@ async function applyTaskOp(
     await client.query("DELETE FROM tasks WHERE id = $1", [op.entity_id]);
     // Deleting a non-existent row is a no-op, not a conflict — replays stay
     // harmless. The change log row is still appended so pullers can reconcile
-    // a tombstone regardless.
+    // a tombstone regardless. Trade-off worth naming: an authenticated but
+    // low-trust bearer could bloat `changes` by pushing deletes for random
+    // UUIDs (each op_uuid dedupes exactly once, but a fresh op_uuid every
+    // time is cheap). Acceptable under Phase 1a's single-tenant deployment
+    // model. Multi-tenant deployments should add a lookup+skip here before
+    // relaxing the trust boundary.
     const change = await appendChange(client, "task", op.entity_id, "delete");
     return { status: "applied" as const, snapshot: null, seq: change.seq };
   }
@@ -394,10 +399,15 @@ async function applyArtifactOp(op: PushOp, client: PoolClient): Promise<ApplyRes
   const currentStatus = String(current.rows[0].status);
   const statusChanging =
     payload.status !== undefined && payload.status !== currentStatus;
+  // Match applyTaskOp: only enforce expected_status when the payload actually
+  // mutates status. A pure metadata edit (e.g. title-only) that happens to
+  // carry expected_status is not a status transition, so it doesn't need the
+  // guard. Otherwise task and artifact would diverge on the same precondition
+  // shape, which is exactly what the item-3 spec section warns against.
   const useConditional =
     statusChanging && typeof precondition.expected_status === "string";
   if (
-    typeof precondition.expected_status === "string" &&
+    useConditional &&
     currentStatus !== precondition.expected_status
   ) {
     return {
