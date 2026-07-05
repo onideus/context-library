@@ -820,33 +820,41 @@ export function registerSyncRoutes(app: Hono): void {
       );
     }
 
-    // Prefer the first matching row with inline content. If every match is
-    // pointer-only, fall back to reporting that distinctly so the client
-    // treats it as not-viewable-on-device rather than as a missing hash.
-    const withContent = await query<{ content: string }>(
-      `SELECT content
+    // Single-query resolution across the three outcomes:
+    //   * no rows                                → CONTENT_NOT_FOUND
+    //   * a row with inline content              → return it
+    //   * a row with content NULL and a pointer  → CONTENT_NOT_INLINE
+    //   * a row with content NULL and no pointer → CONTENT_NOT_FOUND (data
+    //     corruption; the hash claim can't be honoured either way, so the
+    //     truthful answer is "we can't materialise this content").
+    // ORDER BY prefers inline over pointer-only over corrupt so multi-row
+    // matches always resolve to the best available answer.
+    const res = await query<{ content: string | null; has_pointer: boolean }>(
+      `SELECT content, pointer IS NOT NULL AS has_pointer
        FROM artifacts
        WHERE metadata->>'content_hash' = $1
-         AND content IS NOT NULL
+       ORDER BY (content IS NOT NULL) DESC, (pointer IS NOT NULL) DESC
        LIMIT 1`,
       [hash]
     );
-    if (withContent.rows.length > 0) {
-      c.header("Content-Type", "application/json");
+    if (res.rows.length === 0) {
+      return c.json(
+        {
+          error: "content_hash not found",
+          code: "CONTENT_NOT_FOUND",
+          content_hash: hash,
+        },
+        404
+      );
+    }
+    const row = res.rows[0];
+    if (row.content !== null) {
       return c.json({
         content_hash: hash,
-        content: withContent.rows[0].content,
+        content: row.content,
       });
     }
-
-    const pointerOnly = await query<{ id: string }>(
-      `SELECT id
-       FROM artifacts
-       WHERE metadata->>'content_hash' = $1
-       LIMIT 1`,
-      [hash]
-    );
-    if (pointerOnly.rows.length > 0) {
+    if (row.has_pointer) {
       return c.json(
         {
           error: "artifact content is not inline",
@@ -856,7 +864,6 @@ export function registerSyncRoutes(app: Hono): void {
         404
       );
     }
-
     return c.json(
       {
         error: "content_hash not found",
