@@ -129,16 +129,16 @@ async function applyTaskOp(
     return withTransaction(async (client) => {
       const res = await client.query<Record<string, unknown>>(
         `INSERT INTO tasks (id, title, context, status, scope, priority, tags, blocked_reason, scheduled_date, due_date)
-         VALUES ($1, $2, $3, COALESCE($4, 'open'), $5, $6, COALESCE($7, '{}'), $8, $9, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *`,
         [
           op.entity_id,
           payload.title ?? "(untitled)",
           payload.context ?? null,
-          payload.status ?? null,
+          payload.status ?? "open",
           payload.scope ?? "personal",
           payload.priority ?? null,
-          payload.tags ?? null,
+          payload.tags ?? [],
           payload.blocked_reason ?? null,
           payload.scheduled_date ?? null,
           payload.due_date ?? null,
@@ -230,17 +230,17 @@ async function applyNoteOp(op: PushOp): Promise<ApplyResult> {
     return withTransaction(async (client) => {
       const res = await client.query<Record<string, unknown>>(
         `INSERT INTO notes (id, title, content, domain, tags, scope, source_url, related_task_ids)
-         VALUES ($1, $2, $3, $4, COALESCE($5, '{}'), $6, $7, COALESCE($8, '{}'))
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING *`,
         [
           op.entity_id,
           payload.title ?? "(untitled)",
           payload.content ?? "",
           payload.domain ?? null,
-          payload.tags ?? null,
+          payload.tags ?? [],
           payload.scope ?? "personal",
           payload.source_url ?? null,
-          payload.related_task_ids ?? null,
+          payload.related_task_ids ?? [],
         ]
       );
       const change = await appendChange(client, "note", op.entity_id, "insert");
@@ -315,16 +315,16 @@ async function applyArtifactOp(op: PushOp): Promise<ApplyResult> {
     return withTransaction(async (client) => {
       const res = await client.query<Record<string, unknown>>(
         `INSERT INTO artifacts (id, title, artifact_type, content, status, scope, tags, execution_order)
-         VALUES ($1, $2, $3, $4, COALESCE($5, 'draft'), $6, COALESCE($7, '{}'), $8)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING *`,
         [
           op.entity_id,
           payload.title ?? "(untitled)",
           payload.artifact_type ?? "note",
           payload.content ?? null,
-          payload.status ?? null,
+          payload.status ?? "draft",
           payload.scope ?? "personal",
-          payload.tags ?? null,
+          payload.tags ?? [],
           payload.execution_order ?? null,
         ]
       );
