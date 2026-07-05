@@ -1,4 +1,5 @@
 import type { Context, Next } from "hono";
+import { timingSafeEqual } from "node:crypto";
 import { config } from "../config.js";
 
 /**
@@ -52,18 +53,20 @@ export class StaticTokenAuthenticator implements SyncAuthenticator {
 }
 
 /**
- * Constant-time string comparison to defeat length-extension / timing side
- * channels. Returns false as soon as lengths differ, which itself is safe
- * because different-length secrets are already distinguishable by the length
- * of the packet — the attacker gains nothing by learning that.
+ * Constant-time comparison via Node's crypto.timingSafeEqual. Encoding both
+ * strings as UTF-8 buffers first is important — a hand-rolled charCodeAt loop
+ * only compares UTF-16 code units, which is safe for ASCII bearers but
+ * brittle if a deployment ever picks a multi-byte token.
+ *
+ * Returns false as soon as byte lengths differ. Leaking length is safe: the
+ * transport packet length already reveals it, so a timing side channel here
+ * gives an attacker nothing they didn't already have.
  */
 function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
+  const ba = Buffer.from(a, "utf-8");
+  const bb = Buffer.from(b, "utf-8");
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
 }
 
 let activeAuthenticator: SyncAuthenticator = new StaticTokenAuthenticator(

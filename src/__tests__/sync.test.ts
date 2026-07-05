@@ -197,6 +197,31 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       const res = await syncGet("/sync/changes?cursor=0&limit=1");
       expect(res.status).toBe(200);
     });
+
+    it("rejects /sync/push without Authorization header", async () => {
+      // Regression: sync auth was only tested on the GET path. Both /sync/*
+      // endpoints must sit behind the same auth boundary; a push endpoint that
+      // silently accepted unauthenticated batches would let anyone with
+      // network reach mutate the store.
+      const res = await fetch(`${BASE_URL}/sync/push`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ops: [] }),
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("rejects /sync/push with wrong bearer token", async () => {
+      const res = await fetch(`${BASE_URL}/sync/push`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer not-the-right-token`,
+        },
+        body: JSON.stringify({ ops: [] }),
+      });
+      expect(res.status).toBe(401);
+    });
   });
 
   describe("change log atomicity", () => {
@@ -327,6 +352,152 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       expect(byUuid.get(staleOp.op_uuid).conflict.reason).toBe("STATUS_CONFLICT");
       expect(byUuid.get(staleOp.op_uuid).conflict.current.status).toBe("ready");
       expect(byUuid.get(goodOp.op_uuid).status).toBe("applied");
+    });
+  });
+
+  describe("sync push task expected_status precondition", () => {
+    it("rejects a task status transition when the row has already advanced", async () => {
+      // Reviewer item 3: MCP update_task got conditional-UPDATE, but the sync
+      // task path was only checking base_updated_at. Post-fix, an expected_status
+      // that no longer matches must return STATUS_CONFLICT with current state.
+      const t = await callTool("create_task", {
+        title: "Sync task status race",
+        scope: "personal",
+      });
+      // Someone else already completed the task.
+      await callTool("update_task", { id: t.id, action: "complete" });
+
+      // Client push tries to defer, expecting status=open (stale).
+      const staleOp = {
+        op_uuid: randomUUID(),
+        entity_type: "task" as const,
+        entity_id: t.id,
+        op: "update" as const,
+        payload: { status: "deferred" as const },
+        precondition: { expected_status: "open" },
+      };
+      const res = await (await syncPost("/sync/push", { ops: [staleOp] })).json();
+      const result = res.results[0];
+      expect(result.status).toBe("conflict");
+      expect(result.conflict.reason).toBe("STATUS_CONFLICT");
+      expect(result.conflict.current.status).toBe("completed");
+    });
+
+    it("applies the transition when expected_status matches", async () => {
+      const t = await callTool("create_task", {
+        title: "Sync task status match",
+        scope: "personal",
+      });
+      const goodOp = {
+        op_uuid: randomUUID(),
+        entity_type: "task" as const,
+        entity_id: t.id,
+        op: "update" as const,
+        payload: { status: "completed" as const },
+        precondition: { expected_status: "open" },
+      };
+      const res = await (await syncPost("/sync/push", { ops: [goodOp] })).json();
+      expect(res.results[0].status).toBe("applied");
+      expect(res.results[0].snapshot.status).toBe("completed");
+    });
+  });
+
+  describe("sync push STALE_BASE and NOT_FOUND paths", () => {
+    it("returns STALE_BASE when base_updated_at is stale (task)", async () => {
+      const t = await callTool("create_task", {
+        title: "Sync stale-base task",
+        scope: "personal",
+      });
+      const staleOp = {
+        op_uuid: randomUUID(),
+        entity_type: "task" as const,
+        entity_id: t.id,
+        op: "update" as const,
+        payload: { title: "should not apply" },
+        precondition: { base_updated_at: "1999-01-01T00:00:00.000Z" },
+      };
+      const res = await (await syncPost("/sync/push", { ops: [staleOp] })).json();
+      expect(res.results[0].status).toBe("conflict");
+      expect(res.results[0].conflict.reason).toBe("STALE_BASE");
+      expect(res.results[0].conflict.current.id).toBe(t.id);
+    });
+
+    it("returns STALE_BASE when base_updated_at is stale (note)", async () => {
+      const n = await callTool("create_note", {
+        title: "Sync stale-base note",
+        content: "before",
+        scope: "personal",
+      });
+      const staleOp = {
+        op_uuid: randomUUID(),
+        entity_type: "note" as const,
+        entity_id: n.id,
+        op: "update" as const,
+        payload: { content: "should not apply" },
+        precondition: { base_updated_at: "1999-01-01T00:00:00.000Z" },
+      };
+      const res = await (await syncPost("/sync/push", { ops: [staleOp] })).json();
+      expect(res.results[0].status).toBe("conflict");
+      expect(res.results[0].conflict.reason).toBe("STALE_BASE");
+    });
+
+    it("returns NOT_FOUND when updating a nonexistent task via sync", async () => {
+      const staleOp = {
+        op_uuid: randomUUID(),
+        entity_type: "task" as const,
+        entity_id: randomUUID(),
+        op: "update" as const,
+        payload: { title: "orphan update" },
+      };
+      const res = await (await syncPost("/sync/push", { ops: [staleOp] })).json();
+      expect(res.results[0].status).toBe("conflict");
+      expect(res.results[0].conflict.reason).toBe("NOT_FOUND");
+    });
+  });
+
+  describe("sync push body-size limits", () => {
+    it("rejects push bodies larger than syncPushMaxBytes with 413", async () => {
+      // Pack a single op with a >5MiB blob in payload. The per-request cap is
+      // 5MiB by default, so this should be rejected before any op runs.
+      const bigBlob = "x".repeat(6 * 1024 * 1024);
+      const op = {
+        op_uuid: randomUUID(),
+        entity_type: "artifact" as const,
+        entity_id: randomUUID(),
+        op: "insert" as const,
+        payload: {
+          title: "too big",
+          artifact_type: "cc-prompt",
+          scope: "personal",
+          content: bigBlob,
+        },
+      };
+      const res = await syncPost("/sync/push", { ops: [op] });
+      expect(res.status).toBe(413);
+      const body = await res.json();
+      expect(body.code).toBe("PAYLOAD_TOO_LARGE");
+    });
+
+    it("rejects individual ops larger than syncPushMaxOpBytes with 413", async () => {
+      // Single op larger than the per-op cap (128 KiB) but under the whole-
+      // body cap (5 MiB). Should be rejected on the per-op check.
+      const bigBlob = "y".repeat(200 * 1024);
+      const op = {
+        op_uuid: randomUUID(),
+        entity_type: "note" as const,
+        entity_id: randomUUID(),
+        op: "insert" as const,
+        payload: {
+          title: "large note",
+          content: bigBlob,
+          scope: "personal",
+        },
+      };
+      const res = await syncPost("/sync/push", { ops: [op] });
+      expect(res.status).toBe(413);
+      const body = await res.json();
+      expect(body.code).toBe("PAYLOAD_TOO_LARGE");
+      expect(body.op_uuid).toBe(op.op_uuid);
     });
   });
 

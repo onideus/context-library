@@ -611,8 +611,9 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       // Append to the sync change log — fire-and-forget so a Postgres outage
       // never blocks the file-mode handoff path (Tier-1 graceful degradation).
-      // Same reasoning as indexing below; sync pullers reconcile from the
-      // filesystem via /sync/changes snapshot loaders once Postgres recovers.
+      // If the DB is down, the change row is dropped here; server startup runs
+      // backfillHandoffChanges() on the next boot to reconcile on-disk files
+      // with the changes table so pullers eventually see them.
       appendChangeBestEffort("handoff", filename, "insert").catch((err) =>
         console.warn("[store_handoff] change-log append failed:", (err as Error).message)
       );

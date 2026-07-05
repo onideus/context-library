@@ -19,6 +19,7 @@ import { createApiProviderFromConfig } from "./entities/providers/api.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
+import { backfillHandoffChanges } from "./db/changes.js";
 import { isEmbeddingAvailable } from "./embeddings/client.js";
 import { readFileSync } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
@@ -402,6 +403,28 @@ async function main() {
     await seedEntities();
   } catch (err) {
     console.warn("[startup] Entity seeding skipped:", (err as Error).message);
+  }
+
+  // Reconcile the change log with handoff files on disk. Handoff writes use
+  // appendChangeBestEffort, which silently swallows Postgres outages so the
+  // file-mode graceful-degradation path stays intact. Without this backfill,
+  // any handoff written during a DB outage would be permanently invisible to
+  // /sync/changes even after recovery. Startup-time reconciliation is the
+  // right place: DB outages typically end with a restart, and the pass is
+  // idempotent (already-logged filenames are skipped).
+  try {
+    const result = await backfillHandoffChanges();
+    if (result.backfilled > 0) {
+      console.log(
+        `[startup] Backfilled handoff change-log entries: scanned=${result.scanned}, backfilled=${result.backfilled}`
+      );
+    } else if (result.skipped_reason) {
+      console.log(
+        `[startup] Handoff change-log backfill skipped: ${result.skipped_reason}`
+      );
+    }
+  } catch (err) {
+    console.warn("[startup] Handoff change-log backfill errored:", (err as Error).message);
   }
 
   // Drain any pending embeddings queued during a previous TEI outage (best-effort).

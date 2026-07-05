@@ -98,7 +98,8 @@ src/
     validation.ts          # Shared input validation utilities
   db/
     changes.ts             # Sync change-log helpers: appendChange (in-tx),
-                           #   withTransaction, appendChangeBestEffort (handoffs)
+                           #   withTransaction, appendChangeBestEffort (handoffs),
+                           #   backfillHandoffChanges (startup reconciliation)
   entities/
     pipeline.ts            # Extraction pipeline (extractAndStore, fire-and-forget)
     prompts.ts             # Extraction prompt templates
@@ -197,16 +198,17 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 **Endpoints (both require `Authorization: Bearer <token>`):**
 - `GET /sync/changes?cursor=N&limit=M` — Returns changes rows after cursor N plus current row snapshots per referenced entity. Snapshot application on the client MUST be idempotent (pulling the same range twice reaches the same end state). Deletes appear as tombstone rows.
-- `POST /sync/push` — Applies a batch of client mutations. Each op has a client-generated `op_uuid` (server dedupes replays), an entity reference, an op kind, a payload, and an optional precondition (task/note edits carry `base_updated_at`; artifact transitions carry `expected_status`). Stale ops are rejected INDIVIDUALLY — each rejection returns current server state; the batch never fails as a whole.
+- `POST /sync/push` — Applies a batch of client mutations. Each op has a client-generated `op_uuid` (server dedupes replays), an entity reference, an op kind, a payload, and an optional precondition (task/note edits carry `base_updated_at`; task/artifact status transitions carry `expected_status`). Stale ops are rejected INDIVIDUALLY — each rejection returns current server state; the batch never fails as a whole. Whole-request body is capped by `SYNC_PUSH_MAX_BYTES` (default 5 MiB) and each op by `SYNC_PUSH_MAX_OP_BYTES` (default 128 KiB) — over-cap requests return HTTP 413.
 
 **Protocol invariants (see design-doc §3–§4):**
 - `seq` (BIGSERIAL) is the authoritative cursor. `changed_at` is display-only — never make sync decisions from timestamps.
-- Change-log inserts happen in the SAME transaction as the entity mutation for tasks/notes/artifacts. Handoff appends are fire-and-forget so the file-mode graceful-degradation path stays working under Postgres outage.
+- Change-log inserts happen in the SAME transaction as the entity mutation for tasks/notes/artifacts. Handoff appends are fire-and-forget so the file-mode graceful-degradation path stays working under Postgres outage; server startup runs `backfillHandoffChanges` to reconcile any handoff files that landed on disk while Postgres was down so pullers eventually see them.
+- `/sync/push` dedupe claim and the entity mutation share ONE transaction. On precondition conflict the transaction rolls back — the sync_op_log claim disappears with it, so a subsequent retry with a fresh precondition isn't spuriously deduped. Never rely on a compensating DELETE after the claim commits.
 - Individual push ops process independently; a rejected precondition never poisons the batch.
 - Replays are harmless: the second push with the same `op_uuid` returns `dedup` plus the earlier `seq`.
 
 **Concurrency hardening baked in with the sync foundation:**
-- `update_artifact` and `update_task` now use conditional-UPDATE for status transitions: `UPDATE ... WHERE id=$id AND status=$expected RETURNING ...`. Lost writes return `STATUS_CONFLICT` with the current server state.
+- `update_artifact` and `update_task` (both MCP paths) AND the `/sync/push` task/artifact update paths use conditional-UPDATE for status transitions: `UPDATE ... WHERE id=$id AND status=$expected RETURNING ...`. Lost writes return `STATUS_CONFLICT` with the current server state. The MCP and sync paths must stay in sync — a fix to one is only half-done until the other has it.
 - `patch_handoff` accepts optional `expected_source` (the filename the caller intended to patch against). If the current latest handoff has moved, returns `HANDOFF_CONFLICT` — closes the read-merge-write lost-update race.
 
 **Auth boundary:** `SyncAuthenticator` is a pluggable interface. `StaticTokenAuthenticator` is the reference implementation (constant-time comparison against `SYNC_BEARER_TOKEN` env var). Deployments swap in JWT/HMAC/mTLS by calling `setSyncAuthenticator(...)` at startup. When `SYNC_BEARER_TOKEN` is unset the reference authenticator rejects every request — deployments must opt in.
