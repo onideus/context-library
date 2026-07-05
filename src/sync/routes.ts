@@ -592,6 +592,15 @@ async function processPushOp(op: PushOp): Promise<
 }
 
 /**
+ * Content_hash shape. The server computes hashes with
+ * `createHash("sha256").update(...).digest("hex")` in src/tools/artifacts.ts,
+ * which always emits 64 lowercase hex chars. We validate that shape before the
+ * value ever reaches SQL so a malformed path parameter can't force a wasted
+ * table scan or leak a driver-level error.
+ */
+const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
+
+/**
  * Register /sync/* routes on the app. All routes sit behind
  * syncAuthMiddleware; the MCP transport has its own upstream auth path.
  */
@@ -786,5 +795,82 @@ export function registerSyncRoutes(app: Hono): void {
     }
 
     return c.json({ results });
+  });
+
+  // ── GET /sync/content/:content_hash ───────────────────────────────
+  //
+  // Content-on-demand fetch for iOS Phase 2b. Snapshots delivered via
+  // /sync/changes carry the artifact's `content_hash` (in `metadata`) but
+  // never the raw `content` — the mobile client caches content addressed by
+  // hash so status flips don't invalidate the cache. This endpoint closes
+  // that loop: given a hash, return the inline content once.
+  //
+  // Read-only. No change-log row, no side effects. Content is
+  // content-addressed, so multiple artifacts may share a hash — we return
+  // the content once regardless of how many rows point at it.
+  app.get("/sync/content/:content_hash", async (c) => {
+    const hash = c.req.param("content_hash");
+    if (!CONTENT_HASH_RE.test(hash)) {
+      return c.json(
+        {
+          error: "invalid content_hash",
+          code: "INVALID_CONTENT_HASH",
+        },
+        400
+      );
+    }
+
+    // Single-query resolution across the three outcomes:
+    //   * no rows                                → CONTENT_NOT_FOUND
+    //   * a row with inline content              → return it
+    //   * a row with content NULL and a pointer  → CONTENT_NOT_INLINE
+    //   * a row with content NULL and no pointer → CONTENT_NOT_FOUND (data
+    //     corruption; the hash claim can't be honoured either way, so the
+    //     truthful answer is "we can't materialise this content").
+    // ORDER BY prefers inline over pointer-only over corrupt so multi-row
+    // matches always resolve to the best available answer.
+    const res = await query<{ content: string | null; has_pointer: boolean }>(
+      `SELECT content, pointer IS NOT NULL AS has_pointer
+       FROM artifacts
+       WHERE metadata->>'content_hash' = $1
+       ORDER BY (content IS NOT NULL) DESC, (pointer IS NOT NULL) DESC
+       LIMIT 1`,
+      [hash]
+    );
+    if (res.rows.length === 0) {
+      return c.json(
+        {
+          error: "content_hash not found",
+          code: "CONTENT_NOT_FOUND",
+          content_hash: hash,
+        },
+        404
+      );
+    }
+    const row = res.rows[0];
+    if (row.content !== null) {
+      return c.json({
+        content_hash: hash,
+        content: row.content,
+      });
+    }
+    if (row.has_pointer) {
+      return c.json(
+        {
+          error: "artifact content is not inline",
+          code: "CONTENT_NOT_INLINE",
+          content_hash: hash,
+        },
+        404
+      );
+    }
+    return c.json(
+      {
+        error: "content_hash not found",
+        code: "CONTENT_NOT_FOUND",
+        content_hash: hash,
+      },
+      404
+    );
   });
 }
