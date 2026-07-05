@@ -9,6 +9,7 @@ import { compactHandoff, COMPACTED_FLAG } from "./compaction.js";
 import { indexHandoff, getPendingEmbeddingsCount, hasPendingEmbedding, extractHandoffText } from "../embeddings/indexer.js";
 import { isEmbeddingAvailable, getLastEmbeddingSuccess } from "../embeddings/client.js";
 import { extractAndStore } from "../entities/pipeline.js";
+import { appendChangeBestEffort } from "../db/changes.js";
 import { computeDynamicTaskSummary } from "./task-summary.js";
 import { computeDynamicArtifactSummary } from "./artifact-summary.js";
 import { validatePayloadSize, PayloadTooLargeError, LIMITS } from "./validation.js";
@@ -608,6 +609,15 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       const filename = await writeHandoff(handoff);
 
+      // Append to the sync change log — fire-and-forget so a Postgres outage
+      // never blocks the file-mode handoff path (Tier-1 graceful degradation).
+      // If the DB is down, the change row is dropped here; server startup runs
+      // backfillHandoffChanges() on the next boot to reconcile on-disk files
+      // with the changes table so pullers eventually see them.
+      appendChangeBestEffort("handoff", filename, "insert").catch((err) =>
+        console.warn("[store_handoff] change-log append failed:", (err as Error).message)
+      );
+
       // Fire-and-forget background indexing — MUST NOT block or fail the handoff
       indexHandoff(filename, handoff).catch(err =>
         console.warn("[store_handoff] Background indexing failed:", (err as Error).message)
@@ -792,6 +802,12 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .describe(
           "Set true on the last write of a session. Marks the patched handoff with session_closed=true and a session_closed_at timestamp. Default false (safe default for mid-session patches)."
         ),
+      expected_source: z
+        .string()
+        .optional()
+        .describe(
+          "Optimistic concurrency precondition. When provided, the patch is applied ONLY if the current latest handoff filename matches this value — if a concurrent writer (chat, pipeline, phone) has since written a new handoff, returns HANDOFF_CONFLICT with the current latest filename instead of merging over stale state. Backward compatible: when omitted, the patch applies to whatever is currently latest (legacy read-merge-write behaviour)."
+        ),
     },
     async (args) => {
       const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
@@ -859,6 +875,31 @@ export function registerHandoffTools(mcpServer: McpServer): void {
           ],
         };
       }
+
+      // Item 5 (expected_source precondition): when the caller supplies the
+      // filename they intended to patch against, reject if the current latest
+      // has moved. This closes the read-merge-write lost-update race the June
+      // 10 architecture review ranked #1 among sync hazards. Backward
+      // compatible — legacy callers omit expected_source and get today's
+      // "patch whatever is latest" behaviour.
+      if (args.expected_source !== undefined && args.expected_source !== sourceFilename) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: true,
+                code: "HANDOFF_CONFLICT",
+                message:
+                  `expected_source ${args.expected_source} is no longer the latest handoff (current: ${sourceFilename}). Re-read via get_latest_handoff and re-issue the patch.`,
+                expected_source: args.expected_source,
+                current_source: sourceFilename,
+              }),
+            },
+          ],
+        };
+      }
+
       const handoff = await read<Handoff>(join(HANDOFFS_DIR(), sourceFilename));
       if (!handoff) {
         return {
@@ -884,15 +925,17 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       if (patchHasTasks) {
         logTaskArrayDeprecation("patch_handoff");
       }
-      // Strip the deprecated tasks array and the transport-only `final` flag
-      // from the patch payload. `final` is not merged into the handoff body;
-      // it sets session_closed/session_closed_at directly.
+      // Strip the deprecated tasks array, the transport-only `final` flag,
+      // and the sync precondition `expected_source` from the patch payload
+      // before merging — none of them belong in the persisted handoff body.
       const {
         tasks: _patchTasks,
         final: finalFlag,
+        expected_source: _expectedSource,
         ...patchWithoutTasks
-      } = args as typeof args & { tasks?: unknown; final?: boolean };
+      } = args as typeof args & { tasks?: unknown; final?: boolean; expected_source?: string };
       void _patchTasks;
+      void _expectedSource;
       // Also drop any prior session_closed markers from the source so the
       // merged result reflects the current write — closing a session here
       // shouldn't echo a stale close from an earlier handoff.
@@ -927,6 +970,12 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       // Write as new handoff file (append-only)
       const newFilename = await writeHandoff(merged);
+
+      // Append to the sync change log — fire-and-forget so a Postgres outage
+      // doesn't break the file-mode handoff path.
+      appendChangeBestEffort("handoff", newFilename, "insert").catch((err) =>
+        console.warn("[patch_handoff] change-log append failed:", (err as Error).message)
+      );
 
       // Fire-and-forget background indexing
       indexHandoff(newFilename, merged as Record<string, unknown>).catch(err =>

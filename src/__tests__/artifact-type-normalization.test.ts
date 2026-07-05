@@ -5,6 +5,23 @@ vi.mock("../db/client.js", () => ({
   query: vi.fn(),
 }));
 
+// Mock the sync change-log helpers. store_artifact / update_artifact now run
+// their INSERT/UPDATE inside `withTransaction(...)` so the mutation shares a
+// pg client with the changes-log INSERT. To keep this unit test focused on
+// artifact_type normalization (which is the SUT), the mocked withTransaction
+// hands the callback a client whose `query` delegates to the same mockQuery
+// the assertions already inspect. `appendChange` becomes a no-op.
+vi.mock("../db/changes.js", async () => {
+  const { query } = await import("../db/client.js");
+  return {
+    withTransaction: vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => {
+      return fn({ query });
+    }),
+    appendChange: vi.fn().mockResolvedValue({ seq: "1", changed_at: new Date().toISOString() }),
+    appendChangeBestEffort: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 vi.mock("../embeddings/indexer.js", () => ({
   indexArtifact: vi.fn().mockResolvedValue(undefined),
 }));

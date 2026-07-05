@@ -12,12 +12,14 @@ import { registerArtifactTools } from "./tools/artifacts.js";
 import { registerSearchTools } from "./tools/search.js";
 import { registerPrompts } from "./tools/prompts.js";
 import { registerEntityTools } from "./tools/entity-tools.js";
+import { registerSyncRoutes } from "./sync/routes.js";
 import { registerProvider } from "./entities/registry.js";
 import { createOllamaProviderFromConfig } from "./entities/providers/ollama.js";
 import { createApiProviderFromConfig } from "./entities/providers/api.js";
 import { ensureDataDir } from "./storage/json-store.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
+import { backfillHandoffChanges } from "./db/changes.js";
 import { isEmbeddingAvailable } from "./embeddings/client.js";
 import { readFileSync } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
@@ -119,6 +121,14 @@ app.get("/health/ready", async (c) => {
     writable ? 200 : 503
   );
 });
+
+// ── Sync HTTP routes (bearer-token auth boundary) ──────────
+// These are plain HTTP endpoints, not MCP tools — the mobile client can't
+// participate in the interactive OAuth flow used by mcp-auth-proxy, so sync
+// has its own pluggable auth boundary. The routes are inert (401 on every
+// request) until SYNC_BEARER_TOKEN is set OR a deployment installs its own
+// SyncAuthenticator implementation.
+registerSyncRoutes(app);
 
 // ── MCP transport route (authenticated) ─────────────────────
 // Factory for stateless MCP server instances (one per request, per SDK pattern)
@@ -393,6 +403,28 @@ async function main() {
     await seedEntities();
   } catch (err) {
     console.warn("[startup] Entity seeding skipped:", (err as Error).message);
+  }
+
+  // Reconcile the change log with handoff files on disk. Handoff writes use
+  // appendChangeBestEffort, which silently swallows Postgres outages so the
+  // file-mode graceful-degradation path stays intact. Without this backfill,
+  // any handoff written during a DB outage would be permanently invisible to
+  // /sync/changes even after recovery. Startup-time reconciliation is the
+  // right place: DB outages typically end with a restart, and the pass is
+  // idempotent (already-logged filenames are skipped).
+  try {
+    const result = await backfillHandoffChanges();
+    if (result.backfilled > 0) {
+      console.log(
+        `[startup] Backfilled handoff change-log entries: scanned=${result.scanned}, backfilled=${result.backfilled}`
+      );
+    } else if (result.skipped_reason) {
+      console.log(
+        `[startup] Handoff change-log backfill skipped: ${result.skipped_reason}`
+      );
+    }
+  } catch (err) {
+    console.warn("[startup] Handoff change-log backfill errored:", (err as Error).message);
   }
 
   // Drain any pending embeddings queued during a previous TEI outage (best-effort).

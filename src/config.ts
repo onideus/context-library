@@ -60,4 +60,34 @@ export const config = {
     const v = parseInt(process.env.ENTITY_GRAPH_MAX_CANDIDATES ?? "50", 10);
     return Number.isFinite(v) && v > 0 ? v : 50;
   })(),
+  // Sync bearer token for the reference authenticator. The repo commits the
+  // auth *boundary* (pluggable interface + static-token impl); deployments
+  // choose their own value via env. If unset, the /sync/* routes reject all
+  // requests — deployments must opt in to enable them.
+  syncBearerToken: process.env.SYNC_BEARER_TOKEN ?? null,
+  syncChangesMaxLimit: (function () {
+    const v = parseInt(process.env.SYNC_CHANGES_MAX_LIMIT ?? "500", 10);
+    return Number.isFinite(v) && v > 0 ? v : 500;
+  })(),
+  syncChangesDefaultLimit: (function () {
+    const v = parseInt(process.env.SYNC_CHANGES_DEFAULT_LIMIT ?? "100", 10);
+    return Number.isFinite(v) && v > 0 ? v : 100;
+  })(),
+  // Whole-request ceiling on /sync/push. Each op's `payload` and
+  // `precondition` are z.unknown()/z.record(z.unknown()) so field-level Zod
+  // caps don't help; we cap the wire body instead to keep a
+  // bearer-authenticated client from posting a 200-op batch of multi-MB
+  // artifact content.
+  syncPushMaxBytes: (function () {
+    const v = parseInt(process.env.SYNC_PUSH_MAX_BYTES ?? "5242880", 10); // 5 MiB
+    return Number.isFinite(v) && v > 0 ? v : 5242880;
+  })(),
+  // Per-op cap. Guards against one 5MB blob smuggled into a small batch —
+  // large artifact `content` should be handled via a separate upload flow,
+  // not stuffed into a sync op. Chosen so 200 max-sized ops still fit under
+  // syncPushMaxBytes with headroom.
+  syncPushMaxOpBytes: (function () {
+    const v = parseInt(process.env.SYNC_PUSH_MAX_OP_BYTES ?? "131072", 10); // 128 KiB
+    return Number.isFinite(v) && v > 0 ? v : 131072;
+  })(),
 } as const;
