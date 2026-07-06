@@ -69,6 +69,10 @@ Before adding or modifying MCP tools, read the `mcp-builder` skill reference for
 
 Search and retrieval tool descriptions follow a CALL-THIS-WHEN / DO-NOT-CALL-WHEN / CONSEQUENCE-OF-SKIPPING structure. This pattern explicitly enumerates trigger conditions, non-triggers, and the cost of failing to call the tool when needed. It produces measurably higher call-through rates than purely informational descriptions. When adding new search or retrieval tools, follow this pattern. When adding write or fetch tools (which are reactive to explicit user requests), the steering pattern is not required.
 
+## Pipeline metadata contract (cc-prompt artifacts)
+
+Authoring agents that produce `cc-prompt` artifacts for pipeline consumption must set `metadata.target_repo` before (or in the same `update_artifact` call that promotes to) `ready`. This key is REQUIRED — an interceptor watching for `ready` cc-prompts will demote any artifact missing it back to `draft`, because it cannot resolve where to execute. `metadata.target_org` is optional and defaults per interceptor config. `metadata.content_hash` (SHA-256 of `content`) is auto-computed server-side on store and on promotion to a locked status; callers must NOT supply it — any caller-supplied value is stripped before merge. `metadata.branch_target` is DEPRECATED in favor of `target_repo` (kept one release for reader compatibility). Full contract table lives in `docs/pipeline/artifact-lifecycle.md`.
+
 ## File Structure
 
 ```

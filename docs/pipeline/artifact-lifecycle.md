@@ -41,7 +41,11 @@ The interceptor's polling query is `list_artifacts({artifact_type: "cc-prompt", 
 
 ### executing — claimed by an executor
 
-`executing` doubles as a **claim marker**. The interceptor claims work by transitioning `ready → executing`; a second interceptor that queries `status: "ready"` afterward will not see the artifact in its result set. Race detection is the interceptor's responsibility, not the tool layer's: `executing → executing` is treated as a valid no-op at the server, so a losing interceptor's `update_artifact` call still returns success. The pattern for detecting the race is to write a `metadata.claimed_by` identifier on the update and re-read the row — if the round-tripped value is not yours, another interceptor won the claim. See the claim pseudocode in [build-your-own-interceptor.md](build-your-own-interceptor.md).
+`executing` doubles as a **claim marker**. The interceptor claims work by transitioning `ready → executing`; a second interceptor that queries `status: "ready"` afterward will not see the artifact in its result set.
+
+Race handling is enforced at the tool layer via conditional UPDATE. When two interceptors both read the artifact while it is `ready` and both call `update_artifact(status: "executing")`, `update_artifact` gates the write on the row still being in the caller's expected status (defaulting to the status read at the top of the call, or an explicit `expected_status` argument). The first UPDATE lands and returns the row; the second sees the row is no longer `ready` and returns `STATUS_CONFLICT` with the current server state. The loser then re-polls and picks up a different artifact — no silent double-claim, no invalid-transition detour.
+
+`metadata.claimed_by` is a useful audit-trail supplement (which interceptor holds the claim, when it started) but is not required to detect the race — `STATUS_CONFLICT` is the primary signal. Existing interceptors that detect races by round-tripping `metadata.claimed_by` still work correctly: the server-side conditional UPDATE fires strictly earlier than any read-back check, so any interceptor that would have caught a race the old way will now catch it via `STATUS_CONFLICT` instead. See the claim pseudocode in [build-your-own-interceptor.md](build-your-own-interceptor.md).
 
 An `executing` artifact is a **claim**, not a proof of progress. If the executor crashes, the artifact stays `executing` until manual recovery. See the failure handling section in [build-your-own-interceptor.md](build-your-own-interceptor.md).
 
@@ -101,9 +105,25 @@ Pointer shape is intentionally free-form (`{type: "git", repo, branch, path}`, `
 
 ## Immutable content on locked statuses
 
-Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` clears the hash.
+Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. Any caller-supplied `content_hash` is stripped before merge on both `store_artifact` and `update_artifact`. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` clears the hash.
 
 If a locked artifact needs to change, the correct move is to store a new artifact (typically with `metadata.supersedes` pointing at the old one) and `update_artifact` the old one to `superseded`. This preserves the audit trail — the interceptor can always trust that what it ran matches what was captured.
+
+## Pipeline metadata contract
+
+For cc-prompt artifacts consumed by an interceptor, the `metadata` JSONB carries the target routing and integrity fields the interceptor requires. This is a **contract enforced by the running system**, not just a naming suggestion — an interceptor watching for `ready` cc-prompts will demote any artifact missing the required fields back to `draft`.
+
+| Key | Requirement | Meaning |
+|---|---|---|
+| `target_repo` | **Required** for pipeline-consumed cc-prompts | Repository name the interceptor should check out. Missing → the interceptor demotes the artifact back to `draft`. |
+| `target_org` | Optional | Org/owner qualifying `target_repo`. Defaults per interceptor config when omitted. |
+| `content_hash` | **Auto-computed, do not supply** | SHA-256 of `content`, computed server-side on store and on promotion to a locked status. Any caller-supplied value is stripped. Interceptor recomputes and verifies at execution time; a mismatch aborts the run. |
+| `base_branch` | Conventional | Branch to base the working branch on (e.g., `main`). |
+| `working_branch` | Conventional | The interceptor-created branch that will carry the change. |
+| `branch_target` | **Deprecated** | Legacy alias for `target_repo`. Kept one release for reader compatibility; prefer `target_repo` in new artifacts. |
+| `batch_label`, `risk_hint`, `model`, `surface`, etc. | Free-form | Deployment-specific metadata. Extend as needed — nothing else is contract-load-bearing. |
+
+Authoring agents that produce cc-prompt artifacts must set `target_repo` before (or in the same `update_artifact` that promotes to) `ready`. The old suggestion that `branch_target` alone was sufficient was the source of a real incident: artifacts silently demoted on promotion because the pipeline could not resolve where to execute them.
 
 ## Where the interceptor fits
 

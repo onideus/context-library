@@ -171,7 +171,14 @@ Status lifecycle:
 - completed — execution finished
 - superseded — replaced or retired; reachable from any state
 
-Use 'execution_order' to sequence artifacts within a batch (e.g., a chain of CC prompts where 1 builds infrastructure, 2 adds tests, 3 updates docs). Use 'dependencies' for explicit cross-artifact ordering when execution_order is not enough. Use 'metadata' for flexible fields like branch_target, model, surface, batch_label.
+Use 'execution_order' to sequence artifacts within a batch (e.g., a chain of CC prompts where 1 builds infrastructure, 2 adds tests, 3 updates docs). Use 'dependencies' for explicit cross-artifact ordering when execution_order is not enough. Use 'metadata' for flexible fields — see the pipeline metadata contract below.
+
+Pipeline metadata contract (cc-prompt artifacts consumed by a pipeline interceptor):
+- 'target_repo' (REQUIRED for pipeline-consumed artifacts) — repository name the interceptor should check out. An interceptor watching for ready cc-prompts will demote any artifact missing this key back to draft; without target_repo it does not know where to execute.
+- 'target_org' (optional) — org/owner qualifying target_repo. Defaults per interceptor config when omitted.
+- 'content_hash' — SHA-256 of 'content'. Auto-computed server-side on store and on promotion to a locked status ('ready'/'executing'/'completed'); callers must NOT supply it. Any caller-supplied value is dropped. The interceptor recomputes and verifies at execution time; a mismatch aborts the run.
+- 'branch_target' (DEPRECATED) — kept for one release for reader compatibility. New artifacts should use 'target_repo' instead. Interceptors still read branch_target if target_repo is absent, but that fallback is going away.
+- Other conventional keys: 'base_branch', 'working_branch', 'model', 'surface', 'batch_label', 'risk_hint'. Free-form — deployments extend as needed.
 
 Integrity:
 - 'execution_order' must be unique within an 'artifact_type'. Attempting to store a duplicate returns EXECUTION_ORDER_CONFLICT. Leave execution_order unset (null) if you do not need a fixed slot.
@@ -199,6 +206,14 @@ Status transitions are enforced:
 - executing → completed, ready, superseded
 - completed → superseded
 - Any state → superseded (retirement)
+
+Concurrent status transitions are gated by a conditional UPDATE. When status is being changed, the write only lands if the row is still in the caller's expected status (the row's status as of the read at the top of this call, or 'expected_status' when supplied). A concurrent transition — including a competing interceptor's ready → executing claim — returns STATUS_CONFLICT with the current server state instead of overwriting. This is how the interceptor claim mutex works: two interceptors racing on ready → executing produce one success and one STATUS_CONFLICT, no silent overwrite.
+
+Pipeline metadata contract (cc-prompt artifacts):
+- 'target_repo' — REQUIRED for pipeline-consumed artifacts. An interceptor watching for ready cc-prompts will demote any artifact missing this key back to draft. If you promote to ready without target_repo set, expect the artifact to be demoted; add it via metadata: {target_repo: "..."} in the same update or an earlier one.
+- 'target_org' — optional, defaults per interceptor config.
+- 'content_hash' — SHA-256 of 'content', auto-computed server-side. Callers must NOT supply it — any supplied value is stripped from metadata updates before merge. On promotion to a locked status ('ready'/'executing'/'completed'), the hash is recomputed from the effective content. Reverting to 'draft' clears the hash. The interceptor verifies this hash at execution time.
+- 'branch_target' (DEPRECATED) — kept one release for reader compatibility; prefer 'target_repo'.
 
 Integrity:
 - 'execution_order' must be unique within an 'artifact_type'. Moving an artifact onto an already-used slot returns EXECUTION_ORDER_CONFLICT.
@@ -242,7 +257,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       dependencies: z.array(z.string()).optional().describe("UUIDs of artifacts that must complete before this one"),
       execution_order: z.number().int().optional().describe("Ordering within a batch (1, 2, 3...). Use for sequenced prompt chains."),
       related_task_ids: z.array(z.string()).optional().describe("UUIDs of tasks this artifact relates to"),
-      metadata: z.record(z.unknown()).optional().describe("Flexible metadata: branch_target, model, surface, batch_label, etc."),
+      metadata: z.record(z.unknown()).optional().describe("Flexible metadata. Pipeline contract for cc-prompt artifacts: 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it), 'target_org' (optional, defaults per interceptor config), 'base_branch', 'working_branch', 'model', 'surface', 'batch_label', 'risk_hint'. 'content_hash' is auto-computed server-side — do NOT supply it; any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo' (kept one release for reader compatibility)."),
     },
     async (args) => {
       if (!args.title?.trim()) {
@@ -540,7 +555,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       dependencies: z.array(z.string()).optional().describe("New dependencies (full replacement)"),
       execution_order: z.number().int().nullable().optional().describe("New execution_order, or null to clear"),
       related_task_ids: z.array(z.string()).optional().describe("New related task IDs (full replacement)"),
-      metadata: z.record(z.unknown()).optional().describe("Metadata to merge (top-level keys)"),
+      metadata: z.record(z.unknown()).optional().describe("Metadata to merge (top-level keys). Pipeline contract for cc-prompt artifacts: set 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it) and optionally 'target_org'. 'content_hash' is auto-computed server-side and any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo'."),
       expected_status: statusEnum.optional().describe(
         "Optimistic concurrency precondition. When provided AND status is being changed, the UPDATE runs conditionally against this value — if the row is no longer in expected_status, returns STATUS_CONFLICT with current server state instead of silently overwriting a concurrent transition. When omitted, the row's current status (as of the read at the top of this call) is used as the precondition."
       ),
