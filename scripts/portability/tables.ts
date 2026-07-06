@@ -137,7 +137,10 @@ export const TABLES: TableSpec[] = [
       "metadata",
       "created_at",
     ],
-    orderBy: "canonical_name, entity_type",
+    // `id` is a final tiebreaker: (canonical_name, entity_type) is not
+    // guaranteed unique across all deployments, and any collision would
+    // make consecutive exports diff spuriously.
+    orderBy: "canonical_name, entity_type, id",
     casts: {
       metadata: "jsonb",
     },

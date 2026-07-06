@@ -107,7 +107,14 @@ async function resolveAppVersion(): Promise<string> {
     const pkgPath = resolve(here, "..", "package.json");
     const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
     return pkg.version ?? "0.0.0";
-  } catch {
+  } catch (err) {
+    // A silent 0.0.0 fallback would mislabel the tarball filename and the
+    // manifest — surface the problem so the operator can set APP_VERSION
+    // or fix the package.json read rather than shipping a wrong version.
+    console.warn(
+      `[export] Could not read package.json to resolve app version (${(err as Error).message}); ` +
+        "falling back to 0.0.0. Set APP_VERSION to override."
+    );
     return "0.0.0";
   }
 }
@@ -173,15 +180,33 @@ async function copyHandoffs(
 
 // ── Migration inventory ───────────────────────────────────────────
 
+/**
+ * SQLSTATE 42P01 = undefined_table. See import.ts for the same guard —
+ * a bare catch-all here would silently swallow permission/connection
+ * errors and ship a manifest with `applied_migrations: []`, defeating
+ * the deterministic-diff promise on the next successful export and
+ * making `verifyMigrations` on import a no-op (nothing is "missing"
+ * from an empty list).
+ */
+const PG_UNDEFINED_TABLE = "42P01";
+
+function isUndefinedTableError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === PG_UNDEFINED_TABLE
+  );
+}
+
 async function readAppliedMigrations(): Promise<string[]> {
   try {
     const res = await query<{ filename: string }>(
       "SELECT filename FROM _migrations ORDER BY filename"
     );
     return res.rows.map((r) => r.filename);
-  } catch {
-    // _migrations table does not exist yet — treat as an empty schema.
-    return [];
+  } catch (err) {
+    if (isUndefinedTableError(err)) return [];
+    throw err;
   }
 }
 
