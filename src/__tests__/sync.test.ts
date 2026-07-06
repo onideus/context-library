@@ -759,20 +759,24 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       expect(res.rowCount).toBe(1);
     });
 
-    it("EXPLAIN shows the content-on-demand SELECT uses the partial index, not Seq Scan", async () => {
+    it("EXPLAIN shows the content-on-demand SELECT can use the partial index", async () => {
       // The partial index (`WHERE metadata ? 'content_hash'`) only helps if
       // the planner can prove the query rows are a subset of the indexed
       // rows. Without an explicit `metadata ? 'content_hash'` predicate in
       // the SELECT, Postgres does NOT deduce it from `metadata->>'content_hash' = $1`
       // and falls back to a sequential scan — silently invalidating #228's
       // fix. This test runs EXPLAIN against the exact query shape in
-      // routes.ts and asserts the plan mentions the index by name.
+      // routes.ts and asserts the planner considers the partial index a
+      // valid choice for this query shape.
       //
-      // Seed several rows so the planner has statistics to work with. On a
-      // very small table (n=1) Postgres may pick Seq Scan on cost grounds
-      // even when the index is valid — we want to test the planner logic,
-      // not the tiny-table degenerate case. Seeding a handful of rows makes
-      // the test robust to running in isolation.
+      // We disable seqscan for the EXPLAIN so the test answers the structural
+      // question — "is the SELECT written such that the partial-index predicate
+      // is provably implied?" — independent of table size. On a tiny test
+      // table Postgres will pick Seq Scan on pure cost grounds even when the
+      // index is fully valid; that's a runtime cost-model decision, not a
+      // regression in the query shape. In production the table grows and the
+      // planner switches to the index automatically — but only if the query
+      // shape allows it, which is what this test guards.
       const seedContent = "explain-plan-seed";
       const a = await callTool("store_artifact", {
         title: "Content-hash EXPLAIN seed",
@@ -782,15 +786,6 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       });
       expect(a.error).toBeUndefined();
       const seedHash = createHash("sha256").update(seedContent).digest("hex");
-      for (let i = 0; i < 8; i++) {
-        const extra = await callTool("store_artifact", {
-          title: `Content-hash EXPLAIN filler ${i}`,
-          artifact_type: "cc-prompt",
-          scope: "personal",
-          content: `explain-plan-filler-${i}`,
-        });
-        expect(extra.error).toBeUndefined();
-      }
 
       const pg = await import("pg");
       const client = new pg.default.Client({
@@ -801,9 +796,10 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
         database: PG_DATABASE,
       });
       await client.connect();
-      // Ensure the planner has current statistics — otherwise a freshly
-      // inserted row can appear as an ndistinct-1 outlier and skew the plan.
-      await client.query("ANALYZE artifacts");
+      // SET LOCAL keeps the setting confined to this transaction so the
+      // shared test database's global planner behavior is unaffected.
+      await client.query("BEGIN");
+      await client.query("SET LOCAL enable_seqscan = OFF");
       const plan = await client.query<{ "QUERY PLAN": string }>(
         `EXPLAIN
          SELECT content, pointer IS NOT NULL AS has_pointer
@@ -815,14 +811,16 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
          LIMIT 1`,
         [seedHash]
       );
+      await client.query("ROLLBACK");
       await client.end();
       const planText = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
-      // Positive: the index name appears — proves the planner picked it.
+      // The index name appears — proves the planner considers it a valid
+      // choice for this query shape. If the SELECT lost the `metadata ?
+      // 'content_hash'` predicate, the planner could not use the partial
+      // index and would fall back to another non-seqscan path (e.g. a
+      // different index or bitmap heap scan) — either way the assertion
+      // below would fail and the regression would be caught.
       expect(planText).toContain("idx_artifacts_content_hash");
-      // Negative: no Seq Scan on artifacts — proves the planner didn't fall
-      // back to a full-table read (which is the shipping defect we're
-      // guarding against).
-      expect(planText).not.toMatch(/Seq Scan on artifacts\b/);
     });
   });
 
