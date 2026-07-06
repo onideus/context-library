@@ -163,6 +163,18 @@ src/
                            #   conditional-UPDATE race, patch_handoff conflict,
                            #   GET /sync/content/:content_hash content-on-demand
                            #   (Postgres-gated)
+    export-import.test.ts  # Integration: full export → wipe → import round-trip
+                           #   across every managed table + handoff file tree;
+                           #   also covers non-empty-refusal, --dry-run, --force,
+                           #   and manifest model mismatch → re-embed queue
+                           #   (Postgres-gated)
+scripts/
+  export.ts                # npm run export — tarball + per-table JSONL + manifest
+  import.ts                # npm run import — restore + re-embed queue
+  portability/
+    tables.ts              # Shared table registry (columns, orderBy, casts)
+    io.ts                  # JSONL / tar helpers
+    manifest.ts            # ExportManifest shape
 ```
 
 ### Operational scripts
@@ -171,6 +183,9 @@ The `scripts/` directory contains tooling for one-off operations, data migration
 
 - `backfill-content-hashes.ts` — Adds `content_hash` to the `metadata` of existing locked artifacts (`ready`, `executing`, `completed`) that are missing it. Safe to re-run; already-hashed artifacts are skipped. Run once after upgrading from a version prior to the lockable-artifacts feature (PR #85). Run with `npx tsx scripts/backfill-content-hashes.ts`.
 - `compact-history.ts` — Compacts all handoff JSON files except the most recent, reducing file sizes by stripping non-essential keys. Skips handoffs whose embedding is still queued in `pending_embeddings`. Idempotent. Exposed as `npm run compact-history`.
+- `export.ts` — Produces a single gzipped tarball containing per-table JSONL, the handoff file tree, and `manifest.json` (app version, applied migrations, embedding model + dimensions, per-table row counts, handoff schema versions). Deterministic ordering per table so consecutive exports of an unchanged database diff cleanly — this is what makes a nightly-commit backup pattern work. Embeddings are excluded by default; `--include-embeddings` opts back in. `--out <dir>` overrides the default `<DATA_DIR>/exports/` output location. Exposed as `npm run export`. Table registry is shared with `import.ts` via `scripts/portability/tables.ts`.
+- `import.ts` — Restores an export tarball into a deployment. Verifies destination `_migrations` is at or beyond the manifest (runs the local migration runner if behind); refuses to import into a non-empty database without `--force`; loads each JSONL file in a per-table transaction with a manifest row-count check before commit; copies handoff files; queues re-embed through `pending_embeddings` when the tarball excluded embeddings or when the manifest's `embedding_model`/`embedding_dimensions` disagree with the destination's current config. `--dry-run` prints the plan without modifying the DB or filesystem. `--force` truncates every managed table (RESTART IDENTITY CASCADE) and clears `DATA_DIR/handoffs` before restoring. Exposed as `npm run import`. Full restore drill lives in `docs/backup-restore.md`.
+- `portability/` — Shared library for `export.ts` and `import.ts`. `tables.ts` is the single source of truth for which Postgres tables ship in an export, in what column order, sorted by which key, with which per-column type casts on restore. `io.ts` holds JSONL / tar helpers (system `tar` is shelled out to; no Node tar dependency). `manifest.ts` defines the manifest shape.
 - `extract-entities.ts` — Reads handoff JSON files from the configured data directory, batches them to the Anthropic API for entity extraction, and writes/merges a draft `entities.seed.json` for human review. Idempotent: an existing seed file is merged, preserving human-edited constraints. Exposed as `npm run extract-entities`. Requires `ANTHROPIC_API_KEY`.
 - `merge-entities.ts` — Pure merge logic for the entity seeding pipeline. Extracted from `extract-entities.ts` for testability. Not directly runnable.
 - `extract-entities.test.ts` — Test suite for the extraction and merge logic (lives in `scripts/`, not `src/__tests__/`).
