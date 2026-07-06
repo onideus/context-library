@@ -20,8 +20,18 @@ export interface ExportManifest {
   manifest_version: number;
   /** Semver from package.json / APP_VERSION at export time. */
   app_version: string;
-  /** ISO-8601 timestamp when the export ran. */
-  exported_at: string;
+  /**
+   * ISO-8601 timestamp when the export ran. OPTIONAL.
+   *
+   * Historical exports (manifest v1 prior to the deterministic-diff fix)
+   * included this field, and the import path still reads it when present
+   * for human-friendly logging. Fresh exports omit it so that consecutive
+   * exports of an unchanged database produce byte-identical `manifest.json`
+   * output — the timestamp is already carried in the tarball filename, so
+   * losing it here does not lose information. See `docs/backup-restore.md`
+   * "Nightly export" for the diff-committed backup pattern this enables.
+   */
+  exported_at?: string;
   /** Applied migration filenames (e.g. "007_pending_embeddings_expand.sql"). */
   applied_migrations: string[];
   /** Distinct schema_version values observed in handoff files. */

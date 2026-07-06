@@ -109,14 +109,32 @@ Options:
 
 // ── Preflight ─────────────────────────────────────────────────────
 
+/**
+ * Postgres SQLSTATE 42P01 = undefined_table. Only this code should be
+ * interpreted as "table not present yet" during preflight. Every other
+ * error (permission denied, connection lost, syntax) must propagate — a
+ * catch-all here would misclassify a real problem as "empty" and let a
+ * `--force` wipe proceed against a database the import can't safely touch.
+ */
+const PG_UNDEFINED_TABLE = "42P01";
+
+function isUndefinedTableError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === PG_UNDEFINED_TABLE
+  );
+}
+
 async function readAppliedMigrations(): Promise<Set<string>> {
   try {
     const res = await query<{ filename: string }>(
       "SELECT filename FROM _migrations"
     );
     return new Set(res.rows.map((r) => r.filename));
-  } catch {
-    return new Set();
+  } catch (err) {
+    if (isUndefinedTableError(err)) return new Set();
+    throw err;
   }
 }
 
@@ -170,8 +188,12 @@ async function checkDatabaseEmpty(): Promise<{
         `SELECT count(*)::text AS count FROM ${spec.name}`
       );
       counts[spec.name] = Number(res.rows[0]?.count ?? 0);
-    } catch {
-      counts[spec.name] = 0;
+    } catch (err) {
+      if (isUndefinedTableError(err)) {
+        counts[spec.name] = 0;
+        continue;
+      }
+      throw err;
     }
   }
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -191,16 +213,16 @@ async function countHandoffFiles(): Promise<number> {
 // ── Wipe (only used with --force) ─────────────────────────────────
 
 async function truncateAllTables(): Promise<void> {
-  // Reverse order = FK-safe. Every table is truncated with CASCADE and
-  // RESTART IDENTITY so BIGSERIAL / SERIAL sequences reset — otherwise a
-  // stale `changes.seq` peak would leave a gap in the fresh cursor space
-  // and confuse any sync client that had already pulled beyond it.
-  for (const spec of [...TABLES].reverse()) {
+  // TRUNCATE ... CASCADE handles cross-table FK dependencies, so iteration
+  // order is not load-bearing. Every table is truncated with RESTART
+  // IDENTITY so BIGSERIAL / SERIAL sequences reset — otherwise a stale
+  // `changes.seq` peak would leave a gap in the fresh cursor space and
+  // confuse any sync client that had already pulled beyond it.
+  for (const spec of TABLES) {
     try {
       await query(`TRUNCATE TABLE ${spec.name} RESTART IDENTITY CASCADE`);
     } catch (err) {
-      const msg = (err as Error).message ?? "";
-      if (/does not exist/i.test(msg)) continue;
+      if (isUndefinedTableError(err)) continue;
       throw err;
     }
   }
@@ -353,12 +375,15 @@ async function queueReembed(plan: ReembedPlan): Promise<void> {
     const handoffsDir = join(config.dataDir, "handoffs");
     const files = (await readdir(handoffsDir))
       .filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-"));
-    for (const filename of files) {
+    if (files.length > 0) {
+      // Batch into a single multi-value INSERT — 216+ handoff datasets
+      // would otherwise take 216+ round-trips.
+      const placeholders = files.map((_, i) => `('handoff', $${i + 1})`).join(", ");
       await query(
         `INSERT INTO pending_embeddings (content_type, content_id)
-         VALUES ('handoff', $1)
+         VALUES ${placeholders}
          ON CONFLICT (content_type, content_id) DO NOTHING`,
-        [filename]
+        files
       );
     }
   }
@@ -398,7 +423,8 @@ async function main(): Promise<void> {
       join(staging, "manifest.json")
     );
     console.log(
-      `[import] Manifest: app=${manifest.app_version}, exported_at=${manifest.exported_at}`
+      `[import] Manifest: app=${manifest.app_version}` +
+        (manifest.exported_at ? `, exported_at=${manifest.exported_at}` : "")
     );
     console.log(
       `[import] Manifest embedding: ${manifest.embedding_model} @ ${manifest.embedding_dimensions} ` +

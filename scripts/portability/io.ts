@@ -129,23 +129,83 @@ export function createTarball(
   });
 }
 
-/** Extract a gzipped tarball into `destDir`. Directory must already exist. */
+/**
+ * Extract a gzipped tarball into `destDir`. Directory must already exist.
+ *
+ * Pre-scans the archive listing and rejects entries that would escape
+ * `destDir` — absolute paths (leading "/"), tilde-home shortcuts, or any
+ * ".." segment. This is the primary path-safety layer. The primary caller
+ * is personal restore of one's own tarball, but the docs also position
+ * this as the adopter-restore path, so a malicious tarball landing on
+ * someone else's disk is a realistic threat model.
+ *
+ * GNU tar's default behavior also strips leading "/" from member names and
+ * refuses ".." traversal on extract; we do NOT pass `-P` / `--absolute-names`
+ * so those safeguards remain in effect as defense-in-depth. The pre-scan
+ * runs first so the operator sees a clear error rather than a partial
+ * extraction with paths mysteriously rewritten.
+ */
 export function extractTarball(
   tarballPath: string,
   destDir: string
 ): Promise<void> {
+  return listTarballEntries(tarballPath).then((entries) => {
+    for (const entry of entries) {
+      // Strip GNU tar's trailing "/" for directories before validating.
+      const normalized = entry.replace(/\/+$/, "");
+      if (normalized.length === 0) continue;
+      if (normalized.startsWith("/") || normalized.startsWith("~")) {
+        throw new Error(
+          `Refusing to extract tarball with absolute path entry: ${entry}`
+        );
+      }
+      const segments = normalized.split(/[\\/]+/);
+      if (segments.some((s) => s === "..")) {
+        throw new Error(
+          `Refusing to extract tarball with parent-directory traversal entry: ${entry}`
+        );
+      }
+    }
+    return new Promise<void>((resolve, reject) => {
+      const proc = spawn(
+        "tar",
+        ["-xzf", tarballPath, "-C", destDir],
+        { stdio: ["ignore", "pipe", "pipe"] }
+      );
+      const errBuf: string[] = [];
+      proc.stderr?.on("data", (chunk) => errBuf.push(chunk.toString()));
+      proc.on("error", reject);
+      proc.on("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`tar exited ${code}: ${errBuf.join("")}`));
+      });
+    });
+  });
+}
+
+/** List entries in a gzipped tarball (one relative path per line). */
+function listTarballEntries(tarballPath: string): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(
-      "tar",
-      ["-xzf", tarballPath, "-C", destDir],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
+    const proc = spawn("tar", ["-tzf", tarballPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const outBuf: string[] = [];
     const errBuf: string[] = [];
+    proc.stdout?.on("data", (chunk) => outBuf.push(chunk.toString()));
     proc.stderr?.on("data", (chunk) => errBuf.push(chunk.toString()));
     proc.on("error", reject);
     proc.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`tar exited ${code}: ${errBuf.join("")}`));
+      if (code === 0) {
+        resolve(
+          outBuf
+            .join("")
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0)
+        );
+      } else {
+        reject(new Error(`tar -tzf exited ${code}: ${errBuf.join("")}`));
+      }
     });
   });
 }

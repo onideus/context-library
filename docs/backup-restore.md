@@ -110,7 +110,7 @@ is holding a cursor that no longer maps to what the server thinks it
 means. The safe recovery for those clients is:
 
 1. Delete the local database on the client (mobile app, sync agent, etc).
-2. Repair or perform a full initial sync from `cursor=0`.
+2. Re-pair or perform a full initial sync from `cursor=0`.
 
 The server does not attempt to hide this from clients. It cannot — there
 is no invariant it could preserve. An epoch or instance-id on the sync
@@ -131,9 +131,12 @@ inside the container):
 
 For a versioned backup, point `--out` at a directory that's a git working
 tree of a **private repository** and commit the produced tarball (or a
-diff-friendly extracted form of it — the JSONL files are deterministic
-across exports of an unchanged database, so a diff between consecutive
-nights is only the rows that actually changed).
+diff-friendly extracted form of it — the JSONL files AND `manifest.json`
+are deterministic across exports of an unchanged database, so a diff
+between consecutive nights is only the rows that actually changed. The
+tarball itself is not byte-identical because `tar -czf` bakes in mtimes
+and a gzip header; commit the extracted tree, not the tarball, if you
+want clean diffs).
 
 > **Never commit an export tarball to the public repo.** The tarball
 > contains the entire personal dataset — every note, task, artifact, and
