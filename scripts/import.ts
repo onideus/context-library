@@ -458,7 +458,7 @@ async function main(): Promise<void> {
     const existingHandoffs = await countHandoffFiles();
 
     if (!empty || existingHandoffs > 0) {
-      if (!args.force) {
+      if (!args.force && !args.dryRun) {
         console.error("[import] Destination is not empty:");
         for (const [table, n] of Object.entries(counts)) {
           if (n > 0) console.error(`  ${table}: ${n} row(s)`);
@@ -474,10 +474,18 @@ async function main(): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      console.log(
-        `[import] --force: pre-wipe found ${Object.values(counts).reduce((a, b) => a + b, 0)} row(s) ` +
-          `across managed tables and ${existingHandoffs} handoff file(s)`
-      );
+      if (args.force) {
+        console.log(
+          `[import] --force: pre-wipe found ${Object.values(counts).reduce((a, b) => a + b, 0)} row(s) ` +
+            `across managed tables and ${existingHandoffs} handoff file(s)`
+        );
+      } else if (args.dryRun) {
+        console.log(
+          `[import] (dry-run) Destination is not empty ` +
+            `(${Object.values(counts).reduce((a, b) => a + b, 0)} row(s) across managed tables, ` +
+            `${existingHandoffs} handoff file(s)); a real run would require --force`
+        );
+      }
     }
 
     // Compute the re-embed plan up front so it appears in the dry-run output.
