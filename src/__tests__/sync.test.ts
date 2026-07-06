@@ -768,10 +768,11 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       // fix. This test runs EXPLAIN against the exact query shape in
       // routes.ts and asserts the plan mentions the index by name.
       //
-      // Seed a row so the planner has statistics to work with. Without any
-      // rows, Postgres may pick Seq Scan on cost grounds even when the index
-      // is otherwise valid — we want to test the planner logic, not the
-      // empty-table degenerate case.
+      // Seed several rows so the planner has statistics to work with. On a
+      // very small table (n=1) Postgres may pick Seq Scan on cost grounds
+      // even when the index is valid — we want to test the planner logic,
+      // not the tiny-table degenerate case. Seeding a handful of rows makes
+      // the test robust to running in isolation.
       const seedContent = "explain-plan-seed";
       const a = await callTool("store_artifact", {
         title: "Content-hash EXPLAIN seed",
@@ -781,6 +782,15 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       });
       expect(a.error).toBeUndefined();
       const seedHash = createHash("sha256").update(seedContent).digest("hex");
+      for (let i = 0; i < 8; i++) {
+        const extra = await callTool("store_artifact", {
+          title: `Content-hash EXPLAIN filler ${i}`,
+          artifact_type: "cc-prompt",
+          scope: "personal",
+          content: `explain-plan-filler-${i}`,
+        });
+        expect(extra.error).toBeUndefined();
+      }
 
       const pg = await import("pg");
       const client = new pg.default.Client({
