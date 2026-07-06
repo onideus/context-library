@@ -96,6 +96,10 @@ Follow-up fixes surfaced during PR #39 review.
 - **Hono security bump (PR #127)** and content_hash lifecycle fixes (PRs #161, #164)
 - **`/health/ready` readiness endpoint:** verifies the data directory is writable; returns `ok`/`degraded`
 
+### v0.11 (in-flight) — Backup, Export & Portability (pulled forward from v0.15)
+
+- **`npm run export`** and **`npm run import`** ship the four primitives + entity graph + sync tables + handoff file tree as a single portable tarball with a `manifest.json` (app version, applied migrations, embedding model + dimensions, row counts, handoff schema versions). Deterministic JSONL ordering so consecutive exports diff cleanly. Embeddings excluded by default and re-embedded through the existing `pending_embeddings` queue on import; `--include-embeddings` opts back in for exact restores. Import guards a non-empty destination behind `--force`; `--dry-run` is pure. Restore drill lives in `docs/backup-restore.md`. Table registry shared between the two scripts (`scripts/portability/tables.ts`). This lands earlier than its ROADMAP v0.15 slot because backup / DR rehearsal + embedding-model migration + adopter-restore are hard-blocked without it.
+
 ## Planned
 
 Ordered by expected leverage, not strict sequence. Version targets are tentative — entries may merge, split, or reorder as design work surfaces dependencies.
@@ -146,13 +150,7 @@ Everything lives in one global namespace today, so use across multiple projects 
 
 ### v0.15 — Backup, Export & Portability
 
-The data is the product; the code is replaceable. There is currently no supported way to move a deployment, recover from data loss, or migrate embedding models safely.
-
-**Rough design:**
-
-- **`npm run export`:** single tarball containing the handoff file tree, one JSONL file per Postgres table (tasks, notes, artifacts, entities, entity graph, pending queue), and a `manifest.json` (app version, applied migrations, handoff schema version, embedding model + dimensions). Embeddings excluded by default — they are recomputable — with `--include-embeddings` for exact restores.
-- **`npm run import`:** restores into a fresh deployment — applies migrations, loads JSONL, copies handoff files, and queues re-embedding through the existing `pending_embeddings` path whenever embeddings are absent or the manifest's model/dimensions disagree with the current config. This makes embedding-model upgrades a supported flow: export → change model → import.
-- **Docs:** a documented restore drill (export, wipe, import, verify counts + spot-check search) and a recommendation to schedule exports.
+**Shipped early in v0.11 (see the "in-flight" section above).** The mechanism was hard-blocking DR rehearsal, embedding-model migrations, and the adopter-restore story — pulling it forward turned a blocker into a supported flow. See `docs/backup-restore.md` for the restore drill.
 
 ### v0.16 — Observability & Read-Only UI
 

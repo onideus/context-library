@@ -11,3 +11,8 @@ proxy-data/
 .claude/settings.local.json
 entities.seed.json
 .github/.DS_Store
+# npm run export writes tarballs of the full personal dataset — never commit.
+# data/ already covers the default output dir; this catches the common
+# --out ./exports/ or --out /root/exports/ patterns too.
+exports/
+*.tar.gz
