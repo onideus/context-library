@@ -13,7 +13,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "extract-entities": "tsx scripts/extract-entities.ts",
-    "compact-history": "tsx scripts/compact-history.ts"
+    "compact-history": "tsx scripts/compact-history.ts",
+    "export": "tsx scripts/export.ts",
+    "import": "tsx scripts/import.ts"
   },
   "dependencies": {
     "@hono/mcp": "^0.2.4",
