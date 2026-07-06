@@ -210,18 +210,14 @@ async function applyTaskOp(
       conflict: { reason: "STALE_BASE", current: current.rows[0] },
     };
   }
-  // Precondition: expected_status — enforced only when the payload mutates
-  // status. Mirrors the item-3 conditional-UPDATE pattern in update_task so a
-  // sync push racing a chat/pipeline status transition returns STATUS_CONFLICT
-  // instead of silently overwriting the winner.
-  const statusChanging =
-    payload.status !== undefined && payload.status !== current.rows[0].status;
-  const useConditional =
-    statusChanging && typeof precondition.expected_status === "string";
-  if (
-    useConditional &&
-    String(current.rows[0].status) !== precondition.expected_status
-  ) {
+  // Precondition: expected_status — enforced whenever the caller supplies
+  // one, regardless of whether the payload changes status. This is the
+  // stricter, least-surprising contract for a sync client: an expected_status
+  // in a precondition is a claim about the row's current state, so a
+  // mismatch means the client's view is stale and STATUS_CONFLICT is the
+  // truthful answer. Matches the artifact path (see CLAUDE.md sync section).
+  const hasExpected = typeof precondition.expected_status === "string";
+  if (hasExpected && String(current.rows[0].status) !== precondition.expected_status) {
     return {
       status: "conflict" as const,
       snapshot: null,
@@ -240,13 +236,13 @@ async function applyTaskOp(
     return { status: "applied" as const, snapshot: current.rows[0] };
   }
   const idParam = `$${idx++}`;
-  const conditional = useConditional ? ` AND status = $${idx++}` : "";
-  const conditionalParams = useConditional ? [precondition.expected_status] : [];
+  const conditional = hasExpected ? ` AND status = $${idx++}` : "";
+  const conditionalParams = hasExpected ? [precondition.expected_status] : [];
   const upd = await client.query<Record<string, unknown>>(
     `UPDATE tasks SET ${sets.join(", ")} WHERE id = ${idParam}${conditional} RETURNING *`,
     [...params, op.entity_id, ...conditionalParams]
   );
-  if (upd.rows.length === 0 && useConditional) {
+  if (upd.rows.length === 0 && hasExpected) {
     // A concurrent writer transitioned status between our SELECT and UPDATE.
     // Re-read so the client sees the current state.
     const reread = await client.query<Record<string, unknown>>(
@@ -397,19 +393,12 @@ async function applyArtifactOp(op: PushOp, client: PoolClient): Promise<ApplyRes
     };
   }
   const currentStatus = String(current.rows[0].status);
-  const statusChanging =
-    payload.status !== undefined && payload.status !== currentStatus;
-  // Match applyTaskOp: only enforce expected_status when the payload actually
-  // mutates status. A pure metadata edit (e.g. title-only) that happens to
-  // carry expected_status is not a status transition, so it doesn't need the
-  // guard. Otherwise task and artifact would diverge on the same precondition
-  // shape, which is exactly what the item-3 spec section warns against.
-  const useConditional =
-    statusChanging && typeof precondition.expected_status === "string";
-  if (
-    useConditional &&
-    currentStatus !== precondition.expected_status
-  ) {
+  // expected_status is enforced whenever the caller supplies one, whether or
+  // not the payload changes status. Matches applyTaskOp and the artifact MCP
+  // update path. See CLAUDE.md sync section for the contract and why we
+  // chose the stricter semantic.
+  const hasExpected = typeof precondition.expected_status === "string";
+  if (hasExpected && currentStatus !== precondition.expected_status) {
     return {
       status: "conflict" as const,
       snapshot: null,
@@ -427,13 +416,13 @@ async function applyArtifactOp(op: PushOp, client: PoolClient): Promise<ApplyRes
     return { status: "applied" as const, snapshot: current.rows[0] };
   }
   const idParam = `$${idx++}`;
-  const conditional = useConditional ? ` AND status = $${idx++}` : "";
-  const conditionalParams = useConditional ? [precondition.expected_status] : [];
+  const conditional = hasExpected ? ` AND status = $${idx++}` : "";
+  const conditionalParams = hasExpected ? [precondition.expected_status] : [];
   const upd = await client.query<Record<string, unknown>>(
     `UPDATE artifacts SET ${sets.join(", ")} WHERE id = ${idParam}${conditional} RETURNING *`,
     [...params, op.entity_id, ...conditionalParams]
   );
-  if (upd.rows.length === 0 && useConditional) {
+  if (upd.rows.length === 0 && hasExpected) {
     const reread = await client.query<Record<string, unknown>>(
       "SELECT * FROM artifacts WHERE id = $1",
       [op.entity_id]
@@ -601,6 +590,68 @@ async function processPushOp(op: PushOp): Promise<
 const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 
 /**
+ * Read a Fetch Request body with a running byte counter that aborts as soon
+ * as the cumulative bytes exceed `maxBytes`. Returns either the buffered
+ * UTF-8 string or `{ oversized: true, actualBytes }` — actualBytes is a
+ * lower bound (at least maxBytes + 1) since the read cancels early.
+ *
+ * Why this exists: `Content-Length` can lie (chunked transfer encoding
+ * doesn't need one), and `await request.text()` fully buffers the body before
+ * we ever get a chance to check its length. An authenticated caller could
+ * stream a multi-hundred-MiB chunked body and force the server to buffer it
+ * all before rejection — DoS-adjacent even under an auth boundary. This
+ * helper reads chunk-by-chunk, counts bytes as they arrive, and cancels the
+ * reader the moment we go over the cap so no more chunks come off the wire.
+ */
+async function readBodyWithCap(
+  request: Request,
+  maxBytes: number
+): Promise<{ oversized: false; text: string } | { oversized: true; actualBytes: number }> {
+  const body = request.body;
+  if (!body) {
+    // No stream (some transports for zero-byte requests) — fall back to
+    // text() which is a no-op read here.
+    const text = await request.text();
+    const bytes = Buffer.byteLength(text, "utf-8");
+    if (bytes > maxBytes) return { oversized: true, actualBytes: bytes };
+    return { oversized: false, text };
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        // Cancel the stream so no further bytes get pulled off the socket.
+        // Any error from cancel is intentionally ignored — the caller only
+        // cares that we stop reading, not that the peer acknowledges.
+        try {
+          await reader.cancel();
+        } catch {
+          /* stream already closed */
+        }
+        return { oversized: true, actualBytes: total };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* released or in cancel state */
+    }
+  }
+
+  const buf = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)));
+  return { oversized: false, text: buf.toString("utf-8") };
+}
+
+/**
  * Register /sync/* routes on the app. All routes sit behind
  * syncAuthMiddleware; the MCP transport has its own upstream auth path.
  */
@@ -681,8 +732,16 @@ export function registerSyncRoutes(app: Hono): void {
     // Body-size ceiling before we parse. `pushBodySchema.max(200)` bounds op
     // count but each `payload` / `precondition` is `z.unknown()`, so without
     // this a bearer-authenticated caller could push a 200-op batch of multi-MB
-    // artifact content — DoS-adjacent. Content-Length can lie (chunked
-    // encoding), so we also cap the actual bytes we read.
+    // artifact content — DoS-adjacent.
+    //
+    // Two guards:
+    //   1. Content-Length short-circuit — cheapest possible rejection for
+    //      honest clients that declare the length.
+    //   2. Streaming byte counter — Content-Length is optional under HTTP/1.1
+    //      chunked transfer encoding, so a malicious client can simply omit
+    //      it and stream. `readBodyWithCap` counts bytes as they arrive and
+    //      cancels the reader the moment we exceed the cap, so we never
+    //      buffer a 200 MiB payload just to reject it.
     const contentLength = c.req.header("content-length");
     if (contentLength) {
       const declared = parseInt(contentLength, 10);
@@ -699,24 +758,24 @@ export function registerSyncRoutes(app: Hono): void {
       }
     }
 
-    let bodyText: string;
+    let readResult: { oversized: false; text: string } | { oversized: true; actualBytes: number };
     try {
-      bodyText = await c.req.text();
+      readResult = await readBodyWithCap(c.req.raw, config.syncPushMaxBytes);
     } catch {
       return c.json({ error: "invalid body", code: "INVALID_BODY" }, 400);
     }
-    const actualBytes = Buffer.byteLength(bodyText, "utf-8");
-    if (actualBytes > config.syncPushMaxBytes) {
+    if (readResult.oversized) {
       return c.json(
         {
           error: "push body too large",
           code: "PAYLOAD_TOO_LARGE",
           max_bytes: config.syncPushMaxBytes,
-          actual_bytes: actualBytes,
+          actual_bytes: readResult.actualBytes,
         },
         413
       );
     }
+    const bodyText = readResult.text;
 
     let body: unknown;
     try {
@@ -821,18 +880,22 @@ export function registerSyncRoutes(app: Hono): void {
     }
 
     // Single-query resolution across the three outcomes:
-    //   * no rows                                → CONTENT_NOT_FOUND
     //   * a row with inline content              → return it
     //   * a row with content NULL and a pointer  → CONTENT_NOT_INLINE
-    //   * a row with content NULL and no pointer → CONTENT_NOT_FOUND (data
-    //     corruption; the hash claim can't be honoured either way, so the
-    //     truthful answer is "we can't materialise this content").
-    // ORDER BY prefers inline over pointer-only over corrupt so multi-row
-    // matches always resolve to the best available answer.
+    //   * anything else (no rows, or content NULL + pointer NULL) →
+    //     CONTENT_NOT_FOUND. The pointer-null-and-content-null case is data
+    //     corruption; the hash claim can't be honoured, so the truthful
+    //     answer is "we don't have this content" — CONTENT_NOT_INLINE would
+    //     mislead the client into believing a pointer exists.
+    // ORDER BY prefers inline over pointer-only so multi-row matches always
+    // resolve to the best available answer. The WHERE clause requires either
+    // inline content or a non-null pointer, filtering corrupted rows out of
+    // consideration entirely.
     const res = await query<{ content: string | null; has_pointer: boolean }>(
       `SELECT content, pointer IS NOT NULL AS has_pointer
        FROM artifacts
        WHERE metadata->>'content_hash' = $1
+         AND (content IS NOT NULL OR pointer IS NOT NULL)
        ORDER BY (content IS NOT NULL) DESC, (pointer IS NOT NULL) DESC
        LIMIT 1`,
       [hash]
@@ -854,20 +917,12 @@ export function registerSyncRoutes(app: Hono): void {
         content: row.content,
       });
     }
-    if (row.has_pointer) {
-      return c.json(
-        {
-          error: "artifact content is not inline",
-          code: "CONTENT_NOT_INLINE",
-          content_hash: hash,
-        },
-        404
-      );
-    }
+    // At this point content is NULL and the WHERE guarantees pointer is
+    // NOT NULL, so this is genuinely a pointer-only artifact.
     return c.json(
       {
-        error: "content_hash not found",
-        code: "CONTENT_NOT_FOUND",
+        error: "artifact content is not inline",
+        code: "CONTENT_NOT_INLINE",
         content_hash: hash,
       },
       404
