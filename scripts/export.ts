@@ -154,8 +154,14 @@ async function copyHandoffs(
       if (typeof parsed.schema_version === "number") {
         schemaVersions.add(parsed.schema_version);
       }
-    } catch {
-      // Corrupt handoff file — count it but don't record a schema version.
+    } catch (err) {
+      // Corrupt handoff file — count it (it's already been copied) but
+      // surface a warning so the operator finds out at export time rather
+      // than on restore.
+      console.warn(
+        `[export] handoffs/${filename}: could not parse — copied verbatim, ` +
+          `schema_version not recorded (${(err as Error).message})`
+      );
     }
   }
 
@@ -185,8 +191,12 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const appVersion = await resolveAppVersion();
 
-  const now = new Date();
-  const stamp = now.toISOString().replace(/[:.]/g, "").replace(/-/g, "");
+  // Format as YYYYMMDDTHHmmssZ (no milliseconds) — matches the shape
+  // documented in the file-header comment and docs/backup-restore.md.
+  const stamp = new Date()
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "Z")
+    .replace(/[-:]/g, "");
   const tarballName = `context-library-${appVersion}-${stamp}.tar.gz`;
   await ensureDir(args.outDir);
   const tarballPath = join(args.outDir, tarballName);
@@ -211,13 +221,24 @@ async function main(): Promise<void> {
         console.log(`[export] tables/${spec.name}.jsonl: ${n} row(s)`);
       } catch (err) {
         // A missing table (fresh install that has never applied a given
-        // migration) is not fatal — record zero and keep going. Any other
-        // error re-throws.
-        const msg = (err as Error).message ?? "";
-        if (/relation .* does not exist/i.test(msg)) {
+        // migration) is not fatal — record zero and keep going. Only PG's
+        // undefined_table (42P01) is treated this way. Any other error
+        // re-throws to fail fast.
+        if (
+          typeof err === "object" &&
+          err !== null &&
+          (err as { code?: unknown }).code === "42P01"
+        ) {
           rowCounts[spec.name] = 0;
           await writeJsonlFile(join(tablesStaging, `${spec.name}.jsonl`), []);
-          console.warn(`[export] tables/${spec.name}.jsonl: table missing, wrote empty file`);
+          if (spec.embeddingsOnly && args.includeEmbeddings) {
+            console.warn(
+              `[export] --include-embeddings requested but ${spec.name} table is absent; ` +
+                "wrote empty JSONL. Import will queue every row for re-embed as usual."
+            );
+          } else {
+            console.warn(`[export] tables/${spec.name}.jsonl: table missing, wrote empty file`);
+          }
         } else {
           throw err;
         }
@@ -228,10 +249,15 @@ async function main(): Promise<void> {
     const handoffs = await copyHandoffs(handoffsSrc, staging);
     console.log(`[export] handoffs/: ${handoffs.count} file(s)`);
 
+    // NOTE: `exported_at` is deliberately omitted. Its ever-changing value
+    // was defeating the deterministic-diff promise of the nightly-commit
+    // backup pattern documented in docs/backup-restore.md — a manifest that
+    // differs on every run means a git commit is generated even when the
+    // underlying data has not changed. The tarball filename still carries
+    // the timestamp for human-scale bookkeeping.
     const manifest: ExportManifest = {
       manifest_version: MANIFEST_VERSION,
       app_version: appVersion,
-      exported_at: now.toISOString(),
       applied_migrations: await readAppliedMigrations(),
       handoff_schema_versions: handoffs.schema_versions,
       handoff_file_count: handoffs.count,
