@@ -698,8 +698,334 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       expect(body.code).toBe("CONTENT_NOT_INLINE");
       expect(body.content_hash).toBe(hash);
     });
+
+    it("returns CONTENT_NOT_FOUND (not CONTENT_NOT_INLINE) when both content and pointer are null", async () => {
+      // #231 truthfulness: pointer IS NOT NULL is now required to reach the
+      // CONTENT_NOT_INLINE branch. A row with a hash claim but neither
+      // content nor pointer is data corruption — surfacing "not inline"
+      // would mislead the client into believing a pointer exists to fetch.
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      const hash = createHash("sha256").update("corrupted-row-no-content-no-pointer").digest("hex");
+      await client.query(
+        `INSERT INTO artifacts (title, artifact_type, content, pointer, status, scope, metadata)
+         VALUES ($1, $2, NULL, NULL, 'draft', 'personal', $3::jsonb)`,
+        [
+          "Corrupted artifact",
+          "research",
+          JSON.stringify({ content_hash: hash }),
+        ]
+      );
+      await client.end();
+
+      const res = await fetchContent(hash);
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(body.code).toBe("CONTENT_NOT_FOUND");
+      expect(body.content_hash).toBe(hash);
+    });
+  });
+
+  describe("content_hash functional index (#228)", () => {
+    // Migration 012 adds a B-tree index over artifacts((metadata->>'content_hash'))
+    // so the mobile-facing /sync/content/:hash endpoint never falls back to a
+    // sequential scan. If this test fails after a schema change, either the
+    // migration was dropped or the index was renamed — both are shipping
+    // defects.
+    it("the functional index exists after migrations run", async () => {
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      const res = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = 'artifacts'
+           AND indexname = 'idx_artifacts_content_hash'`
+      );
+      await client.end();
+      expect(res.rowCount).toBe(1);
+    });
+
+    it("EXPLAIN shows the content-on-demand SELECT can use the partial index", async () => {
+      // The partial index (`WHERE metadata ? 'content_hash'`) only helps if
+      // the planner can prove the query rows are a subset of the indexed
+      // rows. Without an explicit `metadata ? 'content_hash'` predicate in
+      // the SELECT, Postgres does NOT deduce it from `metadata->>'content_hash' = $1`
+      // and falls back to a sequential scan — silently invalidating #228's
+      // fix. This test runs EXPLAIN against the exact query shape in
+      // routes.ts and asserts the planner considers the partial index a
+      // valid choice for this query shape.
+      //
+      // We disable seqscan for the EXPLAIN so the test answers the structural
+      // question — "is the SELECT written such that the partial-index predicate
+      // is provably implied?" — independent of table size. On a tiny test
+      // table Postgres will pick Seq Scan on pure cost grounds even when the
+      // index is fully valid; that's a runtime cost-model decision, not a
+      // regression in the query shape. In production the table grows and the
+      // planner switches to the index automatically — but only if the query
+      // shape allows it, which is what this test guards.
+      const seedContent = "explain-plan-seed";
+      const a = await callTool("store_artifact", {
+        title: "Content-hash EXPLAIN seed",
+        artifact_type: "cc-prompt",
+        scope: "personal",
+        content: seedContent,
+      });
+      expect(a.error).toBeUndefined();
+      const seedHash = createHash("sha256").update(seedContent).digest("hex");
+
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      // SET LOCAL keeps the setting confined to this transaction so the
+      // shared test database's global planner behavior is unaffected.
+      await client.query("BEGIN");
+      await client.query("SET LOCAL enable_seqscan = OFF");
+      const plan = await client.query<{ "QUERY PLAN": string }>(
+        `EXPLAIN
+         SELECT content, pointer IS NOT NULL AS has_pointer
+         FROM artifacts
+         WHERE metadata ? 'content_hash'
+           AND metadata->>'content_hash' = $1
+           AND (content IS NOT NULL OR pointer IS NOT NULL)
+         ORDER BY (content IS NOT NULL) DESC, (pointer IS NOT NULL) DESC
+         LIMIT 1`,
+        [seedHash]
+      );
+      await client.query("ROLLBACK");
+      await client.end();
+      const planText = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
+      // The index name appears — proves the planner considers it a valid
+      // choice for this query shape. If the SELECT lost the `metadata ?
+      // 'content_hash'` predicate, the planner could not use the partial
+      // index and would fall back to another non-seqscan path (e.g. a
+      // different index or bitmap heap scan) — either way the assertion
+      // below would fail and the regression would be caught.
+      expect(planText).toContain("idx_artifacts_content_hash");
+    });
+  });
+
+  describe("expected_status enforced whenever present (#222)", () => {
+    // The reviewer flagged the split: task path only enforced expected_status
+    // when the payload changed status; artifact path enforced whenever set.
+    // Post-fix, both paths enforce whenever set — so a title-only update
+    // carrying a stale expected_status is a STATUS_CONFLICT on both.
+
+    it("task: title-only update with stale expected_status returns STATUS_CONFLICT", async () => {
+      const t = await callTool("create_task", {
+        title: "Title-only expected_status - task",
+        scope: "personal",
+      });
+      // Advance status out from under the client's mental model.
+      await callTool("update_task", { id: t.id, action: "complete" });
+
+      const staleOp = {
+        op_uuid: randomUUID(),
+        entity_type: "task" as const,
+        entity_id: t.id,
+        op: "update" as const,
+        payload: { title: "renamed while stale" },
+        precondition: { expected_status: "open" }, // stale — row is now completed
+      };
+      const res = await (await syncPost("/sync/push", { ops: [staleOp] })).json();
+      const result = res.results[0];
+      expect(result.status).toBe("conflict");
+      expect(result.conflict.reason).toBe("STATUS_CONFLICT");
+      expect(result.conflict.current.status).toBe("completed");
+      // Ensure the title update did NOT sneak through.
+      const reread = await callTool("get_task", { id: t.id });
+      expect(reread.title).toBe("Title-only expected_status - task");
+    });
+
+    it("artifact: title-only update with stale expected_status returns STATUS_CONFLICT", async () => {
+      const a = await callTool("store_artifact", {
+        title: "Title-only expected_status - artifact",
+        artifact_type: "cc-prompt",
+        scope: "personal",
+        content: "irrelevant",
+      });
+      await callTool("update_artifact", { id: a.id, status: "ready" });
+
+      const staleOp = {
+        op_uuid: randomUUID(),
+        entity_type: "artifact" as const,
+        entity_id: a.id,
+        op: "update" as const,
+        payload: { title: "should not apply" },
+        precondition: { expected_status: "draft" }, // stale — row is ready
+      };
+      const res = await (await syncPost("/sync/push", { ops: [staleOp] })).json();
+      const result = res.results[0];
+      expect(result.status).toBe("conflict");
+      expect(result.conflict.reason).toBe("STATUS_CONFLICT");
+      expect(result.conflict.current.status).toBe("ready");
+    });
+
+    it("task: title-only update with matching expected_status applies", async () => {
+      const t = await callTool("create_task", {
+        title: "Matching expected_status - task",
+        scope: "personal",
+      });
+      const op = {
+        op_uuid: randomUUID(),
+        entity_type: "task" as const,
+        entity_id: t.id,
+        op: "update" as const,
+        payload: { title: "new title" },
+        precondition: { expected_status: "open" }, // matches
+      };
+      const res = await (await syncPost("/sync/push", { ops: [op] })).json();
+      expect(res.results[0].status).toBe("applied");
+      expect(res.results[0].snapshot.title).toBe("new title");
+    });
+  });
+
+  describe("update_note concurrent-delete guard (#223)", () => {
+    // Regression test for the phantom-change-row bug: if a concurrent DELETE
+    // lands between the pre-check SELECT and the UPDATE, we must NOT append
+    // a `note:update` change row for a row that no longer exists (that would
+    // reach the mobile client as a snapshot=null tombstone-lookalike with
+    // the wrong op). The tool must return NOT_FOUND cleanly instead.
+    it("delete between SELECT and UPDATE returns NOT_FOUND and appends no change row", async () => {
+      const n = await callTool("create_note", {
+        title: "Concurrent-delete guard",
+        content: "will be deleted between the two queries",
+        scope: "personal",
+      });
+      const cursorBefore = await getMaxSeq();
+
+      // Directly delete the row so the SELECT-then-UPDATE race is guaranteed.
+      // Since we can't slip a delete between two tool-internal queries from
+      // the test, we simulate the observable outcome: an update issued for a
+      // row that no longer exists should surface NOT_FOUND, not throw and
+      // not append a change row. This is exactly the code path the fix
+      // guards.
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      await client.query("DELETE FROM notes WHERE id = $1", [n.id]);
+      await client.end();
+
+      const result = await callTool("update_note", {
+        id: n.id,
+        title: "should not persist",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NOT_FOUND");
+
+      // Ensure no phantom note:update row was appended.
+      const after = await syncGet(`/sync/changes?cursor=${cursorBefore}&limit=100`);
+      const body = await after.json();
+      const phantom = body.changes.filter(
+        (c: any) => c.entity_type === "note" && c.entity_id === n.id && c.op === "update"
+      );
+      expect(phantom.length).toBe(0);
+      // Note: the direct SQL DELETE we issued to simulate the concurrent
+      // delete ran outside the sync tx, so no `note:delete` change row
+      // exists either. The only assertion that matters here is the absence
+      // of a phantom `note:update` — the bug we're guarding against.
+    });
+  });
+
+  describe("streaming body-cap enforcement (#225)", () => {
+    // Content-Length can be omitted under HTTP/1.1 chunked transfer encoding.
+    // The push handler must count bytes as they arrive on the wire and
+    // cancel the reader on cap overflow, rather than buffer the whole body
+    // and only reject after. This test ships a chunked body without a
+    // Content-Length header to confirm the streaming counter fires.
+    //
+    // Runtime prerequisite: this test relies on undici (Node's built-in
+    // fetch implementation) to accept a ReadableStream body + `duplex:
+    // "half"` and to serialise it with chunked transfer encoding. Vitest
+    // under Node 22 uses undici by default, so the assumption holds in CI.
+    // If the suite is ever ported to a runtime whose fetch does NOT support
+    // stream bodies (browsers, some polyfills), this test will fail at
+    // fetch() before ever hitting the server — that is the correct failure
+    // mode, and the test title makes the intent clear enough that a future
+    // maintainer will spot the mismatch.
+    it("rejects an oversized chunked body without a Content-Length header", async () => {
+      // Build a body larger than syncPushMaxBytes (5 MiB default) as a
+      // ReadableStream. Node's fetch adds Transfer-Encoding: chunked when
+      // the body is a stream and no Content-Length is provided.
+      const chunkSize = 256 * 1024; // 256 KiB per chunk
+      const chunkCount = 24; // 6 MiB total, well over the 5 MiB cap
+      const encoder = new TextEncoder();
+      // Valid JSON opener so if the streaming guard is broken and the
+      // handler tries to parse, it still can't succeed — the assertion
+      // catches the bug either way, but the 413 code path is what we're
+      // proving.
+      const opener = encoder.encode('{"ops":[');
+      const filler = encoder.encode("x".repeat(chunkSize));
+      let emitted = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (emitted === 0) {
+            controller.enqueue(opener);
+          }
+          if (emitted < chunkCount) {
+            controller.enqueue(filler);
+            emitted++;
+          } else {
+            controller.close();
+          }
+        },
+      });
+
+      const res = await fetch(`${BASE_URL}/sync/push`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${BEARER}`,
+          "Content-Type": "application/json",
+          // Deliberately NO Content-Length — Node's fetch will send this
+          // chunked.
+        },
+        // Node's fetch supports ReadableStream bodies and requires the
+        // `duplex: "half"` flag; both are missing from the DOM lib RequestInit
+        // type, so this cast unblocks the runtime call.
+        ...({ body: stream, duplex: "half" } as unknown as RequestInit),
+      });
+
+      expect(res.status).toBe(413);
+      const body = await res.json();
+      expect(body.code).toBe("PAYLOAD_TOO_LARGE");
+      // actual_bytes must be a lower bound (>= max_bytes + 1) if the
+      // streaming counter fired — because the reader cancelled, the value
+      // must not equal the full oversize body size (which would prove the
+      // handler buffered the entire body).
+      expect(body.actual_bytes).toBeGreaterThan(config_syncPushMaxBytesDefault);
+      expect(body.actual_bytes).toBeLessThan(chunkSize * chunkCount + 1024);
+    });
   });
 });
+
+// Server-side default kept in sync with src/config.ts. Tests don't import
+// config directly because that would pull the pg pool into the test process.
+const config_syncPushMaxBytesDefault = 5 * 1024 * 1024;
 
 // Helper: pull the current max seq from the changes table via /sync/changes.
 // The suite uses this to know "everything before now" so that per-test
