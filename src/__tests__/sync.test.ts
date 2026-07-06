@@ -758,6 +758,62 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       await client.end();
       expect(res.rowCount).toBe(1);
     });
+
+    it("EXPLAIN shows the content-on-demand SELECT uses the partial index, not Seq Scan", async () => {
+      // The partial index (`WHERE metadata ? 'content_hash'`) only helps if
+      // the planner can prove the query rows are a subset of the indexed
+      // rows. Without an explicit `metadata ? 'content_hash'` predicate in
+      // the SELECT, Postgres does NOT deduce it from `metadata->>'content_hash' = $1`
+      // and falls back to a sequential scan — silently invalidating #228's
+      // fix. This test runs EXPLAIN against the exact query shape in
+      // routes.ts and asserts the plan mentions the index by name.
+      //
+      // Seed a row so the planner has statistics to work with. Without any
+      // rows, Postgres may pick Seq Scan on cost grounds even when the index
+      // is otherwise valid — we want to test the planner logic, not the
+      // empty-table degenerate case.
+      const seedContent = "explain-plan-seed";
+      const a = await callTool("store_artifact", {
+        title: "Content-hash EXPLAIN seed",
+        artifact_type: "cc-prompt",
+        scope: "personal",
+        content: seedContent,
+      });
+      expect(a.error).toBeUndefined();
+      const seedHash = createHash("sha256").update(seedContent).digest("hex");
+
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      // Ensure the planner has current statistics — otherwise a freshly
+      // inserted row can appear as an ndistinct-1 outlier and skew the plan.
+      await client.query("ANALYZE artifacts");
+      const plan = await client.query<{ "QUERY PLAN": string }>(
+        `EXPLAIN
+         SELECT content, pointer IS NOT NULL AS has_pointer
+         FROM artifacts
+         WHERE metadata ? 'content_hash'
+           AND metadata->>'content_hash' = $1
+           AND (content IS NOT NULL OR pointer IS NOT NULL)
+         ORDER BY (content IS NOT NULL) DESC, (pointer IS NOT NULL) DESC
+         LIMIT 1`,
+        [seedHash]
+      );
+      await client.end();
+      const planText = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
+      // Positive: the index name appears — proves the planner picked it.
+      expect(planText).toContain("idx_artifacts_content_hash");
+      // Negative: no Seq Scan on artifacts — proves the planner didn't fall
+      // back to a full-table read (which is the shipping defect we're
+      // guarding against).
+      expect(planText).not.toMatch(/Seq Scan on artifacts\b/);
+    });
   });
 
   describe("expected_status enforced whenever present (#222)", () => {
@@ -881,9 +937,10 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
         (c: any) => c.entity_type === "note" && c.entity_id === n.id && c.op === "update"
       );
       expect(phantom.length).toBe(0);
-      // A delete row IS expected (from our direct DELETE was outside the
-      // sync tx, so no change row for that either). Either way, there
-      // MUST NOT be an "update" row.
+      // Note: the direct SQL DELETE we issued to simulate the concurrent
+      // delete ran outside the sync tx, so no `note:delete` change row
+      // exists either. The only assertion that matters here is the absence
+      // of a phantom `note:update` — the bug we're guarding against.
     });
   });
 
@@ -893,6 +950,16 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     // cancel the reader on cap overflow, rather than buffer the whole body
     // and only reject after. This test ships a chunked body without a
     // Content-Length header to confirm the streaming counter fires.
+    //
+    // Runtime prerequisite: this test relies on undici (Node's built-in
+    // fetch implementation) to accept a ReadableStream body + `duplex:
+    // "half"` and to serialise it with chunked transfer encoding. Vitest
+    // under Node 22 uses undici by default, so the assumption holds in CI.
+    // If the suite is ever ported to a runtime whose fetch does NOT support
+    // stream bodies (browsers, some polyfills), this test will fail at
+    // fetch() before ever hitting the server — that is the correct failure
+    // mode, and the test title makes the intent clear enough that a future
+    // maintainer will spot the mismatch.
     it("rejects an oversized chunked body without a Content-Length header", async () => {
       // Build a body larger than syncPushMaxBytes (5 MiB default) as a
       // ReadableStream. Node's fetch adds Transfer-Encoding: chunked when

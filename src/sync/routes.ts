@@ -592,8 +592,16 @@ const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 /**
  * Read a Fetch Request body with a running byte counter that aborts as soon
  * as the cumulative bytes exceed `maxBytes`. Returns either the buffered
- * UTF-8 string or `{ oversized: true, actualBytes }` — actualBytes is a
- * lower bound (at least maxBytes + 1) since the read cancels early.
+ * UTF-8 string or `{ oversized: true, actualBytes }`.
+ *
+ * `actualBytes` is a **lower bound**, not an exact size: the reader cancels
+ * on the first chunk that crosses `maxBytes`, so the value is guaranteed to
+ * be `> maxBytes` but says nothing about how much more of the body would
+ * have arrived on the wire. This is the whole point — we deliberately do
+ * NOT read the rest just to compute an exact size. The wire-facing response
+ * field on POST /sync/push mirrors this: `actual_bytes` in the 413 body is
+ * likewise a lower bound. If a client parser needs an upper bound it should
+ * consult `Content-Length` (which may itself be absent under chunked TE).
  *
  * Why this exists: `Content-Length` can lie (chunked transfer encoding
  * doesn't need one), and `await request.text()` fully buffers the body before
@@ -770,6 +778,10 @@ export function registerSyncRoutes(app: Hono): void {
           error: "push body too large",
           code: "PAYLOAD_TOO_LARGE",
           max_bytes: config.syncPushMaxBytes,
+          // Lower bound only — the reader cancelled the stream on the first
+          // chunk that crossed `max_bytes`, so this is guaranteed `>
+          // max_bytes` but is NOT the true wire size of what the client was
+          // going to send. See readBodyWithCap for the invariant.
           actual_bytes: readResult.actualBytes,
         },
         413
@@ -891,10 +903,20 @@ export function registerSyncRoutes(app: Hono): void {
     // resolve to the best available answer. The WHERE clause requires either
     // inline content or a non-null pointer, filtering corrupted rows out of
     // consideration entirely.
+    //
+    // `metadata ? 'content_hash'` is a redundant predicate for correctness
+    // (`metadata->>'content_hash' = $1` already rules out rows without the
+    // key), but it is REQUIRED for the planner to select the partial index
+    // from migration 012 (`WHERE metadata ? 'content_hash'`). Without this
+    // predicate the planner can't prove the query's rows are a subset of the
+    // partial index's rows and falls back to a Seq Scan on artifacts, which
+    // is the exact iOS-hot-path defect #228 was filed against. See the
+    // content_hash index EXPLAIN test in src/__tests__/sync.test.ts.
     const res = await query<{ content: string | null; has_pointer: boolean }>(
       `SELECT content, pointer IS NOT NULL AS has_pointer
        FROM artifacts
-       WHERE metadata->>'content_hash' = $1
+       WHERE metadata ? 'content_hash'
+         AND metadata->>'content_hash' = $1
          AND (content IS NOT NULL OR pointer IS NOT NULL)
        ORDER BY (content IS NOT NULL) DESC, (pointer IS NOT NULL) DESC
        LIMIT 1`,
