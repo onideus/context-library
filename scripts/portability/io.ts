@@ -144,6 +144,10 @@ export function createTarball(
  * so those safeguards remain in effect as defense-in-depth. The pre-scan
  * runs first so the operator sees a clear error rather than a partial
  * extraction with paths mysteriously rewritten.
+ *
+ * `--no-same-permissions` and `--no-same-owner` prevent a hostile tarball
+ * from setuid/setgid bits or from claiming ownership other than the
+ * restoring user's — a defensive hardening on top of the pre-scan.
  */
 export function extractTarball(
   tarballPath: string,
@@ -169,7 +173,14 @@ export function extractTarball(
     return new Promise<void>((resolve, reject) => {
       const proc = spawn(
         "tar",
-        ["-xzf", tarballPath, "-C", destDir],
+        [
+          "-xzf",
+          tarballPath,
+          "-C",
+          destDir,
+          "--no-same-permissions",
+          "--no-same-owner",
+        ],
         { stdio: ["ignore", "pipe", "pipe"] }
       );
       const errBuf: string[] = [];

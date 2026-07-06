@@ -534,6 +534,80 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
     expect(orig.rowCount).toBe(1);
   }, SCRIPT_TIMEOUT_MS);
 
+  it("consecutive exports of an unchanged database are byte-identical", async () => {
+    // The nightly-commit backup pattern documented in docs/backup-restore.md
+    // depends on manifest.json and every tables/*.jsonl being byte-equal
+    // between consecutive exports of an unchanged database. If this ever
+    // regresses (e.g. a wall-clock timestamp is added back to the manifest,
+    // or a table's orderBy stops being deterministic) the diff pattern
+    // silently produces a new commit every night.
+    //
+    // Fresh-seed both runs from an identical starting DB so the previous
+    // tests' extra rows don't pollute the comparison.
+    await applyMigrationsFresh();
+    await rm(join(TEST_DATA_DIR, "handoffs"), { recursive: true, force: true });
+    await client.end();
+    client = new Client({
+      host: PG_HOST,
+      port: parseInt(PG_PORT),
+      user: PG_USER,
+      password: PG_PASSWORD,
+      database: PG_DATABASE,
+    });
+    await client.connect();
+    await seed(client);
+    await seedHandoff();
+
+    const outA = join(TEST_ROOT, "det-a");
+    const outB = join(TEST_ROOT, "det-b");
+    const resA = runScript(EXPORT_SCRIPT, ["--out", outA], scriptEnv());
+    expect(resA.status).toBe(0);
+    const resB = runScript(EXPORT_SCRIPT, ["--out", outB], scriptEnv());
+    expect(resB.status).toBe(0);
+
+    const tarA = join(outA, (await readdir(outA)).find((f) => f.endsWith(".tar.gz"))!);
+    const tarB = join(outB, (await readdir(outB)).find((f) => f.endsWith(".tar.gz"))!);
+    // We deliberately do NOT compare tarball bytes — mtimes inside the
+    // archive shift between runs even when the entries themselves match.
+    // The load-bearing invariant is manifest.json + tables/*.jsonl bytes.
+    const extA = join(TEST_ROOT, "det-a-ex");
+    const extB = join(TEST_ROOT, "det-b-ex");
+    await mkdir(extA, { recursive: true });
+    await mkdir(extB, { recursive: true });
+    spawnSync("tar", ["-xzf", tarA, "-C", extA]);
+    spawnSync("tar", ["-xzf", tarB, "-C", extB]);
+
+    const manifestA = await readFile(join(extA, "manifest.json"), "utf-8");
+    const manifestB = await readFile(join(extB, "manifest.json"), "utf-8");
+    expect(manifestB).toBe(manifestA);
+
+    const tablesA = (await readdir(join(extA, "tables"))).sort();
+    const tablesB = (await readdir(join(extB, "tables"))).sort();
+    expect(tablesB).toEqual(tablesA);
+    for (const filename of tablesA) {
+      const bytesA = await readFile(join(extA, "tables", filename), "utf-8");
+      const bytesB = await readFile(join(extB, "tables", filename), "utf-8");
+      expect(
+        bytesB,
+        `tables/${filename} diverges between consecutive exports — deterministic-diff invariant broken`
+      ).toBe(bytesA);
+    }
+  }, SCRIPT_TIMEOUT_MS);
+
+  it("sync_op_log.change_seq stays nullable in the current schema", async () => {
+    // scripts/portability/tables.ts intentionally drops change_seq on
+    // restore because BIGSERIAL cursors regenerate. That plan only works
+    // if the column stays nullable — a future migration that makes it
+    // NOT NULL would break restore silently long after this PR merged.
+    // This assertion fires exactly when that drift happens.
+    const res = await client.query<{ is_nullable: string }>(
+      `SELECT is_nullable FROM information_schema.columns
+       WHERE table_name = 'sync_op_log' AND column_name = 'change_seq'`
+    );
+    expect(res.rowCount).toBe(1);
+    expect(res.rows[0].is_nullable).toBe("YES");
+  });
+
   it("manifest model mismatch queues every indexable row for re-embed", async () => {
     // Take a fresh export, then import with EMBEDDING_MODEL/DIMENSIONS
     // overridden so the destination disagrees with the manifest.
