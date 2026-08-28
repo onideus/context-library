@@ -11,3 +11,10 @@ proxy-data/
 .claude/settings.local.json
 entities.seed.json
 .github/.DS_Store
+# npm run export writes tarballs of the full personal dataset — never commit.
+# data/ already covers the default output dir; the patterns below catch the
+# common --out ./exports/ pattern and any context-library-* tarball landing
+# elsewhere in the tree without being so broad they swallow unrelated
+# archives (e.g. vendored fixtures).
+exports/*.tar.gz
+**/context-library-*.tar.gz
