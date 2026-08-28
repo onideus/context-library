@@ -80,7 +80,7 @@ src/
   server.ts                # Hono app, CORS, health, MCP route, startup/shutdown
   config.ts                # All env var reads, centralized defaults
   storage/
-    json-store.ts          # File I/O for handoffs
+    json-store.ts          # File I/O for handoffs + archiveHandoff (pre-compaction copy)
     schemas.ts             # Zod HandoffSchema + Handoff type
   tools/
     handoff.ts             # store_handoff, get_latest_handoff, patch_handoff
@@ -98,7 +98,7 @@ src/
                            #   compare_extractions, list_extraction_runs,
                            #   browse_entities, entity_relations
     prompts.ts             # MCP prompts: session_start, architect, plan
-    compaction.ts          # Handoff compaction logic
+    compaction.ts          # Handoff compaction logic (pure; COMPACTION_MODE lives in config)
     validation.ts          # Shared input validation utilities
   db/
     changes.ts             # Sync change-log helpers: appendChange (in-tx),
@@ -155,6 +155,7 @@ src/
     handoff-nav.test.ts    # Integration: list_handoffs/get_handoff + path traversal
     task-summary.test.ts   # Integration: dynamic task_summary (Postgres-gated)
     compaction.test.ts     # Integration: handoff compaction
+    compaction-modes.test.ts   # Unit: COMPACTION_MODE archive/off/in-place, archive/ vs retention
     pending-embeddings.test.ts  # Integration: dead letter queue
     rerank.test.ts         # Unit: reranker integration
     validation.test.ts     # Unit: input validation
@@ -170,7 +171,7 @@ src/
 The `scripts/` directory contains tooling for one-off operations, data migrations, and colocated tests:
 
 - `backfill-content-hashes.ts` — Adds `content_hash` to the `metadata` of existing locked artifacts (`ready`, `executing`, `completed`) that are missing it. Safe to re-run; already-hashed artifacts are skipped. Run once after upgrading from a version prior to the lockable-artifacts feature (PR #85). Run with `npx tsx scripts/backfill-content-hashes.ts`.
-- `compact-history.ts` — Compacts all handoff JSON files except the most recent, reducing file sizes by stripping non-essential keys. Skips handoffs whose embedding is still queued in `pending_embeddings`. Idempotent. Exposed as `npm run compact-history`.
+- `compact-history.ts` — Compacts all handoff JSON files except the most recent, reducing file sizes by stripping non-essential keys. Skips handoffs whose embedding is still queued in `pending_embeddings`. Idempotent. Honours `COMPACTION_MODE`: archives each original first under `archive` (the default), and refuses to run under `off`. Exposed as `npm run compact-history`.
 - `extract-entities.ts` — Reads handoff JSON files from the configured data directory, batches them to the Anthropic API for entity extraction, and writes/merges a draft `entities.seed.json` for human review. Idempotent: an existing seed file is merged, preserving human-edited constraints. Exposed as `npm run extract-entities`. Requires `ANTHROPIC_API_KEY`.
 - `merge-entities.ts` — Pure merge logic for the entity seeding pipeline. Extracted from `extract-entities.ts` for testability. Not directly runnable.
 - `extract-entities.test.ts` — Test suite for the extraction and merge logic (lives in `scripts/`, not `src/__tests__/`).
@@ -294,7 +295,8 @@ Key variables:
 - `SERVER_NAME` (default: `context-library`) — MCP server name visible to clients.
 - `MCP_PORT` (default: `3100`) — Server port.
 - `DATA_DIR` (default: `./data`) — Handoff file storage path.
-- `RETENTION_COUNT` (default: `0`, unlimited) — Max handoff files to retain before pruning oldest.
+- `RETENTION_COUNT` (default: `0`, unlimited) — Max handoff files to retain before pruning oldest. Never applies to `handoffs/archive/`.
+- `COMPACTION_MODE` (default: `archive`) — What happens to the handoff a `store_handoff` supersedes. `archive` copies the byte-exact original to `DATA_DIR/handoffs/archive/` before rewriting it; `off` never rewrites (the archival-deployment setting); `in-place` is the legacy lossy rewrite. Unrecognised values fall back to `archive` with a warning — a typo must never select the destructive path.
 - `CORS_ORIGINS` (default: `https://claude.ai,https://claude.com`) — Comma-separated allowed origins.
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.

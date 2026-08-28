@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, readdir, unlink } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, readdir, unlink, link, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
@@ -77,6 +77,68 @@ export async function writeHandoff<T>(data: T): Promise<string> {
 }
 
 /**
+ * Subdirectory of handoffs/ holding byte-exact originals saved before a
+ * compaction rewrite. Deliberately NOT a `.json` name: every readdir over
+ * handoffs/ filters on `.endsWith(".json")`, so the archive is invisible to
+ * latest-file resolution, handoff counting, and retention pruning. Archived
+ * originals are archival by definition — retention does not apply to them.
+ */
+export const ARCHIVE_DIRNAME = "archive";
+
+/**
+ * Copy a handoff to handoffs/archive/ byte-for-byte before it is rewritten.
+ *
+ * The bytes are copied verbatim rather than re-serialised — an archival copy
+ * that reformats what it preserves is not an archival copy.
+ *
+ * First archive wins: if an archived copy already exists it is left alone and
+ * "exists" is returned. The existing copy is the original; anything we could
+ * write over it now is a later, already-degraded version of the same file.
+ *
+ * Throws ENOENT if the source handoff does not exist. Callers in the
+ * compaction path MUST let that propagate — failing to archive has to abort
+ * the rewrite, never silently fall through to it.
+ */
+export async function archiveHandoff(filename: string): Promise<"archived" | "exists"> {
+  const handoffsDir = join(config.dataDir, "handoffs");
+  const archiveDir = join(handoffsDir, ARCHIVE_DIRNAME);
+  const dest = join(archiveDir, filename);
+
+  await mkdir(archiveDir, { recursive: true });
+
+  try {
+    await access(dest);
+    return "exists";
+  } catch {
+    // not archived yet — continue
+  }
+
+  const bytes = await readFile(join(handoffsDir, filename));
+
+  const tmpPath = join(archiveDir, `.tmp-${randomUUID()}.json`);
+  await writeFile(tmpPath, bytes);
+
+  try {
+    // link() is an atomic exclusive create: it fails EEXIST rather than
+    // clobbering, which keeps first-archive-wins true even under a race that
+    // slipped past the access() check above.
+    await link(tmpPath, dest);
+    await unlink(tmpPath).catch(() => {});
+    return "archived";
+  } catch (err: any) {
+    await unlink(tmpPath).catch(() => {});
+    if (err.code === "EEXIST") return "exists";
+    if (err.code === "ENOENT") throw err;
+    // Filesystems without hard-link support (some bind mounts): re-stage and
+    // fall back to the same temp+rename dance used everywhere else here.
+    const retryTmp = join(archiveDir, `.tmp-${randomUUID()}.json`);
+    await writeFile(retryTmp, bytes);
+    await safeRename(retryTmp, dest);
+    return "archived";
+  }
+}
+
+/**
  * Overwrite an existing handoff file in place (atomic via temp file + rename).
  * Unlike writeHandoff, this does NOT create a new timestamped file and does
  * NOT prune. It is used only by compaction
@@ -102,6 +164,9 @@ export async function writeHandoffInPlace<T>(filename: string, data: T): Promise
 /**
  * Get the filename of the most recent handoff in the handoffs directory.
  * Returns null if no handoffs exist.
+ *
+ * The `.json` filter excludes the ARCHIVE_DIRNAME subdirectory, so archived
+ * originals can never be resolved as the latest handoff.
  */
 export async function getLatestHandoffFilename(): Promise<string | null> {
   const handoffsDir = join(config.dataDir, "handoffs");
@@ -134,6 +199,12 @@ export async function getHandoffCount(): Promise<number> {
 /**
  * Remove oldest handoff files when count exceeds the retention limit.
  * Filenames sort chronologically by ISO timestamp prefix.
+ *
+ * The ARCHIVE_DIRNAME subdirectory is outside retention entirely — the
+ * `.json` filter skips it, and that is deliberate, not incidental. Archived
+ * originals exist precisely because the deployment chose to keep them; a
+ * retention sweep that pruned them would delete the only surviving copy of
+ * the pre-compaction text.
  */
 async function pruneHandoffs(handoffsDir: string, retentionCount: number): Promise<void> {
   if (retentionCount <= 0) return; // 0 = unlimited retention
