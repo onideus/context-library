@@ -1,0 +1,11 @@
+{
+  "name": "Context Library Blast Container",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "blast",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "node",
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "git config --global --add safe.directory /workspace && npm ci",
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
+  "waitFor": "postStartCommand"
+}
