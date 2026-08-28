@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "extract-entities": "tsx scripts/extract-entities.ts",
     "compact-history": "tsx scripts/compact-history.ts",
-    "audit-compaction": "tsx scripts/audit-compaction.ts"
+    "audit-compaction": "tsx scripts/audit-compaction.ts",
+    "rehydrate-handoffs": "tsx scripts/rehydrate-handoffs.ts"
   },
   "dependencies": {
     "@hono/mcp": "^0.2.4",
