@@ -328,6 +328,17 @@ Readiness at `/health/ready` — verifies the data directory is writable by roun
 
 For contribution guidelines (PR process, branch naming, review expectations), see `CONTRIBUTING.md` in the repo root.
 
+## Auto-mode execution context
+
+When a session is running inside the blast container (`.devcontainer/`), the
+boundary is: Docker, the host filesystem, and the public internet are
+unreachable by construction. Postgres is the compose sidecar at `postgres:5432`
+(database `cl_test`, user `cl`) — a full `npm test` is expected to pass with no
+host-side setup. The deployment database and the live handoff data directory are
+out of reach; any step that needs them is a native task on the host, not
+container work. `.devcontainer/` itself is human-review-only and is never edited
+from inside. See [`.devcontainer/BLAST-SETUP.md`](.devcontainer/BLAST-SETUP.md).
+
 ## What NOT To Do
 
 1. **No polymorphic tools.** Each tool does one thing. Don't combine create/update into a single tool or add mode switches.

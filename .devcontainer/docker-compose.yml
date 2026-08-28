@@ -1,0 +1,82 @@
+# context-library blast container + its ephemeral test Postgres.
+#
+# Both services are part of .devcontainer/ and therefore both fall under the
+# non-editable rule: human-review-only, never modified by auto-mode work.
+#
+# What runArgs carries in single-container mode lives on the blast service here:
+# cap_add, extra_hosts, the two named volumes, and the /workspace bind.
+#
+# The postgres service has NO host port on purpose. It is reachable only from
+# the blast service, by name, and only because "postgres" is listed in
+# BLAST_REQUIRED_DOMAINS below — init-firewall.sh resolves the service name
+# through Docker's embedded DNS and puts the resulting container IP in the
+# allowlist ipset. It exists so the FULL test suite runs inside the container
+# with no host-side setup step.
+
+services:
+  blast:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BLAST_BASE: ${BLAST_BASE:-ghcr.io/onideus/blast-base:0.1.0}
+        TZ: ${TZ:-America/New_York}
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # The compose file lives in .devcontainer/, so the repo root is one up.
+      - ..:/workspace:delegated
+      - context-library-claude-config:/home/node/.claude
+      - context-library-bashhistory:/commandhistory
+    environment:
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+      NODE_OPTIONS: --max-old-space-size=4096
+      # The base always prepends api.anthropic.com + registry.npmjs.org.
+      BLAST_REQUIRED_DOMAINS: "postgres"
+      BLAST_ALLOW_GITHUB: "true"
+      # Nothing on the host is needed: the database the tests use is the sidecar,
+      # which is allowlisted by service name above. Closing this is what keeps
+      # the live deployment (its data dir, its Postgres) out of reach from here.
+      BLAST_ALLOW_HOST_NETWORK: "false"
+      # Test database credentials. These are the same values CI uses and are
+      # already public; the sidecar is ephemeral and unreachable from the host.
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: cl_test
+      PGUSER: cl
+      PGPASSWORD: test
+      # Pinned to a closed loopback port because unresolvable hostnames stall
+      # ~20s on this host's DNS, which blows the suite's 5s per-test timeout on
+      # every path that reports embedding status. This container has no TEI by
+      # design, and the pin exercises the graceful-degradation path rather than
+      # hiding it. Do NOT "fix" this by removing it: at the default value the
+      # server probes the unresolvable host `embeddings` and the full suite goes
+      # red from timeouts alone.
+      EMBEDDING_URL: "http://127.0.0.1:1"
+    command: sleep infinity
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: cl_test
+      POSTGRES_USER: cl
+      POSTGRES_PASSWORD: test
+    # Ephemeral by construction: the database is wiped on every `down`, and the
+    # Postgres-gated suites create their own per-suite databases on each run.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cl -d cl_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  context-library-claude-config:
+  context-library-bashhistory:
