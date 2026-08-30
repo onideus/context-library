@@ -27,7 +27,17 @@ docker compose up -d
 
 **Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`, `list_handoffs`, `get_handoff`
 
-> Handoff files are retained indefinitely by default (`RETENTION_COUNT=0`). For long-lived deployments, set `RETENTION_COUNT` to a positive number (e.g., `5000`) to cap disk growth — older handoffs are pruned along with their search-index entries. The tradeoff: higher retention keeps more history searchable; lower retention keeps the disk footprint tight. Compaction (automatic after each store) reduces per-file size either way.
+> **Retention.** Handoff files are retained indefinitely by default (`RETENTION_COUNT=0`). For long-lived deployments, set `RETENTION_COUNT` to a positive number (e.g., `5000`) to cap disk growth — older handoffs are pruned along with their search-index entries. The tradeoff: higher retention keeps more history searchable; lower retention keeps the disk footprint tight.
+>
+> **Compaction.** After each `store_handoff`, the handoff it supersedes may be rewritten to keep the working set small. This rewrite is **lossy**: `active_context` is collapsed to a single `compacted_summary` line, and the original prose survives only as chunks in the embeddings index (and is destroyed there too if `reindex` re-reads the already-compacted file). `COMPACTION_MODE` decides what happens:
+>
+> | Mode | Behaviour |
+> |---|---|
+> | `archive` (default) | Copy the original byte-exact to `DATA_DIR/handoffs/archive/` first, then rewrite. Lossless on disk; costs roughly double the handoff bytes. |
+> | `off` | Never rewrite. Every handoff keeps its full `active_context` permanently. Use this when the corpus is a long-term record rather than a working set. |
+> | `in-place` | Legacy. Rewrite with no copy — the smallest footprint, and the only mode that discards content irrecoverably. |
+>
+> `archive/` sits outside retention: pruning never touches it, and it is invisible to handoff listing and latest-handoff resolution. `npm run compact-history` honours the same setting and refuses to run under `off`.
 
 ### Tier 2: + PostgreSQL (Tasks + Knowledge + Artifacts + Full-Text Search)
 
@@ -461,6 +471,7 @@ See `.env.example` for all configuration options.
 | `MCP_PORT` | `3100` | Server port |
 | `DATA_DIR` | `./data` | Handoff file storage path |
 | `RETENTION_COUNT` | `0` | Max handoff files to retain (`0` = unlimited) |
+| `COMPACTION_MODE` | `archive` | How the superseded handoff is treated after a store: `archive` (keep a byte-exact original in `handoffs/archive/`), `off` (never rewrite), `in-place` (legacy, lossy) |
 | `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
 
 ### PostgreSQL (Tier 2)

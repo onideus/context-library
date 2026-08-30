@@ -2,11 +2,34 @@ import "dotenv/config";
 
 const defaultCorsOrigins = ["https://claude.ai", "https://claude.com"];
 
+/** Handoff compaction strategy. See `compactionMode` on the config object. */
+export type CompactionMode = "archive" | "in-place" | "off";
+
 export const config = {
   serverName: process.env.SERVER_NAME ?? "context-library",
   port: parseInt(process.env.MCP_PORT ?? "3100", 10),
   dataDir: process.env.DATA_DIR ?? "./data",
   retentionCount: parseInt(process.env.RETENTION_COUNT ?? "0", 10),
+  // How store_handoff treats the handoff it supersedes.
+  //   archive  (default) — copy the original byte-exact to handoffs/archive/
+  //                        before rewriting it in place. Lossless on disk.
+  //   off                — never rewrite. The archival-deployment setting:
+  //                        every handoff stays full-fidelity forever.
+  //   in-place           — legacy: rewrite with no copy. LOSSY — active_context
+  //                        collapses to a one-line summary and the original
+  //                        text survives only in the embeddings index.
+  // Unrecognised values fall back to `archive` — the safe direction, so a typo
+  // can never silently select the destructive path.
+  compactionMode: (function () {
+    const raw = (process.env.COMPACTION_MODE ?? "").trim().toLowerCase();
+    if (raw === "" || raw === "archive") return "archive";
+    if (raw === "off" || raw === "in-place") return raw;
+    console.warn(
+      `[config] Unrecognised COMPACTION_MODE "${raw}" — falling back to "archive". ` +
+        `Valid values: archive | in-place | off.`
+    );
+    return "archive";
+  })() as CompactionMode,
   corsOrigins: process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(",").map((s) => s.trim())
     : defaultCorsOrigins,

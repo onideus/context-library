@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { join } from "node:path";
 import { config } from "../config.js";
-import { read, writeHandoff, writeHandoffInPlace, getLatestHandoffFilename, getHandoffCount } from "../storage/json-store.js";
+import { read, writeHandoff, writeHandoffInPlace, archiveHandoff, ARCHIVE_DIRNAME, getLatestHandoffFilename, getHandoffCount } from "../storage/json-store.js";
 import type { Handoff } from "../storage/schemas.js";
 import { mergeHandoff } from "./merge.js";
 import { compactHandoff, COMPACTED_FLAG } from "./compaction.js";
@@ -295,13 +295,32 @@ export function filterByScope(
 }
 
 /**
- * Compact a previously-stored handoff in place so token cost on the latest
- * handoff stays bounded as history grows. Non-fatal — never blocks the caller.
- * Skips handoffs that are already compacted or still have pending embeddings
- * (content hasn't been indexed yet; archiving would lose it).
+ * Compact a previously-stored handoff so token cost on the latest handoff
+ * stays bounded as history grows. Non-fatal — never blocks the caller.
+ *
+ * Behaviour is governed by COMPACTION_MODE (config.compactionMode):
+ *
+ *   off       Returns immediately. Nothing is ever rewritten. This is the
+ *             archival-deployment setting — every handoff keeps its full
+ *             active_context permanently.
+ *   archive   (default) Copies the byte-exact original to handoffs/archive/
+ *             and only then rewrites in place. Lossless on disk.
+ *   in-place  Legacy. Rewrites with no copy. LOSSY: active_context collapses
+ *             to a one-line summary and the original text survives only as
+ *             chunks in the embeddings index.
+ *
+ * Skips handoffs that are already compacted (nothing left to save — archiving
+ * a gutted file as though it were the original would be a lie) or that still
+ * have pending embeddings (content hasn't been indexed yet).
+ *
+ * Exported for tests; store_handoff is the only production caller.
  */
-async function compactPreviousHandoff(previousFilename: string | null): Promise<void> {
+export async function compactPreviousHandoff(previousFilename: string | null): Promise<void> {
   if (!previousFilename) return;
+
+  const mode = config.compactionMode;
+  if (mode === "off") return;
+
   try {
     const previous = await read<Handoff>(join(HANDOFFS_DIR(), previousFilename));
     if (!previous) return;
@@ -311,7 +330,7 @@ async function compactPreviousHandoff(previousFilename: string | null): Promise<
     const pending = await hasPendingEmbedding("handoff", previousFilename);
     if (pending) {
       console.log(
-        `[compaction] Skipped ${previousFilename}: embedding still pending`
+        `[compaction] mode=${mode} Skipped ${previousFilename}: embedding still pending`
       );
       return;
     }
@@ -319,15 +338,27 @@ async function compactPreviousHandoff(previousFilename: string | null): Promise<
     const { compacted, original_size, compacted_size, archived_keys } = compactHandoff(previous);
     if (original_size === compacted_size) return;
 
+    // Archive BEFORE the rewrite, and let a failure here throw: the whole
+    // point of archive mode is that the original outlives the rewrite, so a
+    // failed copy must abort the rewrite rather than fall through to it.
+    let archiveNote = "";
+    if (mode === "archive") {
+      const outcome = await archiveHandoff(previousFilename);
+      archiveNote =
+        outcome === "archived"
+          ? `, original saved to ${ARCHIVE_DIRNAME}/`
+          : `, ${ARCHIVE_DIRNAME}/ copy already present (kept)`;
+    }
+
     await writeHandoffInPlace(previousFilename, compacted);
     const reduction = Math.round((1 - compacted_size / original_size) * 100);
     console.log(
-      `[compaction] ${previousFilename}: ${original_size} → ${compacted_size} bytes ` +
-        `(${reduction}% reduction, archived: ${archived_keys.join(", ") || "none"})`
+      `[compaction] mode=${mode} ${previousFilename}: ${original_size} → ${compacted_size} bytes ` +
+        `(${reduction}% reduction, archived: ${archived_keys.join(", ") || "none"}${archiveNote})`
     );
   } catch (err) {
     console.warn(
-      "[compaction] Failed to compact previous handoff:",
+      `[compaction] mode=${mode} Failed to compact previous handoff:`,
       (err as Error).message
     );
   }
