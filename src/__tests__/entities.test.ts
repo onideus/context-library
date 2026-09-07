@@ -187,9 +187,17 @@ describe("matchesWordBoundary", () => {
 
   it("escapes regex metacharacters in domain-style names", () => {
     // Generic domain-style example (no personal data).
-    expect(matchesWordBoundary("please ssh into box.example.com for logs", "box.example.com")).toBe(true);
+    //
+    // CodeQL flags a dotted hostname flowing into a RegExp as
+    // js/incomplete-hostname-regexp, because an unescaped "." would match any
+    // character. That is the exact defect this test guards against:
+    // matchesWordBoundary escapes every metacharacter in `name` before
+    // building the pattern, and the second assertion proves the dots are
+    // literal. The alert is suppressed inline so the reasoning stays next to
+    // the code rather than in a dashboard dismissal.
+    expect(matchesWordBoundary("please ssh into box.example.com for logs", "box.example.com")).toBe(true); // codeql[js/incomplete-hostname-regexp]
     // The dots must be literal — "boxXexampleXcom" should NOT match "box.example.com"
-    expect(matchesWordBoundary("boxXexampleXcom is a fake", "box.example.com")).toBe(false);
+    expect(matchesWordBoundary("boxXexampleXcom is a fake", "box.example.com")).toBe(false); // codeql[js/incomplete-hostname-regexp]
   });
 
   it("handles names with regex metacharacters without throwing", () => {
