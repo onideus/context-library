@@ -80,6 +80,10 @@ For improved retrieval precision, an optional cross-encoder reranker rescores ca
 
 When the reranker is not configured or unreachable, `search_context` falls back to RRF-only ordering. Set `RERANKER_URL` in your `.env` to enable it.
 
+Every `search_context` response carries two booleans so "off" and "broken" are distinguishable from the caller's side: `reranker_configured` (is `RERANKER_URL` set) and `reranked` (did the cross-encoder actually rescore this response). `reranker_configured=true` with `reranked=false` on a multi-result response means the reranker is unreachable, timing out (`RERANKER_TIMEOUT_MS`, default 3000), or returning bad data; the server logs a `[rerank]` warning with the host, HTTP status, and elapsed time.
+
+On a fresh host the reranker's first start must be able to reach the Hugging Face hub so TEI can pull the model into the shared models volume. Set `HF_HUB_OFFLINE=1` on the service only after the model directory exists there; an offline first start fails with no error visible to the caller.
+
 #### Embedding Server Platform Options
 
 | Platform | Profile / Method | GPU Acceleration |
@@ -493,6 +497,7 @@ See `.env.example` for all configuration options.
 | `EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v2-moe` | Embedding model name |
 | `EMBEDDING_DIMENSIONS` | `768` | Embedding vector dimensions |
 | `RERANKER_URL` | — | Cross-encoder reranker endpoint (optional; leave unset to disable) |
+| `RERANKER_TIMEOUT_MS` | `3000` | Abort budget per `/rerank` call; on timeout the search falls back to RRF ordering |
 | `SEARCH_ALIAS_PATH` | `./data/search-aliases.json` | Deployment-local search alias expansion file (optional) |
 | `ENTITY_SEED_PATH` | `./data/entities.seed.json` | Entity seed file for context envelopes (optional) |
 

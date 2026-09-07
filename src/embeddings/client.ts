@@ -109,11 +109,28 @@ export async function isEmbeddingAvailable(): Promise<boolean> {
  * descending. We normalize back to input order so callers don't have to
  * worry about the response shape.
  */
+/** Host portion of the configured reranker URL, for log lines. Never throws. */
+function rerankerHost(): string {
+  try {
+    return new URL(config.rerankerUrl ?? "").host;
+  } catch {
+    return String(config.rerankerUrl);
+  }
+}
+
 export async function rerankResults(
   query: string,
   texts: string[]
 ): Promise<Array<{ index: number; score: number }> | null> {
   if (!config.rerankerUrl || texts.length === 0) return null;
+
+  // Every null return below the disabled check is a *failure*, not "off",
+  // so each one logs. A reranker that is configured but silently never
+  // fires is indistinguishable from one that was never set up otherwise.
+  const host = rerankerHost();
+  const started = Date.now();
+  const elapsed = () => Date.now() - started;
+  const fallback = "falling back to fusion ordering";
 
   try {
     const response = await fetch(`${config.rerankerUrl}/rerank`, {
@@ -123,13 +140,24 @@ export async function rerankResults(
         query,
         texts: texts.map((t) => t.slice(0, 32000)),
       }),
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(config.rerankerTimeoutMs),
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.warn(
+        `[rerank] ${host} returned HTTP ${response.status} after ${elapsed()}ms ` +
+          `for ${texts.length} candidates; ${fallback}`
+      );
+      return null;
+    }
 
     const data = await response.json();
-    if (!Array.isArray(data)) return null;
+    if (!Array.isArray(data)) {
+      console.warn(
+        `[rerank] ${host} returned a non-array body after ${elapsed()}ms; ${fallback}`
+      );
+      return null;
+    }
 
     const scores: Array<{ index: number; score: number }> = [];
     for (const item of data) {
@@ -141,11 +169,22 @@ export async function rerankResults(
         scores.push({ index: item.index, score: item.score });
       }
     }
-    if (scores.length === 0) return null;
+    if (scores.length === 0) {
+      console.warn(
+        `[rerank] ${host} returned no usable {index, score} pairs after ${elapsed()}ms; ${fallback}`
+      );
+      return null;
+    }
 
     scores.sort((a, b) => b.score - a.score);
     return scores;
-  } catch {
+  } catch (err) {
+    const e = err as Error;
+    console.warn(
+      `[rerank] request to ${host} failed after ${elapsed()}ms ` +
+        `(timeout ${config.rerankerTimeoutMs}ms, ${texts.length} candidates): ` +
+        `${e.name}: ${e.message}; ${fallback}`
+    );
     return null;
   }
 }

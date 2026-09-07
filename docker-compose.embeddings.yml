@@ -106,6 +106,20 @@ services:
   # the top candidates from RRF fusion. Add the --profile reranker-gpu,
   # reranker-cpu, or reranker-arm64 flag to enable. When no reranker profile
   # is active, search_context falls back to RRF-only ordering.
+  #
+  # Fresh-host sequence (the model is pulled from the Hugging Face hub on
+  # first start, and an OFFLINE first start fails with no error visible to
+  # the caller — search_context just reports reranker_configured=true,
+  # reranked=false forever):
+  #   1. Start the reranker profile with hub access (no HF_HUB_OFFLINE).
+  #   2. Confirm the model landed in the shared volume:
+  #        ls data/models/models--cross-encoder--ms-marco-MiniLM-L-6-v2
+  #      and that `curl -X POST http://127.0.0.1:8091/rerank` with a
+  #      two-document payload returns [{index, score}, ...].
+  #   3. Only then add `HF_HUB_OFFLINE: "1"` under the service's environment
+  #      (matching the embeddings service) and recreate it.
+  # Verify from the caller: search_context with limit >= 2 should return
+  # reranked=true. If not, the server logs a [rerank] warning with the reason.
   reranker-gpu:
     image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9
     container_name: context-library-reranker
@@ -177,3 +191,4 @@ services:
     environment:
       - EMBEDDING_URL=http://embeddings:80
       - RERANKER_URL=${RERANKER_URL:-}
+      - RERANKER_TIMEOUT_MS=${RERANKER_TIMEOUT_MS:-3000}
