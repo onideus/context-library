@@ -284,7 +284,7 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned.
 
 - **`ci.yml`** — Trigger for pull_request and push to main. Calls `ci-checks.yml`.
 - **`ci-checks.yml`** — Reusable workflow: `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16), Snyk dependency scan. Notifies via ntfy.
-- **`image.yml`** — On push to main: runs ci-checks, builds Docker image, Snyk container scan (with base image exclusion), pushes `sha-<short>` tagged image to GHCR.
+- **`image.yml`** — On push to main: runs ci-checks, builds Docker image, Trivy container scan (HIGH/CRITICAL, fixed CVEs only, no account needed), pushes `sha-<short>` tagged image to GHCR.
 - **`release.yml`** — On `v*` tag push or workflow_dispatch: promotes a SHA-tagged image to version tag + `latest` (skips latest for prereleases), creates GitHub Release with auto-generated notes, notifies via ntfy.
 - **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `image.yml` normally (GITHUB_TOKEN pushes do not trigger downstream workflows).
 - **`cleanup.yml`** — Cleans up old container images and stale resources.

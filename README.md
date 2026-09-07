@@ -352,7 +352,7 @@ Every push to `main` builds, scans, and publishes a SHA-tagged image. Tagged rel
 
 **Image pipeline (on push to main):**
 ```
-Push → CI checks → Docker build → Snyk dep scan → Snyk container scan → Push sha-<hash> to GHCR
+Push → CI checks → Snyk dep scan → Docker build → Trivy container scan → Push sha-<hash> to GHCR
 ```
 
 **Release pipeline (on tag push):**
@@ -360,7 +360,7 @@ Push → CI checks → Docker build → Snyk dep scan → Snyk container scan �
 Tag v* → Pull validated sha image → Retag as <version> + latest → Push → GitHub Release
 ```
 
-Insecure images never reach the registry — Snyk gates the push. By the time a release tag exists, the image it points to has already passed every gate.
+Insecure images never reach the registry — the Snyk dependency scan and the Trivy container scan gate the push. By the time a release tag exists, the image it points to has already passed every gate.
 
 **To cut a release:**
 
@@ -399,20 +399,22 @@ docker compose up -d
 
 For Tier 2 (Postgres) or Tier 3 (embeddings), download the additional compose files from the repo and stack them as described in [Deployment Tiers](#deployment-tiers).
 
-## Snyk Setup (Maintainer)
+## Security Scanning Setup (Maintainer)
 
-The CI and release pipelines require a `SNYK_TOKEN` repository secret for dependency and container vulnerability scanning.
+Two scanners gate the pipeline. Only high and critical severity findings block it; medium and low are reported but do not fail the build.
 
-**Setup:**
+**Dependency scan (Snyk, `ci-checks.yml`)** runs on pushes to `main` and needs a `SNYK_TOKEN` repository secret:
 
-1. Sign up for a free Snyk account at [snyk.io](https://snyk.io) (free tier covers open-source projects)
-2. Generate an API token from **Account Settings → API Token**
+1. Sign up for a free Snyk account at [snyk.io](https://snyk.io).
+2. Generate an API token from **Account Settings → API Token**.
 3. Add it as a repository secret:
    ```bash
    gh secret set SNYK_TOKEN --repo onideus/context-library
    ```
 
-The scan threshold is `high` — only high and critical severity vulnerabilities block the pipeline. Medium and low findings are reported but do not fail the build.
+The scan passes `--remote-repo-url` pointing at this public repository. That is what tells Snyk the test belongs to a public repo, and Snyk's Free-plan test limits apply to private repositories only. If the counter on the Snyk org's Usage page still moves after a push to `main`, that flag is the first thing to check.
+
+**Container scan (Trivy, `image.yml`)** runs on the freshly built image before it is pushed to GHCR. It needs no account, token, or secret. It fails on HIGH and CRITICAL CVEs that have a fix available, in OS packages and Node modules alike, and ignores CVEs with no fix (the base image carries dozens of those in Debian packages that nobody downstream can patch). A fixable base-image CVE means rebuilding on a newer `node:22-slim`.
 
 ## Maintainer Notes
 
