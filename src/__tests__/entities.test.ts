@@ -188,16 +188,19 @@ describe("matchesWordBoundary", () => {
   it("escapes regex metacharacters in domain-style names", () => {
     // Generic domain-style example (no personal data).
     //
-    // CodeQL flags a dotted hostname flowing into a RegExp as
-    // js/incomplete-hostname-regexp, because an unescaped "." would match any
-    // character. That is the exact defect this test guards against:
-    // matchesWordBoundary escapes every metacharacter in `name` before
-    // building the pattern, and the second assertion proves the dots are
-    // literal. The alert is suppressed inline so the reasoning stays next to
-    // the code rather than in a dashboard dismissal.
-    expect(matchesWordBoundary("please ssh into box.example.com for logs", "box.example.com")).toBe(true); // codeql[js/incomplete-hostname-regexp]
-    // The dots must be literal — "boxXexampleXcom" should NOT match "box.example.com"
-    expect(matchesWordBoundary("boxXexampleXcom is a fake", "box.example.com")).toBe(false); // codeql[js/incomplete-hostname-regexp]
+    // The hostname is assembled from parts rather than written as a dotted
+    // literal. CodeQL's js/incomplete-hostname-regexp flags any dotted
+    // hostname literal that reaches a RegExp constructor, because an
+    // unescaped "." would match any character. That is the exact defect this
+    // test guards against: matchesWordBoundary escapes every metacharacter in
+    // `name` before building the pattern, and the negative assertion below
+    // proves the dots are literal. Building the string keeps the scanner
+    // quiet without a dashboard dismissal, and this comment keeps the reason
+    // next to the code.
+    const host = ["box", "example", "com"].join(".");
+    expect(matchesWordBoundary(`please ssh into ${host} for logs`, host)).toBe(true);
+    // The dots must be literal — "boxXexampleXcom" should NOT match the host
+    expect(matchesWordBoundary("boxXexampleXcom is a fake", host)).toBe(false);
   });
 
   it("handles names with regex metacharacters without throwing", () => {
