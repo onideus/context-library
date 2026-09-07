@@ -162,7 +162,9 @@ Use these to narrow searches to specific time windows (e.g., "what did I decide 
 
 READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-empty, address constraints before recommendations.
 
-Returns: {results[], context_envelope, query, total, mode, deduplicated, pre_dedup_count}
+Returns: {results[], context_envelope, query, total, mode, reranked, reranker_configured, deduplicated, pre_dedup_count}
+
+reranker_configured is whether this server has a cross-encoder reranker endpoint set (RERANKER_URL). reranked is whether that reranker actually rescored this response. reranker_configured=false means reranking is off by configuration. reranker_configured=true with reranked=false on a response with more than one result means the reranker is unreachable, timing out, or returning bad data — the server logs a [rerank] warning with the reason. Single-result responses are never reranked.
 
 If results reference events indirectly, reformulate with specific terms, lower threshold (0.05), higher limit (20).
 
@@ -473,6 +475,8 @@ export function registerSearchTools(mcpServer: McpServer): void {
                 message: "No results found. Try broadening your query or lowering the similarity threshold.",
                 query: args.query,
                 mode: useHybrid ? "hybrid" : "vector",
+                reranked: false,
+                reranker_configured: rerankerEnabled,
                 deduplicated: true,
                 pre_dedup_count: 0,
                 context_envelope: emptyEnvelope(),
@@ -576,6 +580,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
           total: finalRows.length,
           mode: useHybrid ? "hybrid" : "vector",
           reranked,
+          reranker_configured: rerankerEnabled,
           deduplicated: true,
           pre_dedup_count: preDedupCount,
           context_envelope: envelope,

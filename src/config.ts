@@ -39,6 +39,13 @@ export const config = {
   entitySeedPath: process.env.ENTITY_SEED_PATH ?? "./data/entities.seed.json",
   searchAliasPath: process.env.SEARCH_ALIAS_PATH ?? "./data/search-aliases.json",
   rerankerUrl: process.env.RERANKER_URL ?? null,
+  // Abort budget for a single /rerank call. On timeout or any other failure
+  // search_context falls back to fusion ordering, so this bounds added
+  // latency, not correctness. Invalid or non-positive values use the default.
+  rerankerTimeoutMs: (function () {
+    const v = parseInt(process.env.RERANKER_TIMEOUT_MS ?? "3000", 10);
+    return Number.isFinite(v) && v > 0 ? v : 3000;
+  })(),
   entityExtractionEnabled: process.env.ENTITY_EXTRACTION_ENABLED === "true",
   entityExtractionProvider: process.env.ENTITY_EXTRACTION_PROVIDER ?? "none",
   entityExtractionAsync: process.env.ENTITY_EXTRACTION_ASYNC !== "false",
