@@ -673,4 +673,40 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
     expect(types.has("artifact")).toBe(true);
     expect(types.has("handoff")).toBe(true);
   }, SCRIPT_TIMEOUT_MS);
+
+  // handoffs/archive/ (COMPACTION_MODE=archive) holds the only full copy of every
+  // compacted handoff. Export must ship it, and --force must never clear it —
+  // otherwise export → import --force on a compacted deployment destroys the
+  // originals the archive exists to preserve.
+  it("exports handoffs/archive/ and import --force merges it without clearing existing originals", async () => {
+    const archive = join(TEST_DATA_DIR, "handoffs", "archive");
+    await mkdir(archive, { recursive: true });
+    await writeFile(join(archive, "compacted-original.json"), '{"original":true}\n', "utf-8");
+
+    const outDir = join(TEST_ROOT, "exports-archive");
+    const exp = runScript(EXPORT_SCRIPT, ["--out", outDir], scriptEnv());
+    expect(exp.status, `export exited ${exp.status}.\nstdout:\n${exp.stdout}\nstderr:\n${exp.stderr}`).toBe(0);
+    const tarball = join(outDir, (await readdir(outDir)).find((f) => f.endsWith(".tar.gz"))!);
+
+    const extracted = join(TEST_ROOT, "extract-archive");
+    await mkdir(extracted, { recursive: true });
+    spawnSync("tar", ["-xzf", tarball, "-C", extracted]);
+    const manifest = JSON.parse(await readFile(join(extracted, "manifest.json"), "utf-8"));
+    expect(manifest.handoff_archive_file_count).toBe(1);
+    expect(await readFile(join(extracted, "handoffs", "archive", "compacted-original.json"), "utf-8"))
+      .toBe('{"original":true}\n');
+
+    // Destination: the exported original is gone, and there is an archived
+    // original the tarball knows nothing about.
+    await rm(join(archive, "compacted-original.json"));
+    await writeFile(join(archive, "live-only-original.json"), '{"live":true}\n', "utf-8");
+
+    const imp = runScript(IMPORT_SCRIPT, [tarball, "--force"], scriptEnv());
+    expect(imp.status, `import exited ${imp.status}.\nstdout:\n${imp.stdout}\nstderr:\n${imp.stderr}`).toBe(0);
+
+    // Restored from the tarball...
+    expect(await readFile(join(archive, "compacted-original.json"), "utf-8")).toBe('{"original":true}\n');
+    // ...and --force did not wipe the one only the destination had.
+    expect(await readFile(join(archive, "live-only-original.json"), "utf-8")).toBe('{"live":true}\n');
+  }, SCRIPT_TIMEOUT_MS);
 });

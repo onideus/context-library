@@ -38,6 +38,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { config } from "../src/config.js";
+import { ARCHIVE_DIRNAME } from "../src/storage/json-store.js";
 import { pool, query } from "../src/db/client.js";
 import {
   TABLES,
@@ -133,6 +134,32 @@ async function exportTable(
 }
 
 // ── Handoff scan ──────────────────────────────────────────────────
+
+/**
+ * Copies `handoffs/archive/` verbatim. Under COMPACTION_MODE=archive (the
+ * default) this holds the byte-exact original of every compacted handoff —
+ * for those handoffs, the only full copy that survives — plus any sidecars
+ * written by `rehydrate-handoffs`. The top-level scan below only picks up
+ * `*.json` files, so without this the archive would never be backed up.
+ */
+async function copyHandoffArchive(handoffsSrc: string, stagingDir: string): Promise<number> {
+  const src = join(handoffsSrc, ARCHIVE_DIRNAME);
+  let entries;
+  try {
+    entries = await readdir(src, { recursive: true, withFileTypes: true });
+  } catch {
+    return 0; // No archive directory — nothing was ever compacted in archive mode.
+  }
+  const count = entries.filter((e) => e.isFile() && !e.name.startsWith(".tmp-")).length;
+  if (count > 0) {
+    await cp(src, join(stagingDir, "handoffs", ARCHIVE_DIRNAME), {
+      recursive: true,
+      filter: (path) => !path.split(/[\\/]/).pop()!.startsWith(".tmp-"),
+    });
+  }
+  return count;
+}
+
 
 async function copyHandoffs(
   handoffsSrc: string,
@@ -273,6 +300,8 @@ async function main(): Promise<void> {
     const handoffsSrc = join(config.dataDir, "handoffs");
     const handoffs = await copyHandoffs(handoffsSrc, staging);
     console.log(`[export] handoffs/: ${handoffs.count} file(s)`);
+    const archiveCount = await copyHandoffArchive(handoffsSrc, staging);
+    console.log(`[export] handoffs/${ARCHIVE_DIRNAME}/: ${archiveCount} file(s)`);
 
     // NOTE: `exported_at` is deliberately omitted. Its ever-changing value
     // was defeating the deterministic-diff promise of the nightly-commit
@@ -286,6 +315,7 @@ async function main(): Promise<void> {
       applied_migrations: await readAppliedMigrations(),
       handoff_schema_versions: handoffs.schema_versions,
       handoff_file_count: handoffs.count,
+      handoff_archive_file_count: archiveCount,
       embedding_model: config.embeddingModel,
       embedding_dimensions: config.embeddingDimensions,
       includes_embeddings: args.includeEmbeddings,

@@ -38,6 +38,13 @@ export interface ExportManifest {
   handoff_schema_versions: number[];
   /** Number of handoff JSON files in the tarball. */
   handoff_file_count: number;
+  /**
+   * Number of files under `handoffs/archive/` in the tarball: the byte-exact
+   * pre-compaction originals kept under COMPACTION_MODE=archive, plus any
+   * `rehydrate-handoffs` sidecars. OPTIONAL — tarballs written before the
+   * archive was exported omit it, and import treats that as "no archive".
+   */
+  handoff_archive_file_count?: number;
   /** Embedding model name at export time (informational for the operator). */
   embedding_model: string;
   /** Vector dimensions at export time. */

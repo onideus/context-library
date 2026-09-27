@@ -20,6 +20,11 @@ A single gzipped tarball named
 - `tables/*.jsonl` — one JSON line per row per Postgres table, sorted by a
   stable key so consecutive exports of an unchanged database diff cleanly
 - `handoffs/*.json` — verbatim copy of the handoff file tree
+- `handoffs/archive/` — verbatim copy of the compaction archive: the
+  byte-exact original of every handoff compacted under
+  `COMPACTION_MODE=archive`, plus any `rehydrate-handoffs` sidecars. For a
+  compacted handoff this is the only full copy, so it is always exported.
+  `manifest.json` records its size as `handoff_archive_file_count`.
 
 Embeddings are **excluded by default**. They are recomputable, they inflate
 the tarball substantially (~2 KiB per chunk), and re-embedding at import
@@ -78,11 +83,15 @@ npm run import <tarball> -- --force
    files. If either check fails and `--force` is not set, refuse.
 6. If `--force` is set and the destination is non-empty, `TRUNCATE ...
    RESTART IDENTITY CASCADE` every managed table and clear
-   `DATA_DIR/handoffs/`.
+   `DATA_DIR/handoffs/` — **except `handoffs/archive/`, which is never
+   cleared.** It is append-only and may hold originals the tarball does not
+   (for example, a tarball exported before archives were exported).
 7. Load each JSONL file in its own transaction, INSERT with the manifest's
    column order, and verify the loaded count against the manifest before
    committing.
-8. Copy handoff files into `DATA_DIR/handoffs/`.
+8. Copy handoff files into `DATA_DIR/handoffs/`, then merge the tarball's
+   `handoffs/archive/` in without overwriting any archive file already
+   present (archived originals are byte-exact, so an existing one is kept).
 9. Queue re-embed through `pending_embeddings` — see below.
 
 ### Re-embed policy

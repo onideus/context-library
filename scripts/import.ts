@@ -40,6 +40,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { config } from "../src/config.js";
+import { ARCHIVE_DIRNAME } from "../src/storage/json-store.js";
 import { pool, query, getClient } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { TABLES, type TableSpec } from "./portability/tables.js";
@@ -234,6 +235,12 @@ async function clearHandoffDir(): Promise<void> {
     const entries = await readdir(dir);
     for (const name of entries) {
       if (name.startsWith(".")) continue;
+      // Never wipe the compaction archive: it holds the only full copy of every
+      // compacted handoff, and it is append-only by design. Clearing it would
+      // make `--force` with a tarball that lacks an archive (any export written
+      // before archives were exported) destroy those originals outright.
+      // restoreHandoffArchive merges the tarball's archive in instead.
+      if (name === ARCHIVE_DIRNAME) continue;
       await rm(join(dir, name), { force: true, recursive: true });
     }
   } catch {
@@ -311,6 +318,29 @@ async function loadTable(
 }
 
 // ── Handoff copy ──────────────────────────────────────────────────
+
+/**
+ * Merges the tarball's `handoffs/archive/` into the destination without
+ * overwriting anything already there. Archived originals are byte-exact and
+ * immutable, so an existing file is by definition the same original (or a
+ * newer rehydration sidecar the operator produced); keeping it is always safe.
+ */
+async function restoreHandoffArchive(handoffsSrc: string): Promise<number> {
+  const src = join(handoffsSrc, ARCHIVE_DIRNAME);
+  let entries;
+  try {
+    entries = await readdir(src, { recursive: true, withFileTypes: true });
+  } catch {
+    return 0; // Tarball has no archive (pre-archive export, or nothing compacted).
+  }
+  await cp(src, join(config.dataDir, "handoffs", ARCHIVE_DIRNAME), {
+    recursive: true,
+    force: false,
+    errorOnExist: false,
+  });
+  return entries.filter((e) => e.isFile()).length;
+}
+
 
 async function copyHandoffs(handoffsSrc: string): Promise<number> {
   const destDir = join(config.dataDir, "handoffs");
@@ -501,6 +531,10 @@ async function main(): Promise<void> {
         }
       }
       console.log(`  handoffs: ${existingHandoffs} → ${manifest.handoff_file_count}`);
+      console.log(
+        `  handoffs/${ARCHIVE_DIRNAME}/: merge ${manifest.handoff_archive_file_count ?? 0} file(s) ` +
+          `from the tarball; existing archive files are kept, never overwritten or cleared`
+      );
       console.log(`\n[import] Re-embed plan: ${plan.reason}`);
       if (plan.handoffs || plan.tasks || plan.notes || plan.artifacts) {
         console.log(
@@ -528,6 +562,8 @@ async function main(): Promise<void> {
     // Copy handoff files.
     const handoffsLoaded = await copyHandoffs(join(staging, "handoffs"));
     console.log(`[import] handoffs/: ${handoffsLoaded} file(s)`);
+    const archiveLoaded = await restoreHandoffArchive(join(staging, "handoffs"));
+    console.log(`[import] handoffs/${ARCHIVE_DIRNAME}/: ${archiveLoaded} file(s) merged (existing kept)`);
 
     // Enqueue re-embed if needed.
     if (plan.handoffs || plan.tasks || plan.notes || plan.artifacts) {
