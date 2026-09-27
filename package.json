@@ -15,7 +15,9 @@
     "extract-entities": "tsx scripts/extract-entities.ts",
     "compact-history": "tsx scripts/compact-history.ts",
     "audit-compaction": "tsx scripts/audit-compaction.ts",
-    "rehydrate-handoffs": "tsx scripts/rehydrate-handoffs.ts"
+    "rehydrate-handoffs": "tsx scripts/rehydrate-handoffs.ts",
+    "export": "tsx scripts/export.ts",
+    "import": "tsx scripts/import.ts"
   },
   "dependencies": {
     "@hono/mcp": "^0.2.4",
