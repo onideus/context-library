@@ -49,7 +49,7 @@ All four content layers are built and deployed.
 
 2. **Tasks** (lifecycle) — Action items with status lifecycle (open/completed/deferred/cancelled). Stored in PostgreSQL. Full-text search via `to_tsvector`. Tools: `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`.
 
-3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migration `005_notes.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `delete_note`, `search_notes`. Indexed for `search_context`.
+3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migration `005_notes.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `search_notes`. Indexed for `search_context`.
 
 4. **Artifacts** (lifecycle outputs) — CC prompts, research documents, generated content. Stored in PostgreSQL (`artifacts` table, migration `006_artifacts.sql`). Status lifecycle: `draft -> ready -> executing -> completed -> superseded`. Execution ordering and dependency tracking. Tools: `store_artifact`, `get_artifact`, `list_artifacts`, `update_artifact`, `search_artifacts`. Indexed for `search_context`.
 

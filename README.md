@@ -47,7 +47,7 @@ Adds structured task management, permanent knowledge capture, generated-output t
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -152,6 +152,8 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_notes` | Postgres | Browse notes with scope, domain, and tag filters |
 | `search_notes` | Postgres | Full-text search across note titles and content |
 | `update_note` | Postgres | Update note fields; re-embeds on content change |
+| `str_replace_note` | Postgres | Replace an exact text span in a note's content (literal match; compact response, no content echo) |
+| `append_note` | Postgres | Append text to a note on a new line (logs, dated entries; compact response) |
 | `delete_note` | Postgres | Permanently delete a note and its embedding |
 | `store_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
 | `get_artifact` | Postgres | Retrieve artifact by UUID (full content + pointer + metadata) |
