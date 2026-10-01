@@ -5,6 +5,7 @@ import { withTransaction, appendChange } from "../db/changes.js";
 import { indexNote } from "../embeddings/indexer.js";
 import { config } from "../config.js";
 import { extractAndStore } from "../entities/pipeline.js";
+import { countOccurrences, literalReplace, appendWithNewline } from "./note-edits.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -126,7 +127,7 @@ Errors (returned as {error: true, message, code, ...}):
 - NO_MATCH — old_str does not occur in the content (match_count: 0). Re-read the note with get_note and copy the text exactly.
 - AMBIGUOUS_MATCH — old_str occurs more than once and replace_all is false (match_count gives the number of occurrences). Widen old_str with surrounding text until it is unique, or pass replace_all: true if every occurrence should change.
 
-Returns a compact confirmation WITHOUT the note content: {id, title, updated_at, replacements, content_length}. replacements is the number of occurrences replaced; content_length is the new content length in characters. Title, tags, and other fields are unchanged — use update_note for those. Re-embeds the note for search.`;
+Returns a compact confirmation WITHOUT the note content: {id, title, updated_at, replacements, content_length}. replacements is the number of occurrences replaced; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Title, tags, and other fields are unchanged — use update_note for those. Re-embeds the note for search.`;
 
 const APPEND_NOTE_DESC = `Append text to the end of an existing note's content without resending the whole note. Prefer this over update_note for logs, running journals, and dated entries (e.g. "2026-01-15: Acme Corp rollout finished") — it costs tokens only for the new text and cannot accidentally drop existing lines.
 
@@ -138,40 +139,11 @@ Errors (returned as {error: true, message, code}):
 - VALIDATION_ERROR — content is empty.
 - NOT_FOUND — no note with that id.
 
-Returns a compact confirmation WITHOUT the note content: {id, title, updated_at, content_length}. content_length is the new total content length in characters. Concurrent appends to the same note are serialized, so none are lost. Re-embeds the note for search.`;
+Returns a compact confirmation WITHOUT the note content: {id, title, updated_at, content_length}. content_length is the new total content length (JavaScript string length, i.e. UTF-16 code units). Concurrent appends to the same note are serialized, so none are lost. Re-embeds the note for search.`;
 
 const DELETE_NOTE_DESC = `Permanently delete a note by UUID. Also removes its entry from the embeddings index. Knowledge entries are intended to be permanent — use this only for corrections or cleanup. Deletion cannot be undone.`;
 
 // ── Partial content edits ────────────────────────────────────────
-
-/** Count non-overlapping literal occurrences of `needle` in `haystack`. */
-export function countOccurrences(haystack: string, needle: string): number {
-  if (needle.length === 0) return 0;
-  return haystack.split(needle).length - 1;
-}
-
-/**
- * Literal replacement — no regex, no `$&`/`$1`/`$$` substitution (which
- * `String.prototype.replace` would apply). Replaces the first occurrence, or
- * every occurrence when `replaceAll` is true.
- */
-export function literalReplace(
-  haystack: string,
-  needle: string,
-  replacement: string,
-  replaceAll: boolean
-): string {
-  if (replaceAll) return haystack.split(needle).join(replacement);
-  const idx = haystack.indexOf(needle);
-  if (idx === -1) return haystack;
-  return haystack.slice(0, idx) + replacement + haystack.slice(idx + needle.length);
-}
-
-/** Append `addition` on a new line, inserting at most one `\n` separator. */
-export function appendWithNewline(existing: string, addition: string): string {
-  if (existing.length === 0) return addition;
-  return existing.endsWith("\n") ? existing + addition : `${existing}\n${addition}`;
-}
 
 type ContentEdit =
   | { ok: true; content: string; replacements?: number }

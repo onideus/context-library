@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { countOccurrences, literalReplace, appendWithNewline } from "../tools/notes.js";
+import { countOccurrences, literalReplace, appendWithNewline } from "../tools/note-edits.js";
 
 /**
  * Note tool integration tests.
@@ -638,6 +638,8 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       });
       // create_note rejects empty content, so empty it via update_note.
       await callTool("update_note", { id: created.id, content: "" });
+      const emptied = await callTool("get_note", { id: created.id });
+      expect(emptied.content).toBe("");
       await callTool("append_note", { id: created.id, content: "first entry" });
       const fetched = await callTool("get_note", { id: created.id });
       expect(fetched.content).toBe("first entry");
