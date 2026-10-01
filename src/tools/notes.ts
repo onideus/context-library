@@ -5,6 +5,7 @@ import { withTransaction, appendChange } from "../db/changes.js";
 import { indexNote } from "../embeddings/indexer.js";
 import { config } from "../config.js";
 import { extractAndStore } from "../entities/pipeline.js";
+import { countOccurrences, literalReplace, appendWithNewline } from "./note-edits.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -108,9 +109,114 @@ Scope filter: when scope is omitted, this tool searches notes across all scopes.
 
 Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
 
-const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified. Tags and related_task_ids are full-replacement (provide complete arrays). Re-embeds on content change.`;
+const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified. Tags and related_task_ids are full-replacement (provide complete arrays). Re-embeds on content change. For small edits to an existing note's content, prefer str_replace_note (exact-text replace) or append_note (add to the end) — they avoid resending the full content.`;
+
+const STR_REPLACE_NOTE_DESC = `Replace an exact span of text inside an existing note's content without resending the whole note. Prefer this over update_note for small edits to long notes (changing a status line, fixing a sentence, updating a value) — update_note requires the complete new content, costs tokens for the entire note, and risks silently dropping lines you didn't mean to touch.
+
+Workflow: call get_note first so old_str is copied exactly from the current content.
+
+Parameters:
+- id (required): UUID of the note to edit.
+- old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
+- new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
+- replace_all (optional, default false): when true, replace every occurrence; when false, old_str must occur exactly once.
+
+Errors (returned as {error: true, message, code, ...}):
+- VALIDATION_ERROR — old_str is empty.
+- NOT_FOUND — no note with that id.
+- NO_MATCH — old_str does not occur in the content (match_count: 0). Re-read the note with get_note and copy the text exactly.
+- AMBIGUOUS_MATCH — old_str occurs more than once and replace_all is false (match_count gives the number of occurrences). Widen old_str with surrounding text until it is unique, or pass replace_all: true if every occurrence should change.
+
+Returns a compact confirmation WITHOUT the note content: {id, title, updated_at, replacements, content_length}. replacements is the number of occurrences replaced; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Title, tags, and other fields are unchanged — use update_note for those. Re-embeds the note for search.`;
+
+const APPEND_NOTE_DESC = `Append text to the end of an existing note's content without resending the whole note. Prefer this over update_note for logs, running journals, and dated entries (e.g. "2026-01-15: Acme Corp rollout finished") — it costs tokens only for the new text and cannot accidentally drop existing lines.
+
+Parameters:
+- id (required): UUID of the note to append to.
+- content (required, non-empty): the text to append. It always starts on a new line: if the existing content is non-empty and does not already end with a newline, exactly one newline is inserted first. If the existing content is empty, the result is just the new text.
+
+Errors (returned as {error: true, message, code}):
+- VALIDATION_ERROR — content is empty.
+- NOT_FOUND — no note with that id.
+
+Returns a compact confirmation WITHOUT the note content: {id, title, updated_at, content_length}. content_length is the new total content length (JavaScript string length, i.e. UTF-16 code units). Concurrent appends to the same note are serialized, so none are lost. Re-embeds the note for search.`;
 
 const DELETE_NOTE_DESC = `Permanently delete a note by UUID. Also removes its entry from the embeddings index. Knowledge entries are intended to be permanent — use this only for corrections or cleanup. Deletion cannot be undone.`;
+
+// ── Partial content edits ────────────────────────────────────────
+
+type ContentEdit =
+  | { ok: true; content: string; replacements?: number }
+  | { ok: false; message: string; code: string; match_count: number };
+
+/**
+ * Shared body for str_replace_note / append_note: lock the row FOR UPDATE,
+ * compute the new content, write it and the change-log row in one
+ * transaction, then fire-and-forget re-index + entity extraction exactly as
+ * update_note does. The response is compact — no `content` echo.
+ */
+async function editNoteContent(
+  id: string,
+  toolName: string,
+  edit: (content: string) => ContentEdit
+) {
+  const outcome = await withTransaction(async (client) => {
+    const locked = await client.query<NoteRow>(
+      "SELECT * FROM notes WHERE id = $1 FOR UPDATE",
+      [id]
+    );
+    if (locked.rows.length === 0) return null;
+
+    const result = edit(locked.rows[0].content);
+    if (!result.ok) return { kind: "rejected" as const, result };
+
+    const upd = await client.query<NoteRow>(
+      "UPDATE notes SET content = $1 WHERE id = $2 RETURNING *",
+      [result.content, id]
+    );
+    if (upd.rows.length === 0) {
+      // Same guard shape as update_note: never append a change row for a
+      // note that no longer exists.
+      return null;
+    }
+    await appendChange(client, "note", id, "update");
+    return { kind: "updated" as const, row: upd.rows[0], replacements: result.replacements };
+  });
+
+  if (outcome === null) {
+    return errorResponse(`Note not found: ${id}`, "NOT_FOUND");
+  }
+  if (outcome.kind === "rejected") {
+    const { message, code, match_count } = outcome.result;
+    return jsonResponse({ error: true, message, code, match_count });
+  }
+
+  const { row, replacements } = outcome;
+  indexNote(row.id, {
+    title: row.title,
+    content: row.content,
+    domain: row.domain,
+    tags: row.tags,
+    scope: row.scope,
+    created_at: row.created_at,
+  }).catch((err) =>
+    console.warn(`[${toolName}] Background indexing failed:`, (err as Error).message)
+  );
+  if (config.entityExtractionEnabled && config.entityExtractionAsync) {
+    const noteText = [row.title, row.content].filter(Boolean).join("\n");
+    extractAndStore("note", row.id, noteText).catch((err) =>
+      console.warn(`[${toolName}] Background entity extraction failed:`, (err as Error).message)
+    );
+  }
+
+  return jsonResponse({
+    id: row.id,
+    title: row.title,
+    updated_at: row.updated_at,
+    ...(replacements !== undefined ? { replacements } : {}),
+    content_length: row.content.length,
+  });
+}
 
 // ── Tool Registration ────────────────────────────────────────────
 
@@ -446,6 +552,84 @@ export function registerNoteTools(mcpServer: McpServer): void {
         }
 
         return jsonResponse(formatNote(row));
+      } catch (err) {
+        return errorResponse((err as Error).message, "DB_ERROR");
+      }
+    }
+  );
+
+  // ── str_replace_note ─────────────────────────────────────────
+  mcpServer.tool(
+    "str_replace_note",
+    STR_REPLACE_NOTE_DESC,
+    {
+      id: z.string().describe("UUID of the note to edit"),
+      old_str: z
+        .string()
+        .describe("Exact text to find (literal, case- and whitespace-sensitive, not a regex)"),
+      new_str: z
+        .string()
+        .describe("Replacement text, inserted verbatim. Empty string deletes old_str"),
+      replace_all: z
+        .boolean()
+        .optional()
+        .describe("Replace every occurrence instead of requiring exactly one (default false)"),
+    },
+    async (args) => {
+      if (!args.old_str) {
+        return errorResponse("old_str must be a non-empty string", "VALIDATION_ERROR");
+      }
+      try {
+        return await editNoteContent(args.id, "str_replace_note", (content) => {
+          const matchCount = countOccurrences(content, args.old_str);
+          if (matchCount === 0) {
+            return {
+              ok: false,
+              message: "old_str was not found in the note content. Call get_note and copy the text exactly.",
+              code: "NO_MATCH",
+              match_count: 0,
+            };
+          }
+          if (matchCount > 1 && !args.replace_all) {
+            return {
+              ok: false,
+              message: `old_str matches ${matchCount} times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.`,
+              code: "AMBIGUOUS_MATCH",
+              match_count: matchCount,
+            };
+          }
+          const replaceAll = args.replace_all === true;
+          return {
+            ok: true,
+            content: literalReplace(content, args.old_str, args.new_str, replaceAll),
+            replacements: replaceAll ? matchCount : 1,
+          };
+        });
+      } catch (err) {
+        return errorResponse((err as Error).message, "DB_ERROR");
+      }
+    }
+  );
+
+  // ── append_note ──────────────────────────────────────────────
+  mcpServer.tool(
+    "append_note",
+    APPEND_NOTE_DESC,
+    {
+      id: z.string().describe("UUID of the note to append to"),
+      content: z
+        .string()
+        .describe("Text to append; starts on a new line after the existing content"),
+    },
+    async (args) => {
+      if (!args.content) {
+        return errorResponse("content must be a non-empty string", "VALIDATION_ERROR");
+      }
+      try {
+        return await editNoteContent(args.id, "append_note", (content) => ({
+          ok: true,
+          content: appendWithNewline(content, args.content),
+        }));
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
       }

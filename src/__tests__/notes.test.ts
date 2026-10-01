@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { countOccurrences, literalReplace, appendWithNewline } from "../tools/note-edits.js";
 
 /**
  * Note tool integration tests.
@@ -63,6 +64,28 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
   expect(res.status).toBe(200);
   const data = (await parseSseResponse(res)) as any;
   return JSON.parse(data.result.content[0].text);
+}
+
+/** Count `note:update` rows in the sync change log for one note. */
+async function noteUpdateChangeCount(id: string): Promise<number> {
+  const pg = await import("pg");
+  const client = new pg.default.Client({
+    host: PG_HOST,
+    port: parseInt(PG_PORT),
+    user: PG_USER,
+    password: PG_PASSWORD,
+    database: PG_DATABASE,
+  });
+  await client.connect();
+  try {
+    const res = await client.query<{ n: number }>(
+      "SELECT COUNT(*)::int AS n FROM changes WHERE entity_type = 'note' AND entity_id = $1 AND op = 'update'",
+      [id]
+    );
+    return res.rows[0].n;
+  } finally {
+    await client.end();
+  }
 }
 
 async function checkPostgres(): Promise<boolean> {
@@ -170,6 +193,8 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
     expect(toolNames).toContain("search_notes");
     expect(toolNames).toContain("update_note");
     expect(toolNames).toContain("delete_note");
+    expect(toolNames).toContain("str_replace_note");
+    expect(toolNames).toContain("append_note");
   });
 
   describe("create_note", () => {
@@ -426,6 +451,255 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
     });
   });
 
+  describe("str_replace_note", () => {
+    async function makeNote(content: string) {
+      return callTool("create_note", {
+        title: "Acme Corp rollout status",
+        content,
+        scope: "work",
+      });
+    }
+
+    it("replaces a single occurrence and returns a compact response", async () => {
+      const created = await makeNote("Owner: Jane Developer\nStatus: in progress\nNext: review");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "Status: in progress",
+        new_str: "Status: done",
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.id).toBe(created.id);
+      expect(result.title).toBe("Acme Corp rollout status");
+      expect(result.replacements).toBe(1);
+      expect(result.updated_at).toBeDefined();
+      expect(result).not.toHaveProperty("content");
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("Owner: Jane Developer\nStatus: done\nNext: review");
+      expect(result.content_length).toBe(fetched.content.length);
+    });
+
+    it("returns NO_MATCH without echoing content", async () => {
+      const created = await makeNote("project-alpha notes");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "project-beta",
+        new_str: "x",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NO_MATCH");
+      expect(result.match_count).toBe(0);
+      expect(JSON.stringify(result)).not.toContain("project-alpha notes");
+    });
+
+    it("returns AMBIGUOUS_MATCH with match_count when old_str repeats", async () => {
+      const created = await makeNote("TODO one\nTODO two\nTODO three");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "TODO",
+        new_str: "DONE",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("AMBIGUOUS_MATCH");
+      expect(result.match_count).toBe(3);
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("TODO one\nTODO two\nTODO three");
+    });
+
+    it("replace_all replaces every occurrence and reports the count", async () => {
+      const created = await makeNote("TODO one\nTODO two\nTODO three");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "TODO",
+        new_str: "DONE",
+        replace_all: true,
+      });
+      expect(result.replacements).toBe(3);
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("DONE one\nDONE two\nDONE three");
+    });
+
+    it("empty new_str deletes old_str", async () => {
+      const created = await makeNote("keep this [remove me] and this");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: " [remove me]",
+        new_str: "",
+      });
+      expect(result.replacements).toBe(1);
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("keep this and this");
+    });
+
+    it("inserts $&, $1, $$ in new_str literally", async () => {
+      const created = await makeNote("price: PLACEHOLDER");
+      await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "PLACEHOLDER",
+        new_str: "$& $1 $$ $`",
+      });
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("price: $& $1 $$ $`");
+    });
+
+    it("matches regex metacharacters in old_str literally", async () => {
+      const meta = ".*?[](){}+|^$\\";
+      const created = await makeNote(`before ${meta} after; also a.b`);
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: meta,
+        new_str: "META",
+      });
+      expect(result.replacements).toBe(1);
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("before META after; also a.b");
+
+      // "." must not act as a wildcard.
+      const noMatch = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "a.c",
+        new_str: "x",
+      });
+      expect(noMatch.code).toBe("NO_MATCH");
+    });
+
+    it("returns VALIDATION_ERROR for empty old_str", async () => {
+      const created = await makeNote("anything");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "",
+        new_str: "x",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+    });
+
+    it("returns NOT_FOUND for non-existent note", async () => {
+      const result = await callTool("str_replace_note", {
+        id: "00000000-0000-0000-0000-000000000000",
+        old_str: "a",
+        new_str: "b",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NOT_FOUND");
+    });
+
+    it("writes a change-log row only for successful edits", async () => {
+      const created = await makeNote("alpha beta");
+      expect(await noteUpdateChangeCount(created.id)).toBe(0);
+
+      await callTool("str_replace_note", { id: created.id, old_str: "gamma", new_str: "x" });
+      expect(await noteUpdateChangeCount(created.id)).toBe(0);
+
+      await callTool("str_replace_note", { id: created.id, old_str: "beta", new_str: "gamma" });
+      expect(await noteUpdateChangeCount(created.id)).toBe(1);
+    });
+  });
+
+  describe("append_note", () => {
+    it("appends on a new line when content lacks a trailing newline", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp log",
+        content: "2026-01-01: kickoff",
+        scope: "work",
+      });
+      const result = await callTool("append_note", {
+        id: created.id,
+        content: "2026-01-02: follow-up",
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.id).toBe(created.id);
+      expect(result.title).toBe("Acme Corp log");
+      expect(result).not.toHaveProperty("content");
+      expect(result).not.toHaveProperty("replacements");
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("2026-01-01: kickoff\n2026-01-02: follow-up");
+      expect(result.content_length).toBe(fetched.content.length);
+    });
+
+    it("does not add a second newline when content already ends with one", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp log",
+        content: "2026-01-01: kickoff\n",
+        scope: "work",
+      });
+      await callTool("append_note", { id: created.id, content: "2026-01-02: follow-up" });
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("2026-01-01: kickoff\n2026-01-02: follow-up");
+    });
+
+    it("on empty content the result is just the appended text", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp empty log",
+        content: "placeholder",
+        scope: "work",
+      });
+      // create_note rejects empty content, so empty it via update_note.
+      await callTool("update_note", { id: created.id, content: "" });
+      const emptied = await callTool("get_note", { id: created.id });
+      expect(emptied.content).toBe("");
+      await callTool("append_note", { id: created.id, content: "first entry" });
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("first entry");
+    });
+
+    it("returns VALIDATION_ERROR for empty content", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp log",
+        content: "x",
+        scope: "work",
+      });
+      const result = await callTool("append_note", { id: created.id, content: "" });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+    });
+
+    it("returns NOT_FOUND for non-existent note", async () => {
+      const result = await callTool("append_note", {
+        id: "00000000-0000-0000-0000-000000000000",
+        content: "orphan",
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NOT_FOUND");
+    });
+
+    it("writes a change-log row for each append", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp log",
+        content: "start",
+        scope: "work",
+      });
+      await callTool("append_note", { id: created.id, content: "one" });
+      await callTool("append_note", { id: created.id, content: "two" });
+      expect(await noteUpdateChangeCount(created.id)).toBe(2);
+    });
+
+    it("concurrent appends are serialized — every line lands exactly once", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp concurrent log",
+        content: "header",
+        scope: "work",
+      });
+      const N = 10;
+      const lines = Array.from({ length: N }, (_, i) => `entry-${i}-marker`);
+      const results = await Promise.all(
+        lines.map((line) => callTool("append_note", { id: created.id, content: line }))
+      );
+      for (const r of results) expect(r.error).toBeUndefined();
+
+      const fetched = await callTool("get_note", { id: created.id });
+      const contentLines: string[] = fetched.content.split("\n");
+      expect(contentLines[0]).toBe("header");
+      expect(contentLines.length).toBe(N + 1);
+      for (const line of lines) {
+        expect(contentLines.filter((l) => l === line).length).toBe(1);
+      }
+      expect(await noteUpdateChangeCount(created.id)).toBe(N);
+    });
+  });
+
   describe("delete_note", () => {
     it("deletes an existing note and returns {deleted: true}", async () => {
       const created = await callTool("create_note", {
@@ -477,5 +751,27 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       });
       expect(result.tasks.length).toBe(0);
     });
+  });
+});
+
+// Pure helpers behind str_replace_note / append_note — no Postgres needed.
+describe("note partial-edit helpers", () => {
+  it("countOccurrences counts literal, non-overlapping matches", () => {
+    expect(countOccurrences("a.b a.b axb", "a.b")).toBe(2);
+    expect(countOccurrences("aaaa", "aa")).toBe(2);
+    expect(countOccurrences("abc", "z")).toBe(0);
+  });
+
+  it("literalReplace inserts $-patterns verbatim and treats old_str literally", () => {
+    expect(literalReplace("x PH y PH", "PH", "$& $1 $$ $`", false)).toBe("x $& $1 $$ $` y PH");
+    expect(literalReplace("x PH y PH", "PH", "$&", true)).toBe("x $& y $&");
+    expect(literalReplace("a .*?[](){}+|^$\\ b", ".*?[](){}+|^$\\", "M", false)).toBe("a M b");
+    expect(literalReplace("keep [x] this", " [x]", "", false)).toBe("keep this");
+  });
+
+  it("appendWithNewline inserts at most one separator", () => {
+    expect(appendWithNewline("a", "b")).toBe("a\nb");
+    expect(appendWithNewline("a\n", "b")).toBe("a\nb");
+    expect(appendWithNewline("", "b")).toBe("b");
   });
 });
