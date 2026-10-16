@@ -81,7 +81,9 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_notes_superseded_by ON notes (superseded_by)
     WHERE superseded_by IS NOT NULL;
 
--- Default search filter: status = 'active' AND (valid_until IS NULL OR valid_until > now()).
+-- Lifecycle predicates used by list_notes' status filter and by the search
+-- tools' candidate selection (valid_until IS NULL OR valid_until > now(),
+-- optionally AND status = 'active').
 CREATE INDEX IF NOT EXISTS idx_notes_lifecycle ON notes (status, valid_until);
 
 -- Row (note_id, k) is the note as it was at version k. History of a note is

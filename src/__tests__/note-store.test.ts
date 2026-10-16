@@ -961,6 +961,19 @@ describe.skipIf(!pgAvailable)("note store: helpers", () => {
       expect((await getNote(n.id))?.status).toBe("active");
     });
 
+    it("accepts uppercase UUIDs (Postgres returns lowercase; ids compare case-insensitively)", async () => {
+      const oldN = await mkNote();
+      const succ = await mkNote();
+      const out = ok(await supersede(oldN.id.toUpperCase(), succ.id.toUpperCase()));
+      expect(out.old.id).toBe(oldN.id);
+      expect(out.old.superseded_by).toBe(succ.id);
+      expect(out.successor.id).toBe(succ.id);
+      // Self-supersede is still caught when the two spellings differ only by case.
+      const again = await mkNote();
+      const r = await supersede(again.id, again.id.toUpperCase());
+      expect(conflictOfKind(r, "invalid_successor").reason).toMatch(/itself/);
+    });
+
     it("returns not_found(superseded_by) for a missing successor", async () => {
       const n = await mkNote();
       const r = await supersede(n.id, randomUUID());

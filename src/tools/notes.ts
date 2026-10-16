@@ -234,7 +234,7 @@ const SUPERSEDE_NOTE_DESC = `Retire a note because a newer note replaces it. The
 
 Workflow: (1) create the successor first with create_note — it must already exist; (2) call supersede_note({ id: <old note>, superseded_by: <new note> }). Both notes must be active: a superseded or expired note cannot be the successor (INVALID_SUCCESSOR), and a note cannot supersede itself (INVALID_SUCCESSOR). If the old note is already superseded you get STATUS_CONFLICT with the note as it is now under 'current' (its 'superseded_by' shows what replaced it). Pass expected_version (from get_note) to guard against the old note being edited concurrently: a stale value returns VERSION_CONFLICT with the current note.
 
-Superseded notes keep their content and are marked status 'superseded' with superseded_by pointing at the successor; get_note on the successor lists the old note under 'supersedes'. If you superseded the wrong note, delete_note on the successor undoes it (the old note is reactivated, or re-pointed down the chain).
+Superseded notes keep their content and are marked status 'superseded' with superseded_by pointing at the successor; get_note on the successor lists the old note under 'supersedes'. There is no un-supersede tool. If you superseded the WRONG note, the only recovery is delete_note on the successor — which PERMANENTLY deletes the successor and its history, and reactivates (or re-points down the chain) EVERY note that successor had superseded, not just the one you meant. Do that only when the successor was created for this supersession alone and you will re-create it; otherwise tell the user and leave the chain as it is.
 
 Returns { superseded: { id, title, version, superseded_by, superseded_at }, successor: { id, title } }. Errors: NOT_FOUND (either id missing; the message says which), VERSION_CONFLICT, STATUS_CONFLICT, INVALID_SUCCESSOR.`;
 
@@ -397,8 +397,8 @@ export function registerNoteTools(mcpServer: McpServer): void {
       scope: scopeEnum.nullable().optional().describe("Filter by scope (null/omitted = all scopes)"),
       domain: z.string().optional().describe("Filter by domain"),
       tags: z.array(z.string()).optional().describe("Filter by tags (ANY match)"),
-      status: statusFilterEnum.optional().describe(
-        "Filter by computed lifecycle status: 'active', 'superseded', or 'expired' (omitted = all statuses)"
+      status: statusFilterEnum.nullable().optional().describe(
+        "Filter by computed lifecycle status: 'active', 'superseded', or 'expired' (null/omitted = all statuses)"
       ),
       order_by: listOrderByEnum.optional().describe("Sort field (default: 'created_at')"),
       order_dir: orderDirEnum.optional().describe("Sort direction (default: 'desc')"),

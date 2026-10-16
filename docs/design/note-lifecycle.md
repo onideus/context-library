@@ -1,8 +1,7 @@
 # Design: Note lifecycle, provenance, version history, edit preconditions
 
-> Status: **proposed, revised after adversarial review** (awaiting the
-> maintainer decisions in §12). Target: migration `013`, two stacked PRs
-> (§11). Scope is the `notes` primitive only — tasks, artifacts, handoffs,
+> Status: **approved and implemented** — all fourteen decisions in §12 were
+> taken as recommended; shipped as two stacked PRs (§11). Migration `013`. Scope is the `notes` primitive only — tasks, artifacts, handoffs,
 > consolidation, recency decay, and the retrieval eval harness are out of
 > scope.
 
@@ -202,9 +201,10 @@ Two controls, both decisions in §12 #12:
   the newest N of them.
 - `prune_note_history({ id, keep_last })` — a dedicated tool (not a mode on
   `update_note`) that deletes all but the newest `keep_last` history rows of
-  one note; `keep_last: 0` purges history entirely. Writes a change-log row
-  so pullers re-snapshot. Description says plainly that this is the only
-  way to remove content that was edited out of a note.
+  one note; `keep_last: 0` purges history entirely. The note row itself does
+  not change and `note_versions` is not a sync entity, so no change-log row
+  is written. Description says plainly that this is the only way to remove
+  content that was edited out of a note.
 
 ## 4. Tool surface
 

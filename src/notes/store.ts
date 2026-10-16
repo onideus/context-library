@@ -197,6 +197,17 @@ export function parseIsoWithOffset(value: string): string | null {
   return new Date(ms).toISOString();
 }
 
+const UUID_TEXT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Canonical (lowercase) form of a UUID string, so ids compared in JS agree
+ * with the lowercase text Postgres returns. Non-UUID input is returned
+ * unchanged and left to Postgres to reject.
+ */
+export function normaliseUuid(id: string): string {
+  return UUID_TEXT_RE.test(id) ? id.toLowerCase() : id;
+}
+
 // ── Lifecycle SQL fragments ──────────────────────────────────────────
 
 /**
@@ -438,6 +449,12 @@ export async function supersedeNoteInTx(
   opts: Omit<WritePreconditions, "baseUpdatedAt"> & { via: ChangedVia }
 ): Promise<NoteWriteResult<SupersedeOutcome>> {
   await lockLifecycle(client);
+
+  // Postgres returns uuid text lowercase; callers (an MCP client echoing a
+  // Swift uuidString, say) may send uppercase. Compare on the canonical form
+  // so a real note is never reported NOT_FOUND over letter case.
+  id = normaliseUuid(id);
+  successorId = normaliseUuid(successorId);
 
   const ids = id === successorId ? [id] : [id, successorId];
   const locked = await client.query<NoteRow>(
