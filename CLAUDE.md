@@ -57,7 +57,9 @@ All four content layers are built and deployed.
 
 **Do not run `reindex` (or `indexAllHandoffs`) against handoffs while compacted files are still awaiting recovery.** `indexHandoffRaw` deletes `<filename>#%` from `embeddings` and re-inserts from what is on disk now — for an already-compacted file that overwrites the pre-compaction chunk text, which is the only recovery source `scripts/rehydrate-handoffs.ts` has. Run the audit and rehydration scripts first.
 
-`search_context` and `reindex` provide hybrid semantic search (pgvector cosine similarity + FTS with Reciprocal Rank Fusion) across all indexed content types. Results are deduplicated by content fingerprint, keeping the oldest source file.
+`search_context` and `reindex` provide hybrid semantic search (pgvector cosine similarity + FTS with Reciprocal Rank Fusion) across all indexed content types. Results are deduplicated by content fingerprint, keeping the oldest source file — except that two **notes** with different ids are never collapsed into one (a copy-and-edit successor must not be dropped in favour of the stale note).
+
+**Note lifecycle in search — redirect, do not hide** (`src/notes/lifecycle-search.ts`, design §6). `search_notes` and `search_context` select note candidates over all non-expired statuses, then replace a superseded hit with the head of its supersession chain (the head carries the hit's rank and lists the old id under `matched_via`), and say so in a top-level `lifecycle_notices` array; `next_step` tells the model to cite successors. Expired notes are dropped by default. `include_superseded: true` turns redirection off (superseded rows come back as themselves with `successor_title`); `include_expired: true` includes expired rows. `search_notes` reports `total_count` pre-redirect plus `redirected`. In `search_context` the lifecycle filter is a **hashed `IN (SELECT id::text FROM notes WHERE …)` subquery** on every embeddings query (both hybrid CTEs, the pure-vector branch, the graph-only fetch) — never a join inside the vector CTE, which would make the planner abandon the HNSW index-ordered scan (an EXPLAIN guard in `search-lifecycle.test.ts` enforces this). The filter is added only when notes are in scope, so a handoff-only search never touches `notes`; it also drops orphaned note embeddings. Lifecycle state is read from `notes`, never from `embeddings.metadata`.
 
 ### Entity Graph (Tier 4, optional)
 
@@ -111,7 +113,9 @@ src/
     store.ts               # Shared note write path (MCP tools + /sync/push): row locks,
                            #   expected_version / expected_status / base_updated_at
                            #   preconditions, supersede + delete-splice, change-log rows,
-                           #   history retention, lifecycle SQL fragments
+                           #   history retention, lifecycle SQL fragments, chain-head walk
+    lifecycle-search.ts    # Search-time lifecycle: hashed-subquery filter, pure
+                           #   redirect/merge (applyLifecycleRedirect), notices
   entities/
     pipeline.ts            # Extraction pipeline (extractAndStore, fire-and-forget)
     prompts.ts             # Extraction prompt templates
@@ -162,6 +166,9 @@ src/
     note-store.test.ts     # Integration: notes/store.ts directly — migration 013 over
                            #   existing rows, versioning trigger, two-client lock/race,
                            #   retention cap (Postgres-gated); pure helpers ungated
+    search-lifecycle.test.ts  # Integration: search_notes redirect via server; search_context
+                           #   SQL builder + redirect against seeded embeddings (no TEI);
+                           #   EXPLAIN guard for the HNSW path (Postgres-gated)
     artifacts.test.ts      # Integration: artifact CRUD + lifecycle (Postgres-gated)
     artifact-summary.test.ts  # Integration: artifact_summary on handoff retrieval (Postgres-gated)
     artifact-type-normalization.test.ts  # Unit: type normalization
@@ -241,7 +248,7 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - Lifecycle moves only through `supersede_note` (both notes must be active; successor must not be expired; cycles are impossible by construction) and the delete-time splice: deleting a note that superseded others re-points them to its own successor, or reactivates them when it was the end of the chain; each relinked predecessor gets its own change-log row. The `superseded_by` FK is NO ACTION, so a raw `DELETE` of a successor fails loudly rather than leaving a predecessor "superseded by nothing".
 - `supersede_note`, `delete_note`, and `prune_note_history` serialise on `pg_advisory_xact_lock(7013001)`; `update_note` does not. Multi-row locks use `ORDER BY id FOR UPDATE`.
 - `valid_until` must carry an explicit offset (`Z` or `±hh:mm`) on both paths (`parseIsoWithOffset`); offset-less values are rejected because JS and Postgres would read them as different instants.
-- Lifecycle state lives in `notes`, never in `embeddings.metadata` (the sync path cannot refresh it). Search-time lifecycle filtering joins/sub-selects `notes`.
+- Lifecycle state lives in `notes`, never in `embeddings.metadata` (the sync path cannot refresh it). Search-time lifecycle filtering uses a hashed `IN (subquery)` on `notes` — never a join inside the vector CTE (see "Cross-Layer Search").
 - `NOTE_HISTORY_MAX_VERSIONS` (default 0 = unlimited) trims history after each versioned write; `prune_note_history` is the per-note manual control and the only way to remove content edited out of a note. It writes no change-log row (the note row does not change).
 - **Data migrations that `UPDATE notes` fire the trigger too:** every touched row gets a version bump and a history row (`changed_via = 'sql'`) but no change-log row, so paired sync clients would hit `VERSION_CONFLICT` with no pull signal. A bulk data migration must either `ALTER TABLE notes DISABLE TRIGGER notes_version_history` for its duration (and say so), or append `changes` rows for the rows it touched.
 - Note ids are UUID text and Postgres returns them lowercase; `src/notes/store.ts` compares ids case-insensitively, and the sync push handler lowercases every pushed UUID `entity_id` (all entity types, plus `payload.superseded_by` on supersede) before anything else, so the change log, `sync_op_log`, the result `entity_id`, `relinked` and snapshot keys always agree; `op_uuid` is echoed exactly as sent.

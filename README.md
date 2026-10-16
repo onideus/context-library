@@ -150,7 +150,7 @@ The reference implementation is private. What is documented here is the pattern 
 | `create_note` | Postgres | Capture permanent knowledge (decisions, patterns, insights) with optional `provenance` and `valid_until` |
 | `get_note` | Postgres | Retrieve note by UUID, with lifecycle status, successor, predecessors, and version |
 | `list_notes` | Postgres | Browse notes with scope, domain, tag, and lifecycle-status filters |
-| `search_notes` | Postgres | Full-text search across note titles and content |
+| `search_notes` | Postgres | Full-text search across note titles and content; a superseded hit is redirected to its current successor (`include_superseded` / `include_expired` opt out) |
 | `update_note` | Postgres | Update note fields with optional `expected_version` precondition; every effective edit is versioned; re-embeds on content change |
 | `delete_note` | Postgres | Permanently delete a note, its history, and its embedding; splices any supersession chain through it |
 | `supersede_note` | Postgres | Mark a note as replaced by another (both must be active); the old note keeps its content with `status='superseded'` |
@@ -161,7 +161,7 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_artifacts` | Postgres | Browse artifacts with type, status, scope, and tag filters; execution_order-aware sort |
 | `search_artifacts` | Postgres | Full-text search across artifact titles and content |
 | `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
-| `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types |
+| `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types; superseded notes redirect to their successor, expired notes are hidden (`include_superseded` / `include_expired` opt out) |
 | `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, notes, and artifacts |
 | `extract_entities` | Entities | Trigger entity extraction on a single content item |
 | `run_extraction` | Entities | Batch-extract entities from multiple content items |
