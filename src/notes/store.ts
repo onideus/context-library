@@ -255,6 +255,19 @@ export function lifecyclePredicateSql(alias: string, filter: LifecycleFilter): s
   return clauses.length ? `(${clauses.join(" AND ")})` : "TRUE";
 }
 
+/**
+ * Candidate predicate for SEARCH over `notes`: drops only COMPUTED-expired
+ * rows (design section 3.3 - supersession wins over expiry, so a superseded
+ * note whose own valid_until has passed is still a candidate and is redirected
+ * to its successor). `lifecyclePredicateSql({ excludeExpired })` ignores
+ * status and would wrongly drop such a note before it could be redirected.
+ * With `includeExpired` nothing is excluded ("TRUE").
+ */
+export function searchCandidatePredicateSql(alias: string, opts: { includeExpired: boolean }): string {
+  if (opts.includeExpired) return "TRUE";
+  return `(${alias}.status = 'superseded' OR ${alias}.valid_until IS NULL OR ${alias}.valid_until > now())`;
+}
+
 // ── Locking ──────────────────────────────────────────────────────────
 
 /**
@@ -663,10 +676,12 @@ export async function resolveChainHeads(
 
 /**
  * Lifecycle facts about one note, as search needs them. `status` is the
- * COMPUTED status (active | superseded | expired) evaluated by Postgres with
- * its own clock, so it agrees exactly with the `valid_until > now()` candidate
- * predicate used in the same request. Timestamps are ISO strings so the
- * redirect logic stays pure and clock-free.
+ * COMPUTED status (active | superseded | expired) evaluated by Postgres at the
+ * time of THIS read. The candidate query is a separate statement with its own
+ * now(), so a note can cross its valid_until between the two; the redirect
+ * step re-checks status on every candidate as a defensive second line rather
+ * than assuming the two agree. Timestamps are ISO strings so the redirect
+ * logic stays pure and clock-free.
  */
 export interface NoteLifecycleRow {
   id: string;

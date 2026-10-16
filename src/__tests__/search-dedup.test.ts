@@ -174,7 +174,7 @@ describe("search_context dedup - note rows", () => {
     expect(deduped.map((r) => r.content_id).sort()).toEqual([stale.content_id, successor.content_id].sort());
   });
 
-  it("keeps every distinct note in a larger same-text group and folds a same-text handoff row into them", () => {
+  it("keeps every distinct note in a larger same-text group AND keeps the same-text handoff row alongside them", () => {
     const rows = [
       makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111"),
       makeRow(sharedOpening, "2026-03-21T23-12-37-052Z-eeee5555.json"),
@@ -185,7 +185,25 @@ describe("search_context dedup - note rows", () => {
     const { deduped } = deduplicateResults(rows);
 
     expect(deduped.filter((r) => r.content_type === "note")).toHaveLength(3);
-    expect(deduped.filter((r) => r.content_type === "handoff")).toHaveLength(0);
+    // the new note rule never drops a non-note row
+    expect(deduped.filter((r) => r.content_type === "handoff")).toHaveLength(1);
+  });
+
+  it("still collapses non-note rows among themselves inside a multi-note group, keeping the oldest source", () => {
+    const rows = [
+      makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111"),
+      makeNoteRow(sharedOpening, "22222222-2222-4222-8222-222222222222"),
+      makeRow(sharedOpening, "2026-04-01T12-00-00-000Z-new111.json"),
+      makeRow(sharedOpening, "2026-03-15T08-30-00-000Z-old222.json"),
+      { content_type: "task", content_id: "task-1", content_text: sharedOpening, metadata: {}, similarity: 0.7 },
+    ];
+
+    const { deduped } = deduplicateResults(rows);
+
+    expect(deduped.filter((r) => r.content_type === "note")).toHaveLength(2);
+    // handoff and task rows collapse exactly as they did before the note rule: one survivor
+    // (the row without a source_file sorts first)
+    expect(deduped.filter((r) => r.content_type !== "note")).toHaveLength(1);
   });
 
   it("still collapses a note row and a handoff row with the same text, as before", () => {

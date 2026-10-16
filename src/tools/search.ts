@@ -11,10 +11,13 @@ import { recognizeEntities, type RecognizedEntity } from "../entities/recognizer
 import { getGraphCandidates, type GraphCandidate } from "../entities/store.js";
 import type { EffectiveNoteStatus } from "../notes/store.js";
 import {
-  LIFECYCLE_NEXT_STEP,
+  isMissingLifecycleSchemaError,
+  keepShownNotices,
+  lifecycleNextStep,
   noteLifecycleFilterSql,
   notesInScope,
   redirectNoteRows,
+  type LifecycleNotice,
 } from "../notes/lifecycle-search.js";
 
 /**
@@ -58,6 +61,12 @@ export interface SearchResultRow {
   valid_until?: string | null;
   /** Title of the direct successor; null unless the note is superseded. */
   successor_title?: string | null;
+  /**
+   * Text a cross-encoder should score instead of `content_text`: set on a
+   * redirected head that did not itself match, to the wording of the
+   * candidate that did. Internal - never returned to the caller.
+   */
+  rerank_text?: string;
 }
 
 /**
@@ -117,10 +126,11 @@ export function fuseRrf(
  * facts and are never collapsed into one, even when their first 500
  * characters match. A copy-and-edit successor must not be dropped in favour
  * of the stale note it replaces (or vice versa). When a fingerprint group
- * holds two or more distinct notes, every one of them survives and any
- * non-note rows with the same text are folded into them. A group with at most
- * one note, and every group without notes (handoff chunks, tasks, artifacts),
- * behaves exactly as before.
+ * holds two or more distinct notes, every one of them survives, and the
+ * group's non-note rows are kept alongside them (collapsed among themselves
+ * exactly as before) - the new rule never drops a handoff, task, or artifact.
+ * A group with at most one note, and every group without notes, behaves
+ * exactly as before.
  */
 export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchResultRow[]; preDedupCount: number } {
   const preDedupCount = rows.length;
@@ -148,21 +158,25 @@ export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchRe
         distinctNotes.set(row.content_id, row);
       }
     }
+    // Keep the row with the oldest source_file
+    const oldestFirst = (members: SearchResultRow[]): SearchResultRow[] =>
+      members.sort((a, b) => {
+        const aFile = (a.metadata?.source_file as string) ?? "";
+        const bFile = (b.metadata?.source_file as string) ?? "";
+        if (!aFile && !bFile) return 0;
+        if (!aFile) return -1; // no source_file = keep first encountered
+        if (!bFile) return 1;
+        return sourceFileTimestamp(aFile).localeCompare(sourceFileTimestamp(bFile));
+      });
+
     if (distinctNotes.size >= 2) {
       deduped.push(...distinctNotes.values());
+      const others = group.filter((r) => r.content_type !== "note");
+      if (others.length > 0) deduped.push(oldestFirst(others)[0]);
       continue;
     }
 
-    // Keep the row with the oldest source_file
-    group.sort((a, b) => {
-      const aFile = (a.metadata?.source_file as string) ?? "";
-      const bFile = (b.metadata?.source_file as string) ?? "";
-      if (!aFile && !bFile) return 0;
-      if (!aFile) return -1; // no source_file = keep first encountered
-      if (!bFile) return 1;
-      return sourceFileTimestamp(aFile).localeCompare(sourceFileTimestamp(bFile));
-    });
-    deduped.push(group[0]);
+    deduped.push(oldestFirst(group)[0]);
   }
 
   return { deduped, preDedupCount };
@@ -180,8 +194,14 @@ export interface SearchContextSqlInput {
   after?: string;
   before?: string;
   overFetchLimit: number;
-  /** Keep expired notes as candidates. Default false. */
+  /** Keep COMPUTED-expired notes as candidates. Default false. */
   includeExpired?: boolean;
+  /**
+   * Omit the note lifecycle filter even when notes are in scope. Used only to
+   * retry after the database reports the lifecycle columns/table missing
+   * (migration 013 not applied) so search degrades instead of failing.
+   */
+  omitLifecycleFilter?: boolean;
 }
 
 /**
@@ -199,10 +219,14 @@ export interface SearchContextSqlInput {
  * index-ordered scan survives. Superseded notes remain candidates (they are
  * redirected afterwards, see redirectNoteRows), so include_superseded does not
  * change this SQL; include_expired only relaxes the predicate. Orphaned
- * embeddings (note row deleted) drop in both cases. A search whose
- * content_types excludes notes never references `notes`.
+ * embeddings (note row deleted) drop in both cases. A superseded note stays a
+ * candidate even if its own valid_until has passed (supersession wins over
+ * expiry). A search whose content_types excludes notes never references
+ * `notes`. `lifecycleFilterApplied` reports whether the filter is in the SQL.
  */
-export function buildSearchContextSql(input: SearchContextSqlInput): { sql: string; params: unknown[] } {
+export function buildSearchContextSql(
+  input: SearchContextSqlInput
+): { sql: string; params: unknown[]; lifecycleFilterApplied: boolean } {
   const { pgVector, threshold, ftsQuery, hybrid, contentTypes, after, before, overFetchLimit } = input;
 
   // Date-range filter fragment + params. Applies to both the vector and FTS
@@ -228,9 +252,10 @@ export function buildSearchContextSql(input: SearchContextSqlInput): { sql: stri
   const dateFilter = dateClauses.length ? ` AND ${dateClauses.join(" AND ")}` : "";
 
   const lifecycleClause = noteLifecycleFilterSql({
-    notesInScope: notesInScope(contentTypes),
+    notesInScope: notesInScope(contentTypes) && !input.omitLifecycleFilter,
     includeExpired: input.includeExpired ?? false,
   });
+  const lifecycleFilterApplied = lifecycleClause !== "";
 
   const params: unknown[] = hybrid ? [pgVector, threshold, ftsQuery] : [pgVector, threshold];
   const contentTypesIdx = contentTypes?.length ? params.length + 1 : null;
@@ -282,7 +307,7 @@ export function buildSearchContextSql(input: SearchContextSqlInput): { sql: stri
             ORDER BY rrf_score DESC
             LIMIT $${finalLimitIdx}
           `;
-    return { sql, params };
+    return { sql, params, lifecycleFilterApplied };
   }
 
   // Pure vector search - over-fetch for dedup headroom
@@ -298,7 +323,7 @@ export function buildSearchContextSql(input: SearchContextSqlInput): { sql: stri
             ORDER BY embedding <=> $1::vector
             LIMIT $${finalLimitIdx}
           `;
-  return { sql, params };
+  return { sql, params, lifecycleFilterApplied };
 }
 
 /**
@@ -310,10 +335,10 @@ export function buildSearchContextSql(input: SearchContextSqlInput): { sql: stri
  */
 export function buildGraphOnlyFetchSql(
   types: readonly string[],
-  opts: { includeExpired?: boolean } = {}
+  opts: { includeExpired?: boolean; omitLifecycleFilter?: boolean } = {}
 ): string {
   const lifecycleClause = noteLifecycleFilterSql({
-    notesInScope: types.includes("note"),
+    notesInScope: types.includes("note") && !opts.omitLifecycleFilter,
     includeExpired: opts.includeExpired ?? false,
   });
   return `
@@ -356,13 +381,13 @@ If you know which primitive you want, filter by content_types to reduce noise. I
 
 - after (optional): ISO date — only return results stored after this date
 - before (optional): ISO date — only return results stored before this date
-Use these to narrow searches to specific time windows (e.g., "what did I decide about X last week").
+Use these to narrow searches to specific time windows (e.g., "what did I decide about X last week"). after/before filter the notes that MATCH; a successor shown by a redirect (see Lifecycle) may lie outside the window - pass include_superseded: true when asking about historical state.
 
-Lifecycle (notes): a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), carrying the old note's relevance. That result lists the superseded note id(s) that matched under matched_via, and lifecycle_notices holds one plain-English line per redirect ("Note 2b7c… ('…') matched but was superseded by 9e1a… ('…') on 2026-05-02 — showing the successor."). Expired notes are omitted. Every note result carries note_status (active | superseded | expired), superseded_by, superseded_at, valid_until, successor_title (null unless superseded) and matched_via ([] when the note matched directly). Cite the successor, never the superseded note. READ lifecycle_notices whenever it is non-empty. Pass include_superseded: true to get superseded notes as themselves (each flagged and noticed), include_expired: true to include expired notes (flagged and noticed). Other content types have no lifecycle and are unaffected.
+Lifecycle (notes): a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), carrying the old note's relevance. That result lists the superseded note id(s) that matched under matched_via, and lifecycle_notices holds one plain-English line per redirect ("Note 2b7c… ('…') matched but was superseded by 9e1a… ('…') on 2026-05-02 — showing the successor."). Expired notes are omitted (a superseded note is redirected even if its own valid_until has passed). If a superseded note matched but its chain ends in an expired note, nothing is shown for it and lifecycle_notices says so ("…which expired on <date>; there is no current version to show") - do not treat the old note as current. Every note result carries note_status (active | superseded | expired), superseded_by, superseded_at, valid_until, successor_title (null unless superseded) and matched_via ([] when the note matched directly). Cite the successor, never the superseded note. READ lifecycle_notices whenever it is non-empty; notices are reported only for notes in the returned page (or candidates that could have made it). redirected is the number of returned notes that replaced a superseded match. Pass include_superseded: true to get superseded notes as themselves (each flagged and noticed), include_expired: true to include expired notes (flagged and noticed). Other content types have no lifecycle and are unaffected.
 
 READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-empty, address constraints before recommendations.
 
-Returns: {results[], context_envelope, query, total, mode, reranked, reranker_configured, deduplicated, pre_dedup_count, lifecycle_notices[], redirected, next_step}
+Returns: {results[], context_envelope, query, total, mode, reranked, reranker_configured, deduplicated, pre_dedup_count, lifecycle_notices[], redirected, next_step}. pre_dedup_count is the candidate count before lifecycle redirection and dedup.
 
 reranker_configured is whether this server has a cross-encoder reranker endpoint set (RERANKER_URL). reranked is whether that reranker actually rescored this response. reranker_configured=false means reranking is off by configuration. reranker_configured=true with reranked=false on a response with more than one result means the reranker is unreachable, timing out, or returning bad data — the server logs a [rerank] warning with the reason. Single-result responses are never reranked.
 
@@ -473,7 +498,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
         // Candidate SQL (vector / hybrid, date + content-type filters, note
         // lifecycle filter) is assembled by a pure function so it can be
         // tested against Postgres without an embedding server.
-        const { sql, params } = buildSearchContextSql({
+        const sqlInput = {
           pgVector,
           threshold,
           ftsQuery: expandedQuery,
@@ -483,9 +508,27 @@ export function registerSearchTools(mcpServer: McpServer): void {
           before: args.before,
           overFetchLimit,
           includeExpired,
-        });
-
-        const result = await query(sql, params);
+        };
+        let candidateSql = buildSearchContextSql(sqlInput);
+        let lifecycleUnavailable = false;
+        let result;
+        try {
+          result = await query(candidateSql.sql, candidateSql.params);
+        } catch (err) {
+          // The lifecycle subquery names notes columns that only exist after
+          // migration 013. If the database says they are missing, degrade to
+          // an unfiltered search (flagged below) instead of failing every
+          // default search. Any other error, or a failure with no lifecycle
+          // clause in the SQL, is a real failure and propagates.
+          if (!candidateSql.lifecycleFilterApplied || !isMissingLifecycleSchemaError(err)) throw err;
+          console.warn(
+            "[search_context] note lifecycle schema missing (migration 013 not applied?); retrying without the lifecycle filter:",
+            (err as Error).message
+          );
+          lifecycleUnavailable = true;
+          candidateSql = buildSearchContextSql({ ...sqlInput, omitLifecycleFilter: true });
+          result = await query(candidateSql.sql, candidateSql.params);
+        }
         let rows = result.rows as unknown as SearchResultRow[];
 
         // ── Graph-augmented retrieval (third RRF signal) ────────────────
@@ -550,7 +593,10 @@ export function registerSearchTools(mcpServer: McpServer): void {
               ids.push(k.slice(sep + 2));
             }
             try {
-              const extraSql = buildGraphOnlyFetchSql(types, { includeExpired });
+              const extraSql = buildGraphOnlyFetchSql(types, {
+                includeExpired,
+                omitLifecycleFilter: lifecycleUnavailable,
+              });
               const extraResult = await query<{
                 content_type: string;
                 content_id: string;
@@ -586,37 +632,56 @@ export function registerSearchTools(mcpServer: McpServer): void {
           }
         }
 
+        // Candidate count before lifecycle redirection and dedup.
+        const candidateCount = rows.length;
+
         // ── Note lifecycle: redirect, do not hide ───────────────────────
         // Superseded note candidates are replaced by the head of their chain
         // (design section 6.1). Runs after candidate selection - including
         // graph-only rows - and BEFORE dedup so a successor and a stale copy
-        // are judged as the distinct notes they are.
-        let lifecycleNotices: string[] = [];
-        let redirectedCount = 0;
-        try {
-          const redirect = await redirectNoteRows(pool, rows, { includeSuperseded, includeExpired });
-          rows = redirect.rows;
-          lifecycleNotices = redirect.notices;
-          redirectedCount = redirect.redirected;
-        } catch (err) {
-          // notes table unavailable (e.g. migration 013 never applied):
-          // degrade to un-annotated results rather than failing all search.
-          console.warn("[search_context] note lifecycle redirect failed:", (err as Error).message);
+        // are judged as the distinct notes they are. Notices are structured
+        // so they can be pruned after dedup/truncation: a notice may only
+        // describe a note the response actually returns.
+        let lifecycleNotices: LifecycleNotice[] = [];
+        const systemNotices: string[] = [];
+        if (lifecycleUnavailable) {
+          systemNotices.push(
+            "Note lifecycle filtering unavailable (migration 013 not applied); superseded/expired notes are not filtered."
+          );
+        } else {
+          try {
+            const redirect = await redirectNoteRows(pool, rows, { includeSuperseded, includeExpired });
+            rows = redirect.rows;
+            lifecycleNotices = redirect.notices;
+          } catch (err) {
+            // The candidate query already succeeded, so the lifecycle schema
+            // exists: this is a transient failure of the follow-up lookups.
+            // Return the candidates un-annotated, and say so.
+            console.warn("[search_context] note lifecycle redirect failed:", (err as Error).message);
+            systemNotices.push(
+              "Note lifecycle annotations unavailable (lifecycle lookup failed); superseded or expired notes in these results may be unflagged."
+            );
+          }
         }
 
         if (rows.length === 0) {
+          // Nothing is shown, so only notices about dropped candidates that
+          // could have made the page remain true.
+          const kept = keepShownNotices(lifecycleNotices, new Set<string>(), limit);
           return {
             content: [{
               type: "text" as const,
               text: JSON.stringify({
                 results: [],
                 message: "No results found. Try broadening your query or lowering the similarity threshold.",
-                lifecycle_notices: lifecycleNotices,
-                ...(lifecycleNotices.length > 0
+                lifecycle_notices: [...kept.map((n) => n.text), ...systemNotices],
+                redirected: 0,
+                total: 0,
+                ...(kept.length > 0
                   ? {
                       next_step:
                         "Notes matched but none is current - read lifecycle_notices before creating a new note on this topic. " +
-                        LIFECYCLE_NEXT_STEP,
+                        lifecycleNextStep(kept),
                     }
                   : {}),
                 query: args.query,
@@ -624,7 +689,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
                 reranked: false,
                 reranker_configured: rerankerEnabled,
                 deduplicated: true,
-                pre_dedup_count: 0,
+                pre_dedup_count: candidateCount,
                 context_envelope: emptyEnvelope(),
               }),
             }],
@@ -632,7 +697,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
         }
 
         // Deduplicate: collapse near-identical content to oldest source
-        const { deduped, preDedupCount } = deduplicateResults(rows);
+        const { deduped } = deduplicateResults(rows);
 
         // Re-sort by original ranking and truncate to requested limit
         const sortKey = useHybrid ? "rrf_score" : "similarity";
@@ -646,11 +711,14 @@ export function registerSearchTools(mcpServer: McpServer): void {
         // pool to the reranker, which rescores every candidate against the
         // original user query. On success we reorder by reranker score; on
         // any failure (network, timeout, malformed response) we silently
-        // fall back to the fusion ordering above.
+        // fall back to the fusion ordering above. A redirected head is scored
+        // on the wording that actually matched (rerank_text), not on its own
+        // text, so the cross-encoder does not demote the rows the redirect
+        // exists for.
         let reranked = false;
         let workingRows = deduped;
         if (rerankerEnabled && deduped.length > 1) {
-          const texts = deduped.map((r) => r.content_text ?? "");
+          const texts = deduped.map((r) => r.rerank_text ?? r.content_text ?? "");
           const scores = await rerankResults(args.query, texts);
           if (scores && scores.length > 0) {
             const scoreByIndex = new Map<number, number>();
@@ -672,6 +740,13 @@ export function registerSearchTools(mcpServer: McpServer): void {
         }
         const finalRows = workingRows.slice(0, limit);
 
+        // Keep only the lifecycle notices that are still true of the page
+        // actually returned (dedup and truncation can remove a head that a
+        // redirect notice refers to).
+        const shownNoteIds = new Set(finalRows.filter((r) => r.content_type === "note").map((r) => r.content_id));
+        const keptNotices = keepShownNotices(lifecycleNotices, shownNoteIds, limit);
+        const redirectedCount = keptNotices.filter((n) => n.kind === "redirect").length;
+
         // Compute context envelope from entity matches (best-effort)
         const resultTexts = finalRows.map((r) => r.content_text ?? "");
         let envelope;
@@ -682,7 +757,10 @@ export function registerSearchTools(mcpServer: McpServer): void {
           envelope = emptyEnvelope();
         }
 
-        const noteResults = finalRows.filter(r => r.content_type === 'note');
+        // Superseded/expired notes (returned only on request) are not "prior decisions".
+        const noteResults = finalRows.filter(
+          (r) => r.content_type === "note" && r.note_status !== "superseded" && r.note_status !== "expired"
+        );
         const artifactResults = finalRows.filter(r => r.content_type === 'artifact');
 
         const formatIds = (ids: string[]) => {
@@ -700,9 +778,8 @@ export function registerSearchTools(mcpServer: McpServer): void {
           const artifactIds = formatIds(artifactResults.map(r => r.content_id));
           nextStep += ` Artifacts found (${artifactIds}) -- check their status before creating related work.`;
         }
-        if (lifecycleNotices.length > 0) {
-          nextStep += ` ${LIFECYCLE_NEXT_STEP}`;
-        }
+        const lifecycleStep = lifecycleNextStep(keptNotices);
+        if (lifecycleStep) nextStep += ` ${lifecycleStep}`;
 
         const responseData: Record<string, unknown> = {
           results: finalRows.map((r: SearchResultRow & { rerank_score?: number }) => ({
@@ -741,8 +818,8 @@ export function registerSearchTools(mcpServer: McpServer): void {
           reranked,
           reranker_configured: rerankerEnabled,
           deduplicated: true,
-          pre_dedup_count: preDedupCount,
-          lifecycle_notices: lifecycleNotices,
+          pre_dedup_count: candidateCount,
+          lifecycle_notices: [...keptNotices.map((n) => n.text), ...systemNotices],
           redirected: redirectedCount,
           context_envelope: envelope,
           next_step: nextStep,

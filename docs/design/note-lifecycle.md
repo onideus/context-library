@@ -389,9 +389,12 @@ hit is replaced by the head of its chain, and the response says so.
 
 Rules, shared by `search_notes` and `search_context`:
 
-- Candidates are selected over **all statuses** except expired and orphaned
-  (§6.3). Expired notes have no successor to redirect to, so they are
-  dropped unless `include_expired: true`.
+- Candidates are selected over **every status except computed-expired**
+  (`searchCandidatePredicateSql`) and orphaned (§6.3). A superseded note
+  stays a candidate even if its own `valid_until` has passed — supersession
+  wins over expiry, and the point is to reach its successor. Expired
+  (active) notes have no successor to redirect to, so they are dropped
+  unless `include_expired: true`.
 - Each superseded candidate is resolved to its chain head with a bounded
   recursive walk over `superseded_by` (depth ≤ 20; cycles are impossible by
   construction, the cap is belt-and-braces). If the head is expired, the
@@ -413,9 +416,12 @@ Rules, shared by `search_notes` and `search_context`:
 
 ### 6.2 `search_notes` (FTS over `notes`)
 
-FTS match over all non-expired statuses; the chain walk, head fetch
-(`LEFT JOIN notes succ` for `successor_title`, columns qualified), merge,
-and notices happen in one follow-up query plus application code. Each
+FTS match over every status except computed-expired (over-fetching 2×
+`limit`, max 100, then slicing after redirection); the chain walk, head
+fetch (`LEFT JOIN notes succ` for `successor_title`, columns qualified,
+under the caller's `scope`/`domain` filters — a head outside them leaves
+the candidate as itself, flagged), merge, and notices happen in follow-up
+queries plus application code. Each
 result carries `status` (computed), `superseded_by`, `superseded_at`,
 `successor_title`, `valid_until`, `provenance`, `version`, `matched_via`.
 
@@ -438,9 +444,20 @@ AND (content_type <> 'note'
   cleaned them up). With `include_expired` the predicate is `TRUE` (orphans
   still drop).
 - The filter is added **only when notes are in scope** (`content_types`
-  omitted or containing `note`). A handoff-only search never touches
-  `notes`, so if migration 013 ever failed at startup (the runner logs and
-  continues) only note-scoped searches degrade — not all search.
+  omitted or containing `note`), and in the graph-only fetch whenever a
+  requested key is a note — so a handoff-only search normally never
+  touches `notes`, but note candidates the entity graph adds are still
+  filtered and annotated. If the lifecycle schema is missing (Postgres
+  42703/42P01 — migration 013 not applied), `search_context` retries the
+  candidate query once without the filter, skips redirection, and says so
+  in `lifecycle_notices` rather than failing.
+- Notices are structured (`kind` / `subject` / `position`) and pruned after
+  dedup and truncation so a response never describes a note it does not
+  return; `redirected` counts the surviving redirect notices. A redirected
+  head that did not itself match is reranked on the matched candidate's
+  wording (internal `rerank_text`), not its own. `after`/`before` filter
+  the matched notes only — a successor shown by a redirect may lie outside
+  the window (use `include_superseded: true` for historical state).
 - `notes` are embedded unchunked with `content_id` = the note's uuid text,
   so `id::text` matches exactly.
 - Redirection (§6.1) runs after candidate selection: one query fetches
@@ -456,10 +473,10 @@ AND (content_type <> 'note'
 - `embeddings.metadata` is **not** extended with `status` (a copy the sync
   path can never refresh). `reindex` and `drainPendingEmbeddings` are
   unchanged and correctly include superseded notes.
-- Regression guard: an `EXPLAIN` test (modelled on the content_hash index
-  test in `sync.test.ts`, with `enable_seqscan = off`) asserts the semantic
-  CTE still shows an index scan on the embeddings HNSW index with the
-  lifecycle subquery present.
+- SQL-shape guard: an `EXPLAIN` test (modelled on the content_hash index
+  test in `sync.test.ts`, with `enable_seqscan = off`) pins the hashed
+  SubPlan shape of the lifecycle filter on the semantic CTE's index scan.
+  It guards the SQL shape, not planner behaviour for other formulations.
 - Observed, not changed: `hnsw.ef_search` is at its default (40), so
   today's `LIMIT 100` candidate pool is nominal. Tuning it belongs to the
   v0.13 eval harness; listed as a follow-up in the PR.

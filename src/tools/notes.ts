@@ -14,10 +14,10 @@ import {
   effectiveStatus,
   effectiveStatusSql,
   insertNoteInTx,
-  lifecyclePredicateSql,
   parseIsoWithOffset,
   pruneNoteHistoryInTx,
   resolveChainHeads,
+  searchCandidatePredicateSql,
   supersedeNoteInTx,
   updateNoteInTx,
   type EffectiveNoteStatus,
@@ -28,10 +28,10 @@ import {
   type NoteWriteConflict,
 } from "../notes/store.js";
 import {
-  LIFECYCLE_NEXT_STEP,
   applyLifecycleRedirect,
+  keepShownNotices,
   lifecycleFromNoteRow,
-  type RedirectOptions,
+  lifecycleNextStep,
 } from "../notes/lifecycle-search.js";
 import type { SearchResultRow } from "./search.js";
 
@@ -219,9 +219,9 @@ CONSEQUENCE OF SKIPPING: You will re-derive decisions that were already made, po
 
 Scope filter: when scope is omitted, this tool searches notes across all scopes. Pass scope='work', 'personal', or 'shared' to restrict results to a single context.
 
-Lifecycle: a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), keeping the old note's relevance rank, and its matched_via lists the superseded note id(s) that matched. If the current note also matched directly, the two merge into one result. Expired notes are omitted. 'lifecycle_notices' holds one plain-English line per redirect (and per expired or superseded note you opted to see) - READ it whenever it is non-empty, and cite the successor, never the superseded note. Pass include_superseded: true to get superseded notes as themselves (flagged, with successor_title), include_expired: true to include expired notes (flagged). Each result carries status (active | superseded | expired), superseded_by, superseded_at, successor_title (null unless superseded), valid_until, provenance, version, matched_via ([] when it matched directly).
+Lifecycle: a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), keeping the old note's relevance rank, and its matched_via lists the superseded note id(s) that matched. If the current note also matched directly, the two merge into one result. Expired notes are omitted (a superseded note is still redirected even if its own valid_until has passed). If a superseded note matched but its chain ends in an expired note, nothing is shown for it and a notice says so - do not treat the old note as current. The scope and domain filters apply to the successor too: if the successor lies outside the filter, the superseded note is returned as itself, flagged status 'superseded', with a notice. 'lifecycle_notices' holds one plain-English line per redirect (and per expired or superseded note you opted to see) - READ it whenever it is non-empty, and cite the successor, never the superseded note. Pass include_superseded: true to get superseded notes as themselves (flagged, with successor_title), include_expired: true to include expired notes (flagged). Each result carries status (active | superseded | expired), superseded_by, superseded_at, successor_title (null unless superseded), valid_until, provenance, version, matched_via ([] when it matched directly).
 
-Returns: { notes[], total_count, redirected, lifecycle_notices[], next_step }. total_count counts the matching candidates BEFORE redirection; because redirects can merge or drop results, notes.length may be smaller than total_count or limit (redirected is the number of candidates replaced by their successor).
+Returns: { notes[], total_count, redirected, lifecycle_notices[], next_step }. total_count counts the matching candidates BEFORE redirection; because redirects can merge or drop results, notes.length may be smaller than total_count or limit (redirected is the number of returned notes that replaced a superseded match). Notices describe only the page returned.
 
 Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
 
@@ -505,14 +505,17 @@ export function registerNoteTools(mcpServer: McpServer): void {
         const includeSuperseded = args.include_superseded ?? false;
         const includeExpired = args.include_expired ?? false;
 
-        // Candidates span every status except expired (unless opted in).
-        // Superseded notes stay candidates so a query that only matches the
-        // OLD wording still finds the knowledge - they are redirected to the
-        // chain head below ("redirect, do not hide", design section 6.1).
-        // Columns are qualified because the data query self-joins `notes`.
+        // Candidates span every status except COMPUTED-expired (unless opted
+        // in): a superseded note stays a candidate even if its own valid_until
+        // has passed, because supersession wins over expiry and the note must
+        // be redirected to its successor. Superseded candidates are redirected
+        // to the chain head below ("redirect, do not hide", design section
+        // 6.1), so a query that only matches the OLD wording still finds the
+        // knowledge. Columns are qualified because the data query self-joins
+        // `notes`.
         const conditions: string[] = [
           `to_tsvector('english', coalesce(notes.title, '') || ' ' || coalesce(notes.content, '')) @@ plainto_tsquery('english', $1)`,
-          lifecyclePredicateSql("notes", { excludeSuperseded: false, excludeExpired: !includeExpired }),
+          searchCandidatePredicateSql("notes", { includeExpired }),
         ];
         const params: unknown[] = [args.query];
         let paramIdx = 2;
@@ -528,6 +531,9 @@ export function registerNoteTools(mcpServer: McpServer): void {
         }
 
         const limit = Math.min(Math.max(args.limit ?? 10, 1), 50);
+        // Over-fetch so merges and drops during redirection do not leave the
+        // page short; the redirected list is sliced back to `limit` below.
+        const fetchLimit = Math.min(limit * 2, 100);
         const where = conditions.join(" AND ");
 
         const countResult = await query<{ count: string }>(
@@ -554,7 +560,7 @@ export function registerNoteTools(mcpServer: McpServer): void {
             WHERE ${where}
             ORDER BY rank DESC, notes.created_at DESC, notes.id
             LIMIT $${paramIdx}`,
-          [...params, limit]
+          [...params, fetchLimit]
         );
 
         // Lifecycle facts for the candidates come straight from the rows.
@@ -576,11 +582,25 @@ export function registerNoteTools(mcpServer: McpServer): void {
             for (const [from, to] of await resolveChainHeads(pool, supersededIds)) heads.set(from, to);
             const missing = [...new Set(heads.values())].filter((id) => !noteById.has(id));
             if (missing.length > 0) {
+              // A redirect must not smuggle in a note the caller's scope /
+              // domain filter excludes: heads are fetched under the same
+              // filters, and a head that does not come back leaves its
+              // candidate shown as itself (flagged superseded, with a notice).
+              const headConditions = ["notes.id = ANY($1::uuid[])"];
+              const headParams: unknown[] = [missing];
+              if (args.scope) {
+                headParams.push(args.scope);
+                headConditions.push(`notes.scope = $${headParams.length}`);
+              }
+              if (args.domain) {
+                headParams.push(args.domain);
+                headConditions.push(`notes.domain = $${headParams.length}`);
+              }
               const headResult = await query<Candidate>(
                 `SELECT notes.*, ${effectiveStatusSql("notes")} AS effective_status,
                         NULL::text AS successor_title, 0::real AS rank
-                   FROM notes WHERE notes.id = ANY($1::uuid[])`,
-                [missing]
+                   FROM notes WHERE ${headConditions.join(" AND ")}`,
+                headParams
               );
               for (const row of headResult.rows) {
                 noteById.set(row.id, row);
@@ -604,7 +624,8 @@ export function registerNoteTools(mcpServer: McpServer): void {
           includeExpired,
         });
 
-        const notes = redirect.rows.map((r) => {
+        const shown = redirect.rows.slice(0, limit);
+        const notes = shown.map((r) => {
           const row = noteById.get(r.content_id)!;
           return {
             ...formatNote(row),
@@ -616,24 +637,29 @@ export function registerNoteTools(mcpServer: McpServer): void {
           };
         });
 
+        // Only report notices that are still true of the page returned.
+        const keptNotices = keepShownNotices(redirect.notices, new Set(shown.map((r) => r.content_id)), limit);
+        const redirectedCount = keptNotices.filter((n) => n.kind === "redirect").length;
+
         let nextStep: string;
         if (notes.length > 0) {
           nextStep =
             "Notes contain documented decisions. Reference them by title in your response. Do not re-derive conclusions that contradict these notes.";
-        } else if (redirect.notices.length > 0) {
+        } else if (keptNotices.length > 0) {
           nextStep =
             "Matching notes exist but none is current - read lifecycle_notices before creating a new note on this topic.";
         } else {
           nextStep =
             "No matching notes found. If making a new decision on this topic, consider creating a note to document it.";
         }
-        if (redirect.notices.length > 0) nextStep += ` ${LIFECYCLE_NEXT_STEP}`;
+        const lifecycleStep = lifecycleNextStep(keptNotices);
+        if (lifecycleStep) nextStep += ` ${lifecycleStep}`;
 
         return jsonResponse({
           notes,
           total_count: totalCount,
-          redirected: redirect.redirected,
-          lifecycle_notices: redirect.notices,
+          redirected: redirectedCount,
+          lifecycle_notices: keptNotices.map((n) => n.text),
           next_step: nextStep,
         });
       } catch (err) {

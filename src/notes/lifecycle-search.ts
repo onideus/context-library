@@ -1,8 +1,8 @@
 import type { PoolClient } from "pg";
 import {
   fetchNoteLifecycle,
-  lifecyclePredicateSql,
   resolveChainHeads,
+  searchCandidatePredicateSql,
   type NoteLifecycleRow,
 } from "./store.js";
 import type { EffectiveNoteStatus, NoteScope, Provenance } from "./store.js";
@@ -23,10 +23,6 @@ import type { SearchResultRow } from "../tools/search.js";
  * `embeddings.metadata` (the sync path cannot refresh a copy there).
  */
 
-/** Appended to `next_step` whenever a response carries lifecycle notices. */
-export const LIFECYCLE_NEXT_STEP =
-  "Lifecycle notices present (see lifecycle_notices): cite the successor notes shown, not the superseded notes they replace.";
-
 export interface RedirectOptions {
   /** true = leave superseded notes as themselves (flagged and noticed). */
   includeSuperseded: boolean;
@@ -40,9 +36,37 @@ export interface RedirectOptions {
   headRows?: ReadonlyMap<string, SearchResultRow>;
 }
 
+export type LifecycleNoticeKind =
+  /** A superseded candidate was replaced by its chain head (subject = the head shown). */
+  | "redirect"
+  /** include_superseded: a superseded note is returned as itself (subject = that note). */
+  | "superseded_returned"
+  /** include_expired: an expired note is returned (subject = that note). */
+  | "expired_returned"
+  /** A superseded candidate was dropped because its chain head is expired (subject = null). */
+  | "expired_head"
+  /** A superseded candidate could not be followed to a shown head and is returned as itself (subject = that note). */
+  | "unresolved";
+
+/**
+ * One lifecycle notice with enough structure for a caller that truncates the
+ * result list afterwards to keep only the notices that are still true.
+ */
+export interface LifecycleNotice {
+  text: string;
+  kind: LifecycleNoticeKind;
+  /**
+   * Id of the note, among the returned rows, this notice describes; null when
+   * the notice is about a candidate that was dropped (nothing shown).
+   */
+  subject: string | null;
+  /** Index, in the INPUT rows, of the candidate that triggered the notice. */
+  position: number;
+}
+
 export interface RedirectResult {
   rows: SearchResultRow[];
-  notices: string[];
+  notices: LifecycleNotice[];
   /** Candidates replaced by a different note (the chain head). */
   redirected: number;
 }
@@ -51,26 +75,35 @@ export interface RedirectResult {
 
 /**
  * The lifecycle filter for search_context's embeddings queries, or "" when
- * notes are not in scope. A hashed `IN (subquery)`, never a join, so the
- * planner keeps the HNSW index-ordered scan (design section 6.3). Superseded
- * notes stay candidates — they are redirected afterwards; only expired notes
- * (unless `includeExpired`) and orphaned embeddings (no `notes` row) drop.
+ * notes are not in scope. A hashed `IN (subquery)`, never a join (design
+ * section 6.3). Superseded notes stay candidates - they are redirected
+ * afterwards - even when their own valid_until has passed (supersession wins
+ * over expiry); only COMPUTED-expired notes (unless `includeExpired`) and
+ * orphaned embeddings (no `notes` row) drop.
  */
 export function noteLifecycleFilterSql(opts: {
   notesInScope: boolean;
   includeExpired: boolean;
 }): string {
   if (!opts.notesInScope) return "";
-  const predicate = lifecyclePredicateSql("notes", {
-    excludeSuperseded: false,
-    excludeExpired: !opts.includeExpired,
-  });
+  const predicate = searchCandidatePredicateSql("notes", { includeExpired: opts.includeExpired });
   return `AND (content_type <> 'note' OR content_id IN (SELECT id::text FROM notes WHERE ${predicate}))`;
 }
 
 /** Are notes searchable under this `content_types` filter? (omitted/empty = all types) */
 export function notesInScope(contentTypes?: readonly string[] | null): boolean {
   return !contentTypes?.length || contentTypes.includes("note");
+}
+
+/**
+ * Is this the Postgres error for a missing lifecycle column or table - i.e.
+ * migration 013 has not been applied? 42703 = undefined_column,
+ * 42P01 = undefined_table. Used to degrade search to un-filtered rather than
+ * failing every default search on a database that has not migrated.
+ */
+export function isMissingLifecycleSchemaError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return code === "42703" || code === "42P01";
 }
 
 // ── Notices ──────────────────────────────────────────────────────────
@@ -124,9 +157,58 @@ export function supersededReturnedNotice(info: NoteLifecycleRow): string {
   return `${label(info.id, info.title)} is superseded by${succ}${onDate(info.superseded_at)}; cite the successor.`;
 }
 
+/** The superseded note is returned as itself because its current successor cannot be shown. */
+function unresolvedNotice(info: NoteLifecycleRow): string {
+  const succ = info.superseded_by
+    ? ` ${ref(info.superseded_by, info.successor_title ?? "title unavailable")}`
+    : " a newer note";
+  return `${label(info.id, info.title)} is superseded by${succ}${onDate(
+    info.superseded_at
+  )}, but the current version could not be shown here (not found, or outside the filters applied); treat this note as outdated.`;
+}
+
 /** include_expired: an expired note is returned. */
 export function expiredReturnedNotice(info: NoteLifecycleRow): string {
   return `${label(info.id, info.title)} expired${onDate(info.valid_until)}.`;
+}
+
+/**
+ * The `next_step` sentence(s) that match the notices actually being reported,
+ * or "" when there are none. "Cite the successor shown" is only said when a
+ * successor really is shown; expired-only notices get a different warning.
+ */
+export function lifecycleNextStep(notices: readonly LifecycleNotice[]): string {
+  const kinds = new Set(notices.map((n) => n.kind));
+  const parts: string[] = [];
+  if (kinds.has("redirect")) {
+    parts.push(
+      "Lifecycle notices present (see lifecycle_notices): cite the successor notes shown, not the superseded notes they replace."
+    );
+  }
+  if (kinds.has("superseded_returned") || kinds.has("unresolved")) {
+    parts.push(
+      "Superseded notes in these results are flagged (see lifecycle_notices): cite the successor of each, not the superseded note."
+    );
+  }
+  if (kinds.has("expired_returned") || kinds.has("expired_head")) {
+    parts.push("Expired notes were omitted or are flagged (see lifecycle_notices) - do not treat them as current.");
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Keep only the notices that are still true after a caller truncated the
+ * result list: a notice about a shown note survives only if that note is among
+ * `shownNoteIds`; a notice about a dropped candidate survives only if the
+ * candidate sat within the first `limit` input positions (it could have made
+ * the page).
+ */
+export function keepShownNotices(
+  notices: readonly LifecycleNotice[],
+  shownNoteIds: ReadonlySet<string>,
+  limit: number
+): LifecycleNotice[] {
+  return notices.filter((n) => (n.subject !== null ? shownNoteIds.has(n.subject) : n.position < limit));
 }
 
 // ── Adapters ─────────────────────────────────────────────────────────
@@ -223,14 +305,22 @@ function synthesiseRow(info: NoteLifecycleRow): SearchResultRow {
  * - A superseded note is, unless `includeSuperseded`, replaced by the head of
  *   its chain (`headById`). The head takes the candidate's score and position
  *   and records the candidate id in `matched_via`. If the head was also a
- *   candidate the two merge — the better score wins and `matched_via`
- *   accumulates — so a chain never yields two rows. A head that is expired
+ *   candidate the two merge - the better score wins and `matched_via`
+ *   accumulates - so a chain never yields two rows. A head that is expired
  *   (and not opted in) drops the candidate with a notice; a head that is
- *   itself still superseded (chain deeper than the walk cap) or missing leaves
- *   the candidate as itself, flagged, rather than hiding knowledge.
+ *   itself still superseded (chain deeper than the walk cap), missing, or
+ *   absent from `lifecycleById` (e.g. outside the caller's filters) leaves the
+ *   candidate as itself, flagged, rather than hiding knowledge.
+ * - A redirected head that did not itself match carries `rerank_text`: the
+ *   content_text of the best-scoring candidate that was redirected to it, so a
+ *   cross-encoder scores the wording that actually matched. A head that also
+ *   matched directly keeps its own text (no `rerank_text`).
+ *
+ * Every notice is structured (kind / subject / position) so a caller that
+ * truncates the rows afterwards can keep only the notices still true.
  *
  * `lifecycleById` must contain every candidate note AND every head. Pure: no
- * I/O, no clock — `status` was computed by the database.
+ * I/O, no clock - `status` was computed by the database.
  */
 export function applyLifecycleRedirect(
   rows: SearchResultRow[],
@@ -238,7 +328,7 @@ export function applyLifecycleRedirect(
   headById: ReadonlyMap<string, string>,
   opts: RedirectOptions
 ): RedirectResult {
-  const notices: string[] = [];
+  const notices: LifecycleNotice[] = [];
   const out: SearchResultRow[] = [];
   const indexByNoteId = new Map<string, number>();
   const expiredNoticed = new Set<string>();
@@ -249,15 +339,22 @@ export function applyLifecycleRedirect(
     if (r.content_type === "note" && !directById.has(r.content_id)) directById.set(r.content_id, r);
   }
 
-  /** Add or merge one note into `out`. `identity` supplies the text; `scoring` the ranks. */
+  /**
+   * Add or merge one note into `out`. `identity` supplies the text; `scoring`
+   * the ranks. `redirectedFrom` is set when the note is shown in place of a
+   * superseded candidate.
+   */
   const place = (
     noteId: string,
     identity: SearchResultRow,
     scoring: SearchResultRow,
-    via: readonly string[]
+    via: readonly string[],
+    redirectedFrom?: SearchResultRow
   ): void => {
     const info = lifecycleById.get(noteId);
     if (!info) return;
+    // A head that also matched directly is reranked on its own text.
+    const carryText = redirectedFrom !== undefined && !directById.has(noteId);
     const at = indexByNoteId.get(noteId);
     if (at === undefined) {
       indexByNoteId.set(noteId, out.length);
@@ -266,71 +363,75 @@ export function applyLifecycleRedirect(
         ...scoringOf(scoring),
         ...annotation(info),
         matched_via: unionOf(undefined, via),
+        ...(carryText ? { rerank_text: redirectedFrom.content_text } : {}),
       });
       return;
     }
     const existing = out[at];
-    const better = scoreOf(scoring) > scoreOf(existing) ? scoring : existing;
+    const scoringWins = scoreOf(scoring) > scoreOf(existing);
+    const better = scoringWins ? scoring : existing;
     out[at] = {
       ...existing,
       ...scoringOf(better),
       matched_via: unionOf(existing.matched_via, via),
+      ...(carryText && (scoringWins || existing.rerank_text === undefined)
+        ? { rerank_text: redirectedFrom.content_text }
+        : {}),
     };
   };
 
-  const noticeExpiredReturned = (info: NoteLifecycleRow): void => {
+  const noticeExpiredReturned = (info: NoteLifecycleRow, position: number): void => {
     if (info.status !== "expired" || expiredNoticed.has(info.id)) return;
     expiredNoticed.add(info.id);
-    notices.push(expiredReturnedNotice(info));
+    notices.push({ text: expiredReturnedNotice(info), kind: "expired_returned", subject: info.id, position });
   };
 
-  for (const row of rows) {
+  rows.forEach((row, position) => {
     if (row.content_type !== "note") {
       out.push(row);
-      continue;
+      return;
     }
     const info = lifecycleById.get(row.content_id);
-    if (!info) continue;
+    if (!info) return;
 
     if (info.status === "expired") {
-      if (!opts.includeExpired) continue;
+      if (!opts.includeExpired) return;
       place(info.id, row, row, []);
-      noticeExpiredReturned(info);
-      continue;
+      noticeExpiredReturned(info, position);
+      return;
     }
 
     if (info.status === "active") {
       place(info.id, row, row, []);
-      continue;
+      return;
     }
 
     // Superseded.
-    const keepAsItself = (): void => {
-      place(info.id, row, row, []);
-      notices.push(supersededReturnedNotice(info));
-    };
     if (opts.includeSuperseded) {
-      keepAsItself();
-      continue;
+      place(info.id, row, row, []);
+      notices.push({ text: supersededReturnedNotice(info), kind: "superseded_returned", subject: info.id, position });
+      return;
     }
     const headId = headById.get(info.id);
     const head = headId ? lifecycleById.get(headId) : undefined;
     if (!headId || !head || head.status === "superseded") {
-      // Unresolvable chain (should not happen under the NO ACTION FK): show
-      // the superseded note itself, flagged, rather than lose the knowledge.
-      keepAsItself();
-      continue;
+      // Unresolvable chain (should not happen under the NO ACTION FK) or a
+      // head the caller could not show: show the superseded note itself,
+      // flagged, rather than lose the knowledge.
+      place(info.id, row, row, []);
+      notices.push({ text: unresolvedNotice(info), kind: "unresolved", subject: info.id, position });
+      return;
     }
     if (head.status === "expired" && !opts.includeExpired) {
-      notices.push(expiredHeadNotice(info, head));
-      continue;
+      notices.push({ text: expiredHeadNotice(info, head), kind: "expired_head", subject: null, position });
+      return;
     }
     const identity = directById.get(headId) ?? opts.headRows?.get(headId) ?? synthesiseRow(head);
-    place(headId, identity, row, [info.id]);
+    place(headId, identity, row, [info.id], row);
     redirected++;
-    notices.push(redirectNotice(info, head));
-    noticeExpiredReturned(head);
-  }
+    notices.push({ text: redirectNotice(info, head), kind: "redirect", subject: headId, position });
+    noticeExpiredReturned(head, position);
+  });
 
   return { rows: out, notices, redirected };
 }
