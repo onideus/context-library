@@ -197,7 +197,9 @@ Two controls, both decisions in §12 #12:
 
 - `NOTE_HISTORY_MAX_VERSIONS` (env, default `0` = unlimited, matching the
   `RETENTION_COUNT` convention). When set, the shared helper deletes rows
-  with `version <= current_version - N` after each successful write.
+  with `version <= current_version - 1 - N` after each successful write —
+  history rows for a note at version v are v1…v−1, so this keeps exactly
+  the newest N of them.
 - `prune_note_history({ id, keep_last })` — a dedicated tool (not a mode on
   `update_note`) that deletes all but the newest `keep_last` history rows of
   one note; `keep_last: 0` purges history entirely. Writes a change-log row
