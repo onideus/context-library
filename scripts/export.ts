@@ -13,6 +13,14 @@
  *     when the export races a write (see exportAllTables)
  *   - `handoffs/*.json` — verbatim copy of the handoff file tree
  *
+ * The database schema must be at least as new as this checkout: the SELECTs
+ * name every column in the table registry (scripts/portability/tables.ts), so
+ * exporting from a checkout newer than the schema fails fast with
+ * `column ... does not exist` (SQLSTATE 42703). That is by design — a tarball
+ * quietly missing the new columns would be a lossy backup. Start the server
+ * once (it migrates at startup) or run the migration runner, then export. Only
+ * a wholly missing TABLE (42P01) is tolerated: it is written as an empty file.
+ *
  * Embeddings are excluded by default because they are recomputable — a
  * re-embed on import is cheaper than paying to ship the vectors around and
  * they inflate the tarball by ~2 KiB per chunk. `--include-embeddings` opts

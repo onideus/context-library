@@ -1,7 +1,7 @@
 /**
  * Pure row-level helpers for import: building the INSERT for one JSONL row,
- * and the cross-table consistency check on note history. No database, no
- * filesystem — everything here is unit-testable without Postgres.
+ * and the cross-row consistency check on notes and their history. No database,
+ * no filesystem — everything here is unit-testable without Postgres.
  */
 
 import type { TableSpec } from "./tables.js";
@@ -67,41 +67,63 @@ export function buildInsert(
 type RowSource = Iterable<Record<string, unknown>> | AsyncIterable<Record<string, unknown>>;
 
 /**
- * Verify that a tarball's `notes` and `note_versions` rows can coexist.
+ * Verify that a tarball's `notes` and `note_versions` rows can be restored
+ * together, before anything is written. Three defects are caught; each would
+ * otherwise surface only after a `--force` truncate:
  *
- * `note_versions` is written by a trigger in the same transaction as every
- * note edit, and row (note_id, k) is the note as it was at version k — so
- * every history row must be strictly older than its note's current `version`.
- * If a history row had version >= the note's, restoring it would leave the
- * note permanently uneditable: the next UPDATE tries to write history row
- * (note_id, note.version) and collides on the primary key. And a history row
- * whose note is missing cannot be restored at all (FK) — after a `--force`
- * truncate that would fail half-way through the load.
+ * 1. A `note_versions` row whose version is not strictly below its note's
+ *    current `version`. The trigger writes history row (note_id, k) = the
+ *    note as it was at version k, so every history row must be older than the
+ *    note. Restoring a row with version >= the note's would leave the note
+ *    permanently uneditable: the next UPDATE tries to write history row
+ *    (note_id, note.version) and collides on the primary key.
+ * 2. A `note_versions` row whose note is missing from `notes` (FK failure
+ *    half-way through the load).
+ * 3. A `notes.superseded_by` naming a note that is not in `notes`. The FK is
+ *    deferred while a table loads, so it would fail at that table's COMMIT.
  *
- * Both are tarball-level defects (a pre-fix export that read tables from
- * separate snapshots, a hand-edited file), so this fails fast, before any
- * database write, in the same class as "Tarball corrupt".
+ * All are tarball-level defects (a pre-fix export that read tables from
+ * separate snapshots, a hand-edited or truncated file), so this fails fast, in
+ * the same class as "Tarball corrupt".
  *
- * A `notes` row with no `version` key (a tarball older than the lifecycle
- * columns) restores with the column default, 1, so it is treated as version 1.
+ * An empty `notes` is a valid input: pass `[]` when notes.jsonl is absent and
+ * any history row is then (correctly) an orphan. A `notes` row with no
+ * `version` key (a tarball older than the lifecycle columns) restores with the
+ * column default, 1, so it is treated as version 1.
  *
  * Accepts sync or async iterables so tests can pass arrays and the import
  * script can pass streaming JSONL readers.
  */
-export async function checkNoteHistoryConsistency(
+export async function checkNotesConsistency(
   notes: RowSource,
   history: RowSource
 ): Promise<void> {
   const noteVersions = new Map<string, number>();
+  const supersededBy: Array<[id: string, successor: string]> = [];
   for await (const note of notes) {
+    const id = String(note.id);
     const version = note.version === undefined || note.version === null ? 1 : note.version;
     if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
       throw new Error(
-        `Tarball inconsistent: notes row ${String(note.id)} has an invalid version ` +
+        `Tarball inconsistent: notes row ${id} has an invalid version ` +
           `(${JSON.stringify(version)}); expected a positive integer`
       );
     }
-    noteVersions.set(String(note.id), version);
+    noteVersions.set(id, version);
+    if (note.superseded_by !== undefined && note.superseded_by !== null) {
+      supersededBy.push([id, String(note.superseded_by)]);
+    }
+  }
+
+  // Checked after the whole file is read: a successor may sort after the note
+  // that points at it (ids load in order, the reference can run forward).
+  for (const [id, successor] of supersededBy) {
+    if (!noteVersions.has(successor)) {
+      throw new Error(
+        `Tarball inconsistent: note ${id} superseded_by ${successor} ` +
+          `which is not in notes.jsonl`
+      );
+    }
   }
 
   for await (const row of history) {

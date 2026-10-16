@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildInsert, checkNoteHistoryConsistency } from "./rows.js";
+import { buildInsert, checkNotesConsistency } from "./rows.js";
 import { TABLES, specForTable, type TableSpec } from "./tables.js";
 
 /**
@@ -230,13 +230,13 @@ describe("table registry", () => {
   });
 });
 
-describe("checkNoteHistoryConsistency", () => {
+describe("checkNotesConsistency", () => {
   const note = (id: string, version: number) => ({ id, version });
   const hist = (note_id: string, version: number) => ({ note_id, version });
 
   it("accepts history rows strictly older than the note's current version", async () => {
     await expect(
-      checkNoteHistoryConsistency(
+      checkNotesConsistency(
         [note(NOTE_ID, 3), note(SUCCESSOR_ID, 1)],
         [hist(NOTE_ID, 1), hist(NOTE_ID, 2)]
       )
@@ -244,44 +244,97 @@ describe("checkNoteHistoryConsistency", () => {
   });
 
   it("accepts empty history and empty notes", async () => {
-    await expect(checkNoteHistoryConsistency([], [])).resolves.toBeUndefined();
+    await expect(checkNotesConsistency([], [])).resolves.toBeUndefined();
     await expect(
-      checkNoteHistoryConsistency([note(NOTE_ID, 1)], [])
+      checkNotesConsistency([note(NOTE_ID, 1)], [])
     ).resolves.toBeUndefined();
   });
 
   it("rejects a history row whose version equals the note's version", async () => {
     await expect(
-      checkNoteHistoryConsistency([note(NOTE_ID, 3)], [hist(NOTE_ID, 3)])
+      checkNotesConsistency([note(NOTE_ID, 3)], [hist(NOTE_ID, 3)])
     ).rejects.toThrow(/Tarball inconsistent: note_versions row \(20000000-0000-0000-0000-0000000000a1, v3\)/);
   });
 
   it("rejects a history row whose version exceeds the note's version", async () => {
     await expect(
-      checkNoteHistoryConsistency([note(NOTE_ID, 2)], [hist(NOTE_ID, 1), hist(NOTE_ID, 5)])
+      checkNotesConsistency([note(NOTE_ID, 2)], [hist(NOTE_ID, 1), hist(NOTE_ID, 5)])
     ).rejects.toThrow(/Tarball inconsistent: note_versions row \(.*, v5\).*v2/s);
   });
 
   it("rejects a history row whose note is not in notes", async () => {
     await expect(
-      checkNoteHistoryConsistency([note(SUCCESSOR_ID, 2)], [hist(NOTE_ID, 1)])
+      checkNotesConsistency([note(SUCCESSOR_ID, 2)], [hist(NOTE_ID, 1)])
     ).rejects.toThrow(/Tarball inconsistent: note_versions row \(.*a1, v1\).*not in notes\.jsonl/s);
   });
 
   it("treats a notes row with no version key as version 1 (pre-013 note)", async () => {
     // Restores with the column default (1), so any history row would collide.
     await expect(
-      checkNoteHistoryConsistency([{ id: NOTE_ID }], [hist(NOTE_ID, 1)])
+      checkNotesConsistency([{ id: NOTE_ID }], [hist(NOTE_ID, 1)])
     ).rejects.toThrow(/Tarball inconsistent/);
     await expect(
-      checkNoteHistoryConsistency([{ id: NOTE_ID }], [])
+      checkNotesConsistency([{ id: NOTE_ID }], [])
     ).resolves.toBeUndefined();
   });
 
   it("rejects a notes row with a non-integer version", async () => {
     await expect(
-      checkNoteHistoryConsistency([{ id: NOTE_ID, version: "3" }], [])
+      checkNotesConsistency([{ id: NOTE_ID, version: "3" }], [])
     ).rejects.toThrow(/Tarball inconsistent: notes row .* invalid version/);
+  });
+
+  it("treats an empty notes set as valid input, so any history row is an orphan", async () => {
+    // notes.jsonl absent from the tarball is passed as [] — history for notes
+    // that do not exist must not be waved through.
+    await expect(checkNotesConsistency([], [hist(NOTE_ID, 1)])).rejects.toThrow(
+      /Tarball inconsistent: note_versions row \(.*a1, v1\).*not in notes\.jsonl/s
+    );
+  });
+
+  describe("superseded_by references", () => {
+    const superseded = (id: string, by: unknown, version = 3) => ({
+      id,
+      version,
+      status: "superseded",
+      superseded_by: by,
+    });
+
+    it("accepts a reference to a note present later in the file (forward reference)", async () => {
+      // The superseded note sorts first; the FK is deferred on import.
+      await expect(
+        checkNotesConsistency([superseded(NOTE_ID, SUCCESSOR_ID), note(SUCCESSOR_ID, 1)], [])
+      ).resolves.toBeUndefined();
+    });
+
+    it("accepts a reference to a note present earlier in the file", async () => {
+      await expect(
+        checkNotesConsistency([note(NOTE_ID, 1), superseded(SUCCESSOR_ID, NOTE_ID)], [])
+      ).resolves.toBeUndefined();
+    });
+
+    it("accepts null and absent superseded_by", async () => {
+      await expect(
+        checkNotesConsistency(
+          [{ id: NOTE_ID, version: 1, superseded_by: null }, { id: SUCCESSOR_ID, version: 1 }],
+          []
+        )
+      ).resolves.toBeUndefined();
+    });
+
+    it("rejects a reference to a note that is not in notes.jsonl", async () => {
+      await expect(
+        checkNotesConsistency([superseded(NOTE_ID, SUCCESSOR_ID)], [])
+      ).rejects.toThrow(
+        `Tarball inconsistent: note ${NOTE_ID} superseded_by ${SUCCESSOR_ID} which is not in notes.jsonl`
+      );
+    });
+
+    it("rejects a dangling reference even when the history rows are fine", async () => {
+      await expect(
+        checkNotesConsistency([superseded(NOTE_ID, SUCCESSOR_ID)], [hist(NOTE_ID, 1)])
+      ).rejects.toThrow(/superseded_by .* which is not in notes\.jsonl/);
+    });
   });
 
   it("accepts async iterables (streaming JSONL readers)", async () => {
@@ -289,10 +342,10 @@ describe("checkNoteHistoryConsistency", () => {
       for (const r of items) yield r;
     }
     await expect(
-      checkNoteHistoryConsistency(rows([note(NOTE_ID, 2)]), rows([hist(NOTE_ID, 1)]))
+      checkNotesConsistency(rows([note(NOTE_ID, 2)]), rows([hist(NOTE_ID, 1)]))
     ).resolves.toBeUndefined();
     await expect(
-      checkNoteHistoryConsistency(rows([note(NOTE_ID, 2)]), rows([hist(NOTE_ID, 2)]))
+      checkNotesConsistency(rows([note(NOTE_ID, 2)]), rows([hist(NOTE_ID, 2)]))
     ).rejects.toThrow(/Tarball inconsistent/);
   });
 });

@@ -7,29 +7,35 @@
  *   2. Point env vars at it (PG*, DATA_DIR)
  *   3. `npm run import path/to/context-library-<ver>-<stamp>.tar.gz`
  *
- * Before writing anything the import checks the tarball itself: every JSONL
- * row count must match the manifest, and every note_versions row must belong
- * to a note in notes.jsonl with a version strictly below the note's current
- * one (otherwise a restored note could never be edited again). Both failures
- * are fatal and happen before any truncate or insert. Tarballs written before
- * a column or table existed still restore: an absent column loads as its
- * column DEFAULT and a missing JSONL file loads as zero rows.
+ * Order of operations (each step happens only if every earlier one passed):
+ *   1. Check the tarball itself: every JSONL row count must match the
+ *      manifest; every note_versions row must belong to a note in notes.jsonl
+ *      with a version strictly below the note's current one (otherwise a
+ *      restored note could never be edited again); every notes.superseded_by
+ *      must name a note in notes.jsonl. All fatal, all before any database
+ *      access.
+ *   2. Check the destination is empty; refuse unless `--force` is passed. A
+ *      refused import leaves the destination exactly as it was — its schema
+ *      included.
+ *   3. Verify the destination's migration state is at or beyond the manifest,
+ *      and apply any migration this checkout ships that the destination lacks.
+ *   4. With `--force`, truncate; then load each table in a per-table
+ *      transaction, copy handoff files into `DATA_DIR/handoffs`, and enqueue
+ *      re-embedding through `pending_embeddings` whenever embeddings are
+ *      absent from the tarball OR the manifest's model/dimensions disagree
+ *      with the current config.
  *
- * The import verifies the destination database's migration state is at or
- * beyond the manifest — and applies any migration this checkout ships that the
- * destination lacks, whatever the manifest names, before it truncates or loads
- * anything — refuses to overwrite non-empty databases unless
- * `--force` is passed, loads each table in a per-table transaction, copies
- * handoff files into `DATA_DIR/handoffs`, and enqueues re-embedding through
- * `pending_embeddings` whenever embeddings are absent from the tarball OR
- * the manifest's model/dimensions disagree with the current config.
+ * Tarballs written before a column or table existed still restore: an absent
+ * column loads as its column DEFAULT and a missing JSONL file loads as zero
+ * rows.
  *
- * `--dry-run` prints what would happen — planned actions, per-table row
- * counts, and re-embed plan — without touching Postgres or the filesystem
- * (beyond the extraction tempdir, which is cleaned up unconditionally).
+ * `--dry-run` prints what would happen — planned actions, pending migrations,
+ * per-table row counts, and re-embed plan — without modifying Postgres or the
+ * filesystem (beyond the extraction tempdir, which is cleaned up
+ * unconditionally).
  *
  * `--force` allows importing into a non-empty database. `--force` truncates
- * every export-managed table first (in FK-safe order) and clears
+ * every export-managed table first (TRUNCATE ... CASCADE) and clears
  * DATA_DIR/handoffs before restoring. This is a destructive operation on
  * the destination — the operator is expected to have taken their own
  * snapshot first if they need one.
@@ -55,7 +61,7 @@ import { ARCHIVE_DIRNAME } from "../src/storage/json-store.js";
 import { pool, query, getClient } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { TABLES, type TableSpec } from "./portability/tables.js";
-import { buildInsert, checkNoteHistoryConsistency } from "./portability/rows.js";
+import { buildInsert, checkNotesConsistency } from "./portability/rows.js";
 import {
   ensureDir,
   extractTarball,
@@ -123,28 +129,33 @@ Options:
 // ── Preflight ─────────────────────────────────────────────────────
 
 /**
- * Fail fast, before any database write, when the tarball's note history
- * cannot be restored consistently: a note_versions row whose note is missing
- * from notes.jsonl, or whose version is not strictly below the note's current
- * version (the restored note would be permanently uneditable — see
- * checkNoteHistoryConsistency). Same class of error as "Tarball corrupt".
+ * Fail fast, before any database access, when the tarball's notes cannot be
+ * restored consistently (see checkNotesConsistency): a note_versions row whose
+ * note is missing from notes.jsonl or whose version is not strictly below the
+ * note's current version (the restored note would be permanently uneditable),
+ * or a notes.superseded_by naming a note that is not in the file (the FK would
+ * fail at COMMIT, after a --force truncate). Same class of error as "Tarball
+ * corrupt".
  *
- * Silently skipped when notes.jsonl or note_versions.jsonl is absent, which
- * is the normal shape of a tarball exported before migration 013.
+ * An absent file is an empty set, not a reason to skip: history rows with no
+ * notes.jsonl are history for notes that do not exist. Only a tarball with
+ * neither file is skipped; one written before migration 013 has no
+ * note_versions.jsonl, which simply means no history to check.
  */
 async function verifyNoteHistory(tablesDir: string): Promise<void> {
-  const notesPath = join(tablesDir, "notes.jsonl");
-  const historyPath = join(tablesDir, "note_versions.jsonl");
-  try {
-    await stat(notesPath);
-    await stat(historyPath);
-  } catch {
-    return;
-  }
-  await checkNoteHistoryConsistency(
-    readJsonlFile(notesPath),
-    readJsonlFile(historyPath)
-  );
+  const rowsIfPresent = async (name: string) => {
+    const path = join(tablesDir, name);
+    try {
+      await stat(path);
+    } catch {
+      return null;
+    }
+    return readJsonlFile(path);
+  };
+  const notes = await rowsIfPresent("notes.jsonl");
+  const history = await rowsIfPresent("note_versions.jsonl");
+  if (notes === null && history === null) return;
+  await checkNotesConsistency(notes ?? [], history ?? []);
 }
 
 /**
@@ -201,8 +212,10 @@ async function verifyMigrations(
   manifest: ExportManifest,
   dryRun: boolean
 ): Promise<{ missing: string[] }> {
-  // Two separate questions, both settled BEFORE the empty-check, the --force
-  // truncate, or any load:
+  // Called only once the import is known to proceed (the destination is empty,
+  // or --force / --dry-run was given) — never for a refused import, which must
+  // not touch the destination, its schema included. Two separate questions,
+  // both settled BEFORE the --force truncate and any load:
   //
   //  1. Is the destination at LEAST at every migration the manifest names?
   //     If not, run the local migration set (idempotent). If the manifest
@@ -543,15 +556,17 @@ async function main(): Promise<void> {
       }
     }
 
-    // Cross-table consistency of note history, still before any database
-    // write (including the --force truncate). Skipped when either file is
-    // absent — a tarball written before migration 013 has no note_versions.
+    // Cross-table consistency of the notes and note_versions files, still
+    // before any database write (including the --force truncate).
     await verifyNoteHistory(tablesDir);
 
-    // Ensure schema is present before we touch it. In dry-run this just
-    // reports the migration gap and returns without applying.
-    await verifyMigrations(manifest, args.dryRun);
-
+    // Decide whether this import will proceed BEFORE touching the destination
+    // in any way — including its schema. A refused import (non-empty
+    // destination, no --force) must leave the database exactly as it found it:
+    // if the operator's PG* env points at a live deployment by mistake, running
+    // pending migrations first would modify it and only then refuse. These
+    // reads are safe on an old schema: checkDatabaseEmpty counts a table the
+    // schema lacks as zero rows (42P01).
     const { empty, counts } = await checkDatabaseEmpty();
     const existingHandoffs = await countHandoffFiles();
 
@@ -585,6 +600,12 @@ async function main(): Promise<void> {
         );
       }
     }
+
+    // The import will proceed (empty destination, --force, or dry-run): now
+    // make sure the schema is current. Settled before the truncate and the load
+    // so a missing column can never fail the load after the wipe. In dry-run
+    // this only reports what would run.
+    await verifyMigrations(manifest, args.dryRun);
 
     // Compute the re-embed plan up front so it appears in the dry-run output.
     const plan = classifyReembed(manifest, manifest.row_counts, manifest.handoff_file_count);

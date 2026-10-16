@@ -530,6 +530,17 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
     return dir;
   }
 
+  /** Read-modify-write an extracted export's manifest.json. */
+  async function editManifest(
+    dir: string,
+    edit: (manifest: { applied_migrations: string[]; row_counts: Record<string, number> }) => void
+  ): Promise<void> {
+    const path = join(dir, "manifest.json");
+    const manifest = JSON.parse(await readFile(path, "utf-8"));
+    edit(manifest);
+    await writeFile(path, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  }
+
   /**
    * Rewrite an export of the current database into the shape a pre-013 export
    * had: notes rows without the six lifecycle keys, no note_versions.jsonl, no
@@ -551,11 +562,10 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
       })
     );
     await rm(join(dir, "tables", "note_versions.jsonl"));
-    const manifestPath = join(dir, "manifest.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
-    delete manifest.row_counts.note_versions;
-    manifest.applied_migrations = manifest.applied_migrations.filter((m: string) => !m.startsWith("013_"));
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+    await editManifest(dir, (manifest) => {
+      delete manifest.row_counts.note_versions;
+      manifest.applied_migrations = manifest.applied_migrations.filter((m) => !m.startsWith("013_"));
+    });
     const out = join(TEST_ROOT, `${name}.tar.gz`);
     tarCreate(dir, out);
     return out;
@@ -1137,14 +1147,44 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
       expect(wipedTask.rowCount).toBe(0);
     }, SCRIPT_TIMEOUT_MS);
 
+    it("a refused import (non-empty destination, no --force) leaves the destination's schema untouched", async () => {
+      // The operator's PG* env may point at a live database by mistake. A
+      // refusal must not have migrated it on the way to refusing.
+      await resetAndSeed();
+      const current = await exportTo(join(TEST_ROOT, "refused-mig-export"));
+      const older = await makePre013Tarball(current, "refused-mig");
+
+      await wipeDestination(pre013);
+      await client.query(
+        `INSERT INTO tasks (id, title, scope) VALUES ('9999abcd-0000-0000-0000-000000000002', 'keep me', 'work')`
+      );
+      await client.query(
+        `INSERT INTO notes (id, title, content, scope) VALUES ('9999abcd-0000-0000-0000-000000000003', 'keep me', 'x', 'shared')`
+      );
+
+      for (const [label, tarball] of [["pre-013 tarball", older], ["current tarball", current]]) {
+        const res = runScript(IMPORT_SCRIPT, [tarball], scriptEnv());
+        expect(res.status, `${label}: stdout:\n${res.stdout}`).not.toBe(0);
+        expect(res.stderr, label).toMatch(/Refusing to import into a non-empty destination/);
+        expect(res.stdout, label).not.toMatch(/pending migration|running migrations/i);
+
+        // Schema and data exactly as staged.
+        expect((await appliedMigrations()).some((m) => m.startsWith("013_")), label).toBe(false);
+        expect(await tableExists("note_versions"), label).toBe(false);
+        const counts = await client.query(
+          `SELECT (SELECT count(*) FROM tasks)::int AS tasks, (SELECT count(*) FROM notes)::int AS notes`
+        );
+        expect(counts.rows[0], label).toEqual({ tasks: 1, notes: 1 });
+      }
+    }, SCRIPT_TIMEOUT_MS);
+
     it("a manifest naming a migration this checkout lacks is still refused before any truncate", async () => {
       await resetAndSeed();
       const tarball = await exportTo(join(TEST_ROOT, "future-mig-export"));
       const dir = await extractTo(tarball, "future-mig-extract");
-      const manifestPath = join(dir, "manifest.json");
-      const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
-      manifest.applied_migrations.push("999_from_a_newer_release.sql");
-      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+      await editManifest(dir, (manifest) => {
+        manifest.applied_migrations.push("999_from_a_newer_release.sql");
+      });
       const futureTarball = join(TEST_ROOT, "future-mig.tar.gz");
       tarCreate(dir, futureTarball);
 
@@ -1163,20 +1203,67 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
 
   describe("inconsistent note history is refused before any write", () => {
     const { old } = FIXTURES.lifecycle;
-    const cases = [
+    const { successor } = FIXTURES.lifecycle;
+    // Each case edits an extracted export in place. Every edit keeps the
+    // manifest's row counts equal to the files', so the row-count pre-flight
+    // passes and only the note consistency check can catch the defect.
+    const cases: Array<{
+      slug: string;
+      label: string;
+      mutate: (dir: string) => Promise<void>;
+      expected: RegExp;
+    }> = [
       {
         slug: "version-not-below-note",
         label: "a history row whose version is not below its note's version",
         // `old` is at version 3; push its newest history row up to 3.
-        mutate: (rows: Record<string, unknown>[]) =>
-          rows.map((r, i) => (i === rows.length - 1 ? { ...r, version: 3 } : r)),
+        mutate: async (dir) => {
+          const rows = await readJsonl(dir, "note_versions");
+          await writeJsonl(
+            dir,
+            "note_versions",
+            rows.map((r, i) => (i === rows.length - 1 ? { ...r, version: 3 } : r))
+          );
+        },
         expected: new RegExp(`note_versions row \\(${old.id}, v3\\)`),
       },
       {
         slug: "orphan-history-row",
         label: "a history row for a note that is not in notes.jsonl",
-        mutate: (rows: Record<string, unknown>[]) =>
-          rows.map((r, i) => (i === 0 ? { ...r, note_id: "99999999-0000-0000-0000-000000000009" } : r)),
+        mutate: async (dir) => {
+          const rows = await readJsonl(dir, "note_versions");
+          await writeJsonl(
+            dir,
+            "note_versions",
+            rows.map((r, i) => (i === 0 ? { ...r, note_id: "99999999-0000-0000-0000-000000000009" } : r))
+          );
+        },
+        expected: /references a note that is not in notes\.jsonl/,
+      },
+      {
+        slug: "dangling-superseded-by",
+        label: "a superseded_by naming a note that is not in notes.jsonl",
+        // Drop the successor: `old` still points at it. Left alone, the
+        // deferred FK would fail at the notes COMMIT, after the --force truncate.
+        mutate: async (dir) => {
+          const notes = await readJsonl(dir, "notes");
+          await writeJsonl(dir, "notes", notes.filter((r) => r.id !== successor.id));
+          await editManifest(dir, (m) => {
+            m.row_counts.notes = notes.length - 1;
+          });
+        },
+        expected: new RegExp(`note ${old.id} superseded_by ${successor.id} which is not in notes\\.jsonl`),
+      },
+      {
+        slug: "history-without-notes-file",
+        label: "note_versions rows but no notes.jsonl at all",
+        // A missing notes.jsonl is an empty note set, not a reason to skip the check.
+        mutate: async (dir) => {
+          await rm(join(dir, "tables", "notes.jsonl"));
+          await editManifest(dir, (m) => {
+            m.row_counts.notes = 0;
+          });
+        },
         expected: /references a note that is not in notes\.jsonl/,
       },
     ];
@@ -1186,10 +1273,7 @@ describe.skipIf(!pgAvailable)("export/import round-trip", () => {
       const tarball = await exportTo(join(TEST_ROOT, `bad-${slug}-export`));
       const dir = await extractTo(tarball, `bad-${slug}-extract`);
 
-      // Counts in the manifest still match the file, so the existing
-      // row-count pre-flight passes and only the new consistency check can
-      // catch this.
-      await writeJsonl(dir, "note_versions", mutate(await readJsonl(dir, "note_versions")));
+      await mutate(dir);
       const badTarball = join(TEST_ROOT, `bad-${slug}.tar.gz`);
       tarCreate(dir, badTarball);
 
