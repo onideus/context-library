@@ -20,8 +20,10 @@ import type { Client as PgClient } from "pg";
  * and, for the note-lifecycle work (docs/design/note-lifecycle.md section 8):
  *   - note snapshots carrying the lifecycle/provenance/version fields
  *   - the corrected base_updated_at comparison for notes
- *   - expected_version / expected_status preconditions and the strict
- *     precondition schema
+ *   - expected_version / expected_status / base_updated_at preconditions,
+ *     validated per op (a malformed one never fails the batch), and refused
+ *     on insert/delete
+ *   - UUID canonicalisation of entity ids
  *   - the notes-only `supersede` op (and UNSUPPORTED_OP for tasks/artifacts)
  *   - delete-time chain splice results (`relinked`)
  *   - pending_embeddings enqueue on the push path
@@ -967,7 +969,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     // one write path with the MCP note tools (src/notes/store.ts). These
     // tests pin the wire-visible behaviour: the new snapshot fields, the
     // corrected base_updated_at comparison, expected_version /
-    // expected_status, the supersede op, the strict precondition schema, the
+    // expected_status, the supersede op, per-op precondition validation, the
     // delete-time chain splice, and the pending_embeddings enqueue.
 
     interface PushResult {
@@ -1042,7 +1044,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
         const res = await c.query(
           `SELECT seq::text AS seq, op FROM changes
             WHERE entity_type = $1 AND entity_id = $2 AND seq > $3::bigint
-            ORDER BY seq`,
+            ORDER BY changes.seq`,
           [entityType, entityId, afterSeq]
         );
         return res.rows as Array<{ seq: string; op: string }>;
@@ -1522,27 +1524,86 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       });
     });
 
-    describe("strict precondition", () => {
-      it("rejects an unknown precondition key with 400 INVALID_BODY and applies nothing", async () => {
+    describe("precondition validation (per op, never per batch)", () => {
+      // The body schema accepts `precondition` permissively; each op validates
+      // its own inside its transaction. One malformed precondition therefore
+      // fails that op alone - it must never turn the whole request into a 400.
+
+      it("rejects an unknown precondition key for that op only; a sibling op in the batch applies", async () => {
         const { id } = await pushNoteInsert();
-        const res = await syncPost("/sync/push", {
-          ops: [noteOp("update", id, { content: "must not apply" }, { expected_stauts: "active" })],
-        });
-        expect(res.status).toBe(400);
-        const body = await res.json();
-        expect(body.code).toBe("INVALID_BODY");
+        const badUuid = randomUUID();
+        const bad = noteOp(
+          "update",
+          id,
+          { content: "must not apply" },
+          { expected_stauts: "active" },
+          badUuid
+        );
+        const siblingId = randomUUID();
+        const sibling = noteOp("insert", siblingId, { title: "Sibling in the same batch" });
+
+        const res = await syncPost("/sync/push", { ops: [bad, sibling] });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { results: PushResult[] };
+        expect(body.results[0].status).toBe("error");
+        expect(body.results[0].error).toContain("VALIDATION_ERROR");
+        expect(body.results[0].error).toContain("expected_stauts");
+        expect(body.results[1].status).toBe("applied");
+
         expect((await noteRow(id))!.content).toBe("Deploys happen on Fridays.");
+        expect(await noteRow(siblingId)).toBeDefined();
+        // The claim rolled back with the transaction.
+        expect(await opLogRows(badUuid)).toHaveLength(0);
       });
 
-      it("rejects a non-integer or non-positive expected_version with 400 INVALID_BODY", async () => {
+      it("rejects a malformed expected_version (0, negative, fractional, string, null) per op", async () => {
         const { id } = await pushNoteInsert();
-        for (const bad of [0, -1, 1.5, "2"]) {
+        for (const bad of [0, -1, 1.5, "2", null]) {
           const res = await syncPost("/sync/push", {
             ops: [noteOp("update", id, { content: "x" }, { expected_version: bad })],
           });
-          expect(res.status).toBe(400);
-          expect((await res.json()).code).toBe("INVALID_BODY");
+          expect(res.status).toBe(200);
+          const [result] = ((await res.json()) as { results: PushResult[] }).results;
+          expect(result.status).toBe("error");
+          expect(result.error).toContain("VALIDATION_ERROR");
+          expect(result.error).toContain("expected_version");
         }
+        expect((await noteRow(id))!.content).toBe("Deploys happen on Fridays.");
+      });
+
+      it("rejects wrongly typed base_updated_at / expected_status per op", async () => {
+        const { id } = await pushNoteInsert();
+        const cases: Array<[string, unknown]> = [
+          ["base_updated_at", 12345],
+          ["expected_status", true],
+        ];
+        for (const [key, value] of cases) {
+          const result = await pushOne(noteOp("update", id, { content: "x" }, { [key]: value }));
+          expect(result.status).toBe("error");
+          expect(result.error).toContain("VALIDATION_ERROR");
+          expect(result.error).toContain(key);
+        }
+      });
+
+      it("rejects a non-object precondition per op", async () => {
+        const { id } = await pushNoteInsert();
+        for (const bad of ["active", [], null, 7]) {
+          const res = await syncPost("/sync/push", {
+            ops: [{ ...noteOp("update", id, { content: "x" }), precondition: bad }],
+          });
+          expect(res.status).toBe(200);
+          const [result] = ((await res.json()) as { results: PushResult[] }).results;
+          expect(result.status).toBe("error");
+          expect(result.error).toContain("VALIDATION_ERROR");
+        }
+      });
+
+      it("accepts an empty precondition object", async () => {
+        const id = randomUUID();
+        const insert = await pushOne(noteOp("insert", id, { title: "Empty precondition" }, {}));
+        expect(insert.status).toBe("applied");
+        const update = await pushOne(noteOp("update", id, { content: "ok" }, {}));
+        expect(update.status).toBe("applied");
       });
 
       it("rejects expected_version where the server cannot enforce it, instead of ignoring it", async () => {
@@ -1558,11 +1619,6 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
         expect(onTask.status).toBe("error");
         expect(onTask.error).toContain("expected_version");
         expect((await callTool("get_task", { id: t.id })).title).toBe("Version-less task");
-
-        const { id } = await pushNoteInsert();
-        const onDelete = await pushOne(noteOp("delete", id, undefined, { expected_version: 1 }));
-        expect(onDelete.status).toBe("error");
-        expect(await noteRow(id)).toBeDefined();
       });
 
       it("rejects base_updated_at on supersede", async () => {
@@ -1579,6 +1635,209 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
         expect(res.status).toBe("error");
         expect(res.error).toContain("base_updated_at");
         expect((await noteRow(oldId))!.status).toBe("active");
+      });
+
+      it("reports UNSUPPORTED_OP (not a precondition error) for a task supersede that also carries a precondition", async () => {
+        const t = await callTool("create_task", { title: "Unsupported first", scope: "personal" });
+        const res = await pushOne({
+          op_uuid: randomUUID(),
+          entity_type: "task",
+          entity_id: t.id,
+          op: "supersede",
+          payload: { superseded_by: randomUUID() },
+          precondition: { expected_version: 1 },
+        });
+        expect(res.status).toBe("error");
+        expect(res.error).toContain("UNSUPPORTED_OP");
+      });
+    });
+
+    describe("insert and delete accept no preconditions", () => {
+      it("rejects every precondition key on insert and delete, naming the op kind, for all entity types", async () => {
+        const preconditions: Array<Record<string, unknown>> = [
+          { base_updated_at: "2030-01-01T00:00:00.000Z" },
+          { expected_status: "active" },
+          { expected_version: 1 },
+        ];
+        for (const entityType of ["note", "task", "artifact"] as const) {
+          for (const kind of ["insert", "delete"] as const) {
+            for (const precondition of preconditions) {
+              const id = randomUUID();
+              const opUuid = randomUUID();
+              const res = await pushOne({
+                op_uuid: opUuid,
+                entity_type: entityType,
+                entity_id: id,
+                op: kind,
+                ...(kind === "insert" ? { payload: { title: "never created" } } : {}),
+                precondition,
+              });
+              expect(res.status).toBe("error");
+              expect(res.error).toContain("VALIDATION_ERROR");
+              expect(res.error).toContain(`'${kind}'`);
+              expect(res.error).toContain(Object.keys(precondition)[0]);
+              expect(await opLogRows(opUuid)).toHaveLength(0);
+            }
+          }
+        }
+      });
+
+      it("creates nothing and deletes nothing when the precondition is rejected", async () => {
+        const insertId = randomUUID();
+        const rejectedInsert = await pushOne(
+          noteOp("insert", insertId, { title: "never created" }, { base_updated_at: "2030-01-01T00:00:00.000Z" })
+        );
+        expect(rejectedInsert.status).toBe("error");
+        expect(await noteRow(insertId)).toBeUndefined();
+
+        const { id } = await pushNoteInsert();
+        const rejectedDelete = await pushOne(noteOp("delete", id, undefined, { expected_status: "active" }));
+        expect(rejectedDelete.status).toBe("error");
+        expect(await noteRow(id)).toBeDefined();
+      });
+    });
+
+    describe("artifact base_updated_at", () => {
+      async function pushArtifactInsert() {
+        const id = randomUUID();
+        const res = await pushOne({
+          op_uuid: randomUUID(),
+          entity_type: "artifact",
+          entity_id: id,
+          op: "insert",
+          payload: { title: "Project-alpha runbook", artifact_type: "research" },
+        });
+        expect(res.status).toBe("applied");
+        return { id, result: res };
+      }
+
+      function artifactUpdate(id: string, payload: Record<string, unknown>, precondition?: Record<string, unknown>) {
+        return {
+          op_uuid: randomUUID(),
+          entity_type: "artifact" as const,
+          entity_id: id,
+          op: "update" as const,
+          payload,
+          ...(precondition ? { precondition } : {}),
+        };
+      }
+
+      it("returns STALE_BASE with the current row when base_updated_at is stale", async () => {
+        const { id } = await pushArtifactInsert();
+        const stale = await pushOne(
+          artifactUpdate(id, { title: "must not apply" }, { base_updated_at: "1999-01-01T00:00:00.000Z" })
+        );
+        expect(stale.status).toBe("conflict");
+        expect(stale.conflict!.reason).toBe("STALE_BASE");
+        expect(stale.conflict!.current.id).toBe(id);
+        expect(stale.conflict!.current.title).toBe("Project-alpha runbook");
+      });
+
+      it("applies the update when base_updated_at matches, and rejects the now-stale base afterwards", async () => {
+        const { id, result } = await pushArtifactInsert();
+        const base = result.snapshot.updated_at as string;
+        expect(typeof base).toBe("string");
+
+        const ok = await pushOne(artifactUpdate(id, { title: "Project-alpha runbook v2" }, { base_updated_at: base }));
+        expect(ok.status).toBe("applied");
+        expect(ok.snapshot.title).toBe("Project-alpha runbook v2");
+
+        const again = await pushOne(artifactUpdate(id, { title: "from the old base" }, { base_updated_at: base }));
+        expect(again.status).toBe("conflict");
+        expect(again.conflict!.reason).toBe("STALE_BASE");
+      });
+    });
+
+    describe("id canonicalisation (uppercase UUIDs)", () => {
+      // Postgres returns uuid text lowercase; clients (e.g. Swift's
+      // uuidString) may send uppercase. Ids must agree everywhere or one row
+      // is keyed two ways.
+      const cases: Array<{ entityType: "note" | "task" | "artifact"; insert: Record<string, unknown>; update: Record<string, unknown> }> = [
+        { entityType: "note", insert: { title: "Upper-case id note" }, update: { content: "updated via upper-case id" } },
+        { entityType: "task", insert: { title: "Upper-case id task" }, update: { title: "Renamed via upper-case id" } },
+        {
+          entityType: "artifact",
+          insert: { title: "Upper-case id artifact", artifact_type: "research" },
+          update: { title: "Renamed artifact via upper-case id" },
+        },
+      ];
+
+      for (const { entityType, insert, update } of cases) {
+        it(`${entityType}: result, change log, sync_op_log and snapshot key are lowercase; an uppercase update hits the same row`, async () => {
+          const lower = randomUUID();
+          const upper = lower.toUpperCase();
+          const cursor = await maxSeqDb();
+          const insertOpUuid = randomUUID();
+
+          const inserted = await pushOne({
+            op_uuid: insertOpUuid,
+            entity_type: entityType,
+            entity_id: upper,
+            op: "insert",
+            payload: insert,
+          });
+          expect(inserted.status).toBe("applied");
+          expect(inserted.entity_id).toBe(lower);
+          expect(inserted.snapshot.id).toBe(lower);
+
+          // Change log: one insert row, keyed lowercase only.
+          expect(await changesFor(entityType, lower, cursor)).toEqual([
+            { seq: inserted.seq, op: "insert" },
+          ]);
+          expect(await changesFor(entityType, upper, cursor)).toHaveLength(0);
+          // Dedupe log agrees.
+          expect((await opLogRows(insertOpUuid))[0].entity_id).toBe(lower);
+
+          // Pull snapshot is keyed lowercase.
+          const pull = await (await syncGet(`/sync/changes?cursor=${cursor}&limit=100`)).json();
+          expect(pull.snapshots[`${entityType}:${lower}`]).toMatchObject({ id: lower });
+          expect(pull.snapshots[`${entityType}:${upper}`]).toBeUndefined();
+
+          // An update sent with the uppercase id finds the same row.
+          const updated = await pushOne({
+            op_uuid: randomUUID(),
+            entity_type: entityType,
+            entity_id: upper,
+            op: "update",
+            payload: update,
+          });
+          expect(updated.status).toBe("applied");
+          expect(updated.entity_id).toBe(lower);
+          expect(await changesFor(entityType, upper, cursor)).toHaveLength(0);
+          expect((await changesFor(entityType, lower, cursor)).map((c) => c.op)).toEqual([
+            "insert",
+            "update",
+          ]);
+        });
+      }
+
+      it("note supersede and delete accept uppercase ids, including superseded_by; results are lowercase", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: newId } = await pushNoteInsert();
+        const cursor = await maxSeqDb();
+
+        const sup = await pushOne(
+          noteOp("supersede", oldId.toUpperCase(), { superseded_by: newId.toUpperCase() })
+        );
+        expect(sup.status).toBe("applied");
+        expect(sup.entity_id).toBe(oldId);
+        expect(sup.snapshot).toMatchObject({ id: oldId, superseded_by: newId, status: "superseded" });
+        expect(await changesFor("note", oldId.toUpperCase(), cursor)).toHaveLength(0);
+
+        const del = await pushOne(noteOp("delete", newId.toUpperCase()));
+        expect(del.status).toBe("applied");
+        expect(del.entity_id).toBe(newId);
+        expect(del.relinked!.map((r) => r.entity_id)).toEqual([oldId]);
+        expect(await noteRow(newId)).toBeUndefined();
+        expect(await changesFor("note", newId.toUpperCase(), cursor)).toHaveLength(0);
+        expect((await changesFor("note", newId, cursor)).map((c) => c.op)).toEqual(["delete"]);
+      });
+
+      it("leaves op_uuid exactly as sent so clients can match results to ops", async () => {
+        const opUuid = randomUUID().toUpperCase();
+        const res = await pushOne(noteOp("insert", randomUUID(), { title: "op_uuid echo" }, undefined, opUuid));
+        expect(res.status).toBe("applied");
+        expect(res.op_uuid).toBe(opUuid);
       });
     });
 
