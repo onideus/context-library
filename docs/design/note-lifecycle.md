@@ -398,8 +398,10 @@ Rules, shared by `search_notes` and `search_context`:
 - Each superseded candidate is resolved to its chain head with a bounded
   recursive walk over `superseded_by` (depth ≤ 20; cycles are impossible by
   construction, the cap is belt-and-braces). If the head is expired, the
-  candidate is dropped (unless `include_expired`). If the head is missing
-  (should not happen under the NO ACTION FK) the candidate is dropped.
+  candidate is dropped (unless `include_expired`) with a notice. If the head
+  cannot be loaded (missing — should not happen under the NO ACTION FK — or,
+  in `search_notes`, outside the caller's `scope`/`domain` filter) the
+  candidate is kept as itself, flagged (`unresolved`), rather than hidden.
 - The head replaces the candidate in the result list, carrying the
   candidate's rank/score and a `matched_via: [<old id>, …]` list. If the
   head was also matched directly, the two merge — best score wins,
@@ -411,8 +413,9 @@ Rules, shared by `search_notes` and `search_context`:
 - `include_superseded: true` turns redirection off: superseded rows are
   returned as themselves with `superseded_by`, `superseded_at`,
   `successor_title`, and a notice. `include_expired: true` adds expired rows.
-- `next_step` repeats the instruction to cite successors whenever notices
-  are present.
+- `next_step` is chosen by notice kind: "cite the successor notes shown"
+  only when a redirect notice survives pruning; expired-only notices get
+  "do not treat them as current".
 
 ### 6.2 `search_notes` (FTS over `notes`)
 
@@ -438,11 +441,13 @@ AND (content_type <> 'note'
      OR content_id IN (SELECT id::text FROM notes WHERE <lifecycle predicate>))
 ```
 
-- Default predicate: `valid_until IS NULL OR valid_until > now()` — i.e.
-  drop expired notes and, because the subquery lists only rows that exist,
-  drop orphaned embeddings for notes deleted via `/sync/push` (which never
-  cleaned them up). With `include_expired` the predicate is `TRUE` (orphans
-  still drop).
+- Default predicate (`searchCandidatePredicateSql`): `status = 'superseded'
+  OR valid_until IS NULL OR valid_until > now()` — i.e. drop only
+  computed-expired notes (a superseded note stays a candidate even if its
+  own `valid_until` passed) and, because the subquery lists only rows that
+  exist, drop orphaned embeddings for notes deleted via `/sync/push` (which
+  never cleaned them up). With `include_expired` the predicate is `TRUE`
+  (orphans still drop).
 - The filter is added **only when notes are in scope** (`content_types`
   omitted or containing `note`), and in the graph-only fetch whenever a
   requested key is a note — so a handoff-only search normally never
