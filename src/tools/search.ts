@@ -2,13 +2,20 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { config } from "../config.js";
-import { query } from "../db/client.js";
+import { pool, query } from "../db/client.js";
 import { generateEmbedding, isEmbeddingAvailable, rerankResults } from "../embeddings/client.js";
 import { indexAllHandoffs, indexAllTasks, indexAllNotes, indexAllArtifacts, drainPendingEmbeddings } from "../embeddings/indexer.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 import { expandQuery } from "./search-aliases.js";
 import { recognizeEntities, type RecognizedEntity } from "../entities/recognizer.js";
 import { getGraphCandidates, type GraphCandidate } from "../entities/store.js";
+import type { EffectiveNoteStatus } from "../notes/store.js";
+import {
+  LIFECYCLE_NEXT_STEP,
+  noteLifecycleFilterSql,
+  notesInScope,
+  redirectNoteRows,
+} from "../notes/lifecycle-search.js";
 
 /**
  * Normalize text for fingerprinting: lowercase, collapse whitespace, take first 500 chars, then SHA-256.
@@ -41,6 +48,16 @@ export interface SearchResultRow {
   graph_rank?: number | null;
   graph_score?: number;
   graph_path?: GraphCandidate["path"];
+  // Note lifecycle annotations, set by the redirect step (notes only).
+  /** Note ids that matched and were redirected to this note; [] when it matched directly. */
+  matched_via?: string[];
+  /** Computed lifecycle status: active | superseded | expired. */
+  note_status?: EffectiveNoteStatus;
+  superseded_by?: string | null;
+  superseded_at?: string | null;
+  valid_until?: string | null;
+  /** Title of the direct successor; null unless the note is superseded. */
+  successor_title?: string | null;
 }
 
 /**
@@ -95,6 +112,15 @@ export function fuseRrf(
 /**
  * Deduplicate search results by content fingerprint, keeping the oldest source_file.
  * Returns { deduped, preDedupCount }.
+ *
+ * Note rows are the exception: two notes with DIFFERENT content_ids are two
+ * facts and are never collapsed into one, even when their first 500
+ * characters match. A copy-and-edit successor must not be dropped in favour
+ * of the stale note it replaces (or vice versa). When a fingerprint group
+ * holds two or more distinct notes, every one of them survives and any
+ * non-note rows with the same text are folded into them. A group with at most
+ * one note, and every group without notes (handoff chunks, tasks, artifacts),
+ * behaves exactly as before.
  */
 export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchResultRow[]; preDedupCount: number } {
   const preDedupCount = rows.length;
@@ -112,21 +138,193 @@ export function deduplicateResults(rows: SearchResultRow[]): { deduped: SearchRe
   for (const group of groups.values()) {
     if (group.length === 1) {
       deduped.push(group[0]);
-    } else {
-      // Keep the row with the oldest source_file
-      group.sort((a, b) => {
-        const aFile = (a.metadata?.source_file as string) ?? "";
-        const bFile = (b.metadata?.source_file as string) ?? "";
-        if (!aFile && !bFile) return 0;
-        if (!aFile) return -1; // no source_file = keep first encountered
-        if (!bFile) return 1;
-        return sourceFileTimestamp(aFile).localeCompare(sourceFileTimestamp(bFile));
-      });
-      deduped.push(group[0]);
+      continue;
     }
+
+    // Distinct notes (by content_id) are never collapsed against each other.
+    const distinctNotes = new Map<string, SearchResultRow>();
+    for (const row of group) {
+      if (row.content_type === "note" && !distinctNotes.has(row.content_id)) {
+        distinctNotes.set(row.content_id, row);
+      }
+    }
+    if (distinctNotes.size >= 2) {
+      deduped.push(...distinctNotes.values());
+      continue;
+    }
+
+    // Keep the row with the oldest source_file
+    group.sort((a, b) => {
+      const aFile = (a.metadata?.source_file as string) ?? "";
+      const bFile = (b.metadata?.source_file as string) ?? "";
+      if (!aFile && !bFile) return 0;
+      if (!aFile) return -1; // no source_file = keep first encountered
+      if (!bFile) return 1;
+      return sourceFileTimestamp(aFile).localeCompare(sourceFileTimestamp(bFile));
+    });
+    deduped.push(group[0]);
   }
 
   return { deduped, preDedupCount };
+}
+
+export interface SearchContextSqlInput {
+  /** pgvector literal of the query embedding, e.g. "[0.1,0.2,...]". */
+  pgVector: string;
+  threshold: number;
+  /** Text for websearch_to_tsquery (hybrid only). */
+  ftsQuery: string;
+  hybrid: boolean;
+  contentTypes?: string[];
+  /** ISO dates; compared against metadata stored_at / created_at. */
+  after?: string;
+  before?: string;
+  overFetchLimit: number;
+  /** Keep expired notes as candidates. Default false. */
+  includeExpired?: boolean;
+}
+
+/**
+ * Assemble the candidate-selection SQL for search_context. Pure (no I/O) so
+ * the statement can be exercised against Postgres without an embedding server.
+ *
+ * Param layout: hybrid  -> $1 vector, $2 threshold, $3 ftsQuery,
+ *               pure    -> $1 vector, $2 threshold,
+ * then (optionally) content_types, then date params, then the final limit.
+ * The lifecycle filter takes no parameters.
+ *
+ * Lifecycle (design section 6.3): when notes are in scope, every embeddings
+ * query gets `AND (content_type <> 'note' OR content_id IN (SELECT id::text
+ * FROM notes WHERE ...))` - a hashed subquery, never a join, so the HNSW
+ * index-ordered scan survives. Superseded notes remain candidates (they are
+ * redirected afterwards, see redirectNoteRows), so include_superseded does not
+ * change this SQL; include_expired only relaxes the predicate. Orphaned
+ * embeddings (note row deleted) drop in both cases. A search whose
+ * content_types excludes notes never references `notes`.
+ */
+export function buildSearchContextSql(input: SearchContextSqlInput): { sql: string; params: unknown[] } {
+  const { pgVector, threshold, ftsQuery, hybrid, contentTypes, after, before, overFetchLimit } = input;
+
+  // Date-range filter fragment + params. Applies to both the vector and FTS
+  // sides so filtered-out rows don't consume candidate slots before RRF
+  // fusion. Handoffs use stored_at; tasks and notes use created_at - all live
+  // in metadata JSONB.
+  const dateParams: string[] = [];
+  const dateClauses: string[] = [];
+  if (after) {
+    dateParams.push(after);
+    const p = `$DATE${dateParams.length}`;
+    dateClauses.push(
+      `COALESCE((metadata->>'stored_at')::timestamptz, (metadata->>'created_at')::timestamptz) >= ${p}::timestamptz`
+    );
+  }
+  if (before) {
+    dateParams.push(before);
+    const p = `$DATE${dateParams.length}`;
+    dateClauses.push(
+      `COALESCE((metadata->>'stored_at')::timestamptz, (metadata->>'created_at')::timestamptz) <= ${p}::timestamptz`
+    );
+  }
+  const dateFilter = dateClauses.length ? ` AND ${dateClauses.join(" AND ")}` : "";
+
+  const lifecycleClause = noteLifecycleFilterSql({
+    notesInScope: notesInScope(contentTypes),
+    includeExpired: input.includeExpired ?? false,
+  });
+
+  const params: unknown[] = hybrid ? [pgVector, threshold, ftsQuery] : [pgVector, threshold];
+  const contentTypesIdx = contentTypes?.length ? params.length + 1 : null;
+  if (contentTypesIdx) params.push(contentTypes);
+  const dateStartIdx = params.length + 1;
+  params.push(...dateParams);
+  const finalLimitIdx = params.length + 1;
+  params.push(overFetchLimit);
+
+  const contentTypesClause = contentTypesIdx
+    ? `AND content_type = ANY($${contentTypesIdx}::text[])`
+    : "";
+  const resolvedDateFilter = dateFilter.replace(/\$DATE(\d+)/g, (_m, n) => `$${dateStartIdx + parseInt(n, 10) - 1}`);
+
+  if (hybrid) {
+    const sql = `
+            WITH semantic AS (
+              SELECT id, content_type, content_id,
+                     LEFT(content_text, 500) as content_text, metadata,
+                     1 - (embedding <=> $1::vector) as similarity,
+                     ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+              FROM embeddings
+              WHERE 1 - (embedding <=> $1::vector) >= $2
+              ${contentTypesClause}
+              ${resolvedDateFilter}
+              ${lifecycleClause}
+              ORDER BY embedding <=> $1::vector
+              LIMIT 100
+            ),
+            fulltext AS (
+              SELECT id,
+                     ROW_NUMBER() OVER (
+                       ORDER BY ts_rank(to_tsvector('english', content_text),
+                                        websearch_to_tsquery('english', $3)) DESC
+                     ) AS rank
+              FROM embeddings
+              WHERE to_tsvector('english', content_text) @@ websearch_to_tsquery('english', $3)
+              ${contentTypesClause}
+              ${resolvedDateFilter}
+              ${lifecycleClause}
+              LIMIT 100
+            )
+            SELECT s.content_type, s.content_id, s.content_text, s.metadata, s.similarity,
+                   s.rank AS semantic_rank,
+                   f.rank AS fulltext_rank,
+                   COALESCE(1.0/(60 + s.rank), 0) + COALESCE(1.0/(60 + f.rank), 0) AS rrf_score
+            FROM semantic s
+            LEFT JOIN fulltext f ON s.id = f.id
+            ORDER BY rrf_score DESC
+            LIMIT $${finalLimitIdx}
+          `;
+    return { sql, params };
+  }
+
+  // Pure vector search - over-fetch for dedup headroom
+  const sql = `
+            SELECT content_type, content_id,
+                   LEFT(content_text, 500) as content_text, metadata,
+                   1 - (embedding <=> $1::vector) as similarity
+            FROM embeddings
+            WHERE 1 - (embedding <=> $1::vector) >= $2
+            ${contentTypesClause}
+            ${resolvedDateFilter}
+            ${lifecycleClause}
+            ORDER BY embedding <=> $1::vector
+            LIMIT $${finalLimitIdx}
+          `;
+  return { sql, params };
+}
+
+/**
+ * Fetch embeddings rows for graph-only candidates (content the entity graph
+ * surfaced but neither FTS nor vector retrieved), by exact (type, id). Params:
+ * $1 = content types, $2 = content ids (parallel arrays). The lifecycle filter
+ * is added exactly when a requested key is a note, so a fetch that cannot
+ * return a note never touches `notes`.
+ */
+export function buildGraphOnlyFetchSql(
+  types: readonly string[],
+  opts: { includeExpired?: boolean } = {}
+): string {
+  const lifecycleClause = noteLifecycleFilterSql({
+    notesInScope: types.includes("note"),
+    includeExpired: opts.includeExpired ?? false,
+  });
+  return `
+                SELECT content_type, content_id,
+                       LEFT(content_text, 500) AS content_text, metadata
+                FROM embeddings
+                WHERE (content_type, content_id::text) IN (
+                  SELECT unnest($1::text[]), unnest($2::text[])
+                )
+                ${lifecycleClause}
+              `;
 }
 
 const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across all indexed content — handoffs, tasks, notes, artifacts.
@@ -160,9 +358,11 @@ If you know which primitive you want, filter by content_types to reduce noise. I
 - before (optional): ISO date — only return results stored before this date
 Use these to narrow searches to specific time windows (e.g., "what did I decide about X last week").
 
+Lifecycle (notes): a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), carrying the old note's relevance. That result lists the superseded note id(s) that matched under matched_via, and lifecycle_notices holds one plain-English line per redirect ("Note 2b7c… ('…') matched but was superseded by 9e1a… ('…') on 2026-05-02 — showing the successor."). Expired notes are omitted. Every note result carries note_status (active | superseded | expired), superseded_by, superseded_at, valid_until, successor_title (null unless superseded) and matched_via ([] when the note matched directly). Cite the successor, never the superseded note. READ lifecycle_notices whenever it is non-empty. Pass include_superseded: true to get superseded notes as themselves (each flagged and noticed), include_expired: true to include expired notes (flagged and noticed). Other content types have no lifecycle and are unaffected.
+
 READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-empty, address constraints before recommendations.
 
-Returns: {results[], context_envelope, query, total, mode, reranked, reranker_configured, deduplicated, pre_dedup_count}
+Returns: {results[], context_envelope, query, total, mode, reranked, reranker_configured, deduplicated, pre_dedup_count, lifecycle_notices[], redirected, next_step}
 
 reranker_configured is whether this server has a cross-encoder reranker endpoint set (RERANKER_URL). reranked is whether that reranker actually rescored this response. reranker_configured=false means reranking is off by configuration. reranker_configured=true with reranked=false on a response with more than one result means the reranker is unreachable, timing out, or returning bad data — the server logs a [rerank] warning with the reason. Single-result responses are never reranked.
 
@@ -216,6 +416,18 @@ export function registerSearchTools(mcpServer: McpServer): void {
         .string()
         .optional()
         .describe("ISO date — only return results from content stored before this date"),
+      include_superseded: z
+        .boolean()
+        .optional()
+        .describe(
+          "Notes only. false (default): a superseded note that matches is replaced by its current successor (see matched_via and lifecycle_notices). true: return superseded notes as themselves, flagged note_status='superseded' with successor_title."
+        ),
+      include_expired: z
+        .boolean()
+        .optional()
+        .describe(
+          "Notes only. false (default): notes whose valid_until has passed are omitted. true: include them, flagged note_status='expired'."
+        ),
     },
     async (args) => {
       const available = await isEmbeddingAvailable();
@@ -255,108 +467,23 @@ export function registerSearchTools(mcpServer: McpServer): void {
         const useHybrid = args.hybrid ?? true;
         const pgVector = `[${embedding.join(",")}]`;
 
-        // Build date-range filter fragment + params. Applies to both the
-        // vector and FTS sides so filtered-out rows don't consume candidate
-        // slots before RRF fusion. Handoffs use stored_at; tasks use
-        // created_at — both live in metadata JSONB.
-        const dateParams: string[] = [];
-        const dateClauses: string[] = [];
-        if (args.after) {
-          dateParams.push(args.after);
-          const p = `$DATE${dateParams.length}`;
-          dateClauses.push(
-            `COALESCE((metadata->>'stored_at')::timestamptz, (metadata->>'created_at')::timestamptz) >= ${p}::timestamptz`
-          );
-        }
-        if (args.before) {
-          dateParams.push(args.before);
-          const p = `$DATE${dateParams.length}`;
-          dateClauses.push(
-            `COALESCE((metadata->>'stored_at')::timestamptz, (metadata->>'created_at')::timestamptz) <= ${p}::timestamptz`
-          );
-        }
-        const dateFilter = dateClauses.length ? ` AND ${dateClauses.join(" AND ")}` : "";
+        const includeSuperseded = args.include_superseded ?? false;
+        const includeExpired = args.include_expired ?? false;
 
-        let sql: string;
-        let params: unknown[];
-
-        if (useHybrid) {
-          // Param layout: $1=vector, $2=threshold, $3=ftsQuery,
-          // then (optionally) content_types, then date params, then final limit.
-          params = [pgVector, threshold, expandedQuery];
-          const contentTypesIdx = args.content_types?.length ? params.length + 1 : null;
-          if (contentTypesIdx) params.push(args.content_types);
-          const dateStartIdx = params.length + 1;
-          params.push(...dateParams);
-          const finalLimitIdx = params.length + 1;
-          params.push(overFetchLimit);
-
-          const contentTypesClause = contentTypesIdx
-            ? `AND content_type = ANY($${contentTypesIdx}::text[])`
-            : "";
-          const resolvedDateFilter = dateFilter.replace(/\$DATE(\d+)/g, (_m, n) => `$${dateStartIdx + parseInt(n, 10) - 1}`);
-
-          sql = `
-            WITH semantic AS (
-              SELECT id, content_type, content_id,
-                     LEFT(content_text, 500) as content_text, metadata,
-                     1 - (embedding <=> $1::vector) as similarity,
-                     ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
-              FROM embeddings
-              WHERE 1 - (embedding <=> $1::vector) >= $2
-              ${contentTypesClause}
-              ${resolvedDateFilter}
-              ORDER BY embedding <=> $1::vector
-              LIMIT 100
-            ),
-            fulltext AS (
-              SELECT id,
-                     ROW_NUMBER() OVER (
-                       ORDER BY ts_rank(to_tsvector('english', content_text),
-                                        websearch_to_tsquery('english', $3)) DESC
-                     ) AS rank
-              FROM embeddings
-              WHERE to_tsvector('english', content_text) @@ websearch_to_tsquery('english', $3)
-              ${contentTypesClause}
-              ${resolvedDateFilter}
-              LIMIT 100
-            )
-            SELECT s.content_type, s.content_id, s.content_text, s.metadata, s.similarity,
-                   s.rank AS semantic_rank,
-                   f.rank AS fulltext_rank,
-                   COALESCE(1.0/(60 + s.rank), 0) + COALESCE(1.0/(60 + f.rank), 0) AS rrf_score
-            FROM semantic s
-            LEFT JOIN fulltext f ON s.id = f.id
-            ORDER BY rrf_score DESC
-            LIMIT $${finalLimitIdx}
-          `;
-        } else {
-          // Pure vector search — over-fetch for dedup headroom
-          params = [pgVector, threshold];
-          const contentTypesIdx = args.content_types?.length ? params.length + 1 : null;
-          if (contentTypesIdx) params.push(args.content_types);
-          const dateStartIdx = params.length + 1;
-          params.push(...dateParams);
-          const finalLimitIdx = params.length + 1;
-          params.push(overFetchLimit);
-
-          const contentTypesClause = contentTypesIdx
-            ? `AND content_type = ANY($${contentTypesIdx}::text[])`
-            : "";
-          const resolvedDateFilter = dateFilter.replace(/\$DATE(\d+)/g, (_m, n) => `$${dateStartIdx + parseInt(n, 10) - 1}`);
-
-          sql = `
-            SELECT content_type, content_id,
-                   LEFT(content_text, 500) as content_text, metadata,
-                   1 - (embedding <=> $1::vector) as similarity
-            FROM embeddings
-            WHERE 1 - (embedding <=> $1::vector) >= $2
-            ${contentTypesClause}
-            ${resolvedDateFilter}
-            ORDER BY embedding <=> $1::vector
-            LIMIT $${finalLimitIdx}
-          `;
-        }
+        // Candidate SQL (vector / hybrid, date + content-type filters, note
+        // lifecycle filter) is assembled by a pure function so it can be
+        // tested against Postgres without an embedding server.
+        const { sql, params } = buildSearchContextSql({
+          pgVector,
+          threshold,
+          ftsQuery: expandedQuery,
+          hybrid: useHybrid,
+          contentTypes: args.content_types,
+          after: args.after,
+          before: args.before,
+          overFetchLimit,
+          includeExpired,
+        });
 
         const result = await query(sql, params);
         let rows = result.rows as unknown as SearchResultRow[];
@@ -423,14 +550,7 @@ export function registerSearchTools(mcpServer: McpServer): void {
               ids.push(k.slice(sep + 2));
             }
             try {
-              const extraSql = `
-                SELECT content_type, content_id,
-                       LEFT(content_text, 500) AS content_text, metadata
-                FROM embeddings
-                WHERE (content_type, content_id::text) IN (
-                  SELECT unnest($1::text[]), unnest($2::text[])
-                )
-              `;
+              const extraSql = buildGraphOnlyFetchSql(types, { includeExpired });
               const extraResult = await query<{
                 content_type: string;
                 content_id: string;
@@ -466,6 +586,24 @@ export function registerSearchTools(mcpServer: McpServer): void {
           }
         }
 
+        // ── Note lifecycle: redirect, do not hide ───────────────────────
+        // Superseded note candidates are replaced by the head of their chain
+        // (design section 6.1). Runs after candidate selection - including
+        // graph-only rows - and BEFORE dedup so a successor and a stale copy
+        // are judged as the distinct notes they are.
+        let lifecycleNotices: string[] = [];
+        let redirectedCount = 0;
+        try {
+          const redirect = await redirectNoteRows(pool, rows, { includeSuperseded, includeExpired });
+          rows = redirect.rows;
+          lifecycleNotices = redirect.notices;
+          redirectedCount = redirect.redirected;
+        } catch (err) {
+          // notes table unavailable (e.g. migration 013 never applied):
+          // degrade to un-annotated results rather than failing all search.
+          console.warn("[search_context] note lifecycle redirect failed:", (err as Error).message);
+        }
+
         if (rows.length === 0) {
           return {
             content: [{
@@ -473,6 +611,14 @@ export function registerSearchTools(mcpServer: McpServer): void {
               text: JSON.stringify({
                 results: [],
                 message: "No results found. Try broadening your query or lowering the similarity threshold.",
+                lifecycle_notices: lifecycleNotices,
+                ...(lifecycleNotices.length > 0
+                  ? {
+                      next_step:
+                        "Notes matched but none is current - read lifecycle_notices before creating a new note on this topic. " +
+                        LIFECYCLE_NEXT_STEP,
+                    }
+                  : {}),
                 query: args.query,
                 mode: useHybrid ? "hybrid" : "vector",
                 reranked: false,
@@ -554,6 +700,9 @@ export function registerSearchTools(mcpServer: McpServer): void {
           const artifactIds = formatIds(artifactResults.map(r => r.content_id));
           nextStep += ` Artifacts found (${artifactIds}) -- check their status before creating related work.`;
         }
+        if (lifecycleNotices.length > 0) {
+          nextStep += ` ${LIFECYCLE_NEXT_STEP}`;
+        }
 
         const responseData: Record<string, unknown> = {
           results: finalRows.map((r: SearchResultRow & { rerank_score?: number }) => ({
@@ -575,6 +724,16 @@ export function registerSearchTools(mcpServer: McpServer): void {
               : {}),
             ...(r.metadata?.chunk_index != null ? { chunk_index: r.metadata.chunk_index } : {}),
             ...(r.metadata?.source_file ? { source_file: r.metadata.source_file } : {}),
+            ...(r.content_type === "note"
+              ? {
+                  note_status: r.note_status ?? null,
+                  superseded_by: r.superseded_by ?? null,
+                  superseded_at: r.superseded_at ?? null,
+                  valid_until: r.valid_until ?? null,
+                  successor_title: r.successor_title ?? null,
+                  matched_via: r.matched_via ?? [],
+                }
+              : {}),
           })),
           query: args.query,
           total: finalRows.length,
@@ -583,6 +742,8 @@ export function registerSearchTools(mcpServer: McpServer): void {
           reranker_configured: rerankerEnabled,
           deduplicated: true,
           pre_dedup_count: preDedupCount,
+          lifecycle_notices: lifecycleNotices,
+          redirected: redirectedCount,
           context_envelope: envelope,
           next_step: nextStep,
         };

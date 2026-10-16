@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { query } from "../db/client.js";
+import { pool, query } from "../db/client.js";
 import { withTransaction } from "../db/changes.js";
 import { indexNote } from "../embeddings/indexer.js";
 import { config } from "../config.js";
@@ -14,15 +14,26 @@ import {
   effectiveStatus,
   effectiveStatusSql,
   insertNoteInTx,
+  lifecyclePredicateSql,
   parseIsoWithOffset,
   pruneNoteHistoryInTx,
+  resolveChainHeads,
   supersedeNoteInTx,
   updateNoteInTx,
+  type EffectiveNoteStatus,
+  type NoteLifecycleRow,
   type NoteRow,
   type NotePatch,
   type NoteVersionRow,
   type NoteWriteConflict,
 } from "../notes/store.js";
+import {
+  LIFECYCLE_NEXT_STEP,
+  applyLifecycleRedirect,
+  lifecycleFromNoteRow,
+  type RedirectOptions,
+} from "../notes/lifecycle-search.js";
+import type { SearchResultRow } from "./search.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -208,6 +219,10 @@ CONSEQUENCE OF SKIPPING: You will re-derive decisions that were already made, po
 
 Scope filter: when scope is omitted, this tool searches notes across all scopes. Pass scope='work', 'personal', or 'shared' to restrict results to a single context.
 
+Lifecycle: a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), keeping the old note's relevance rank, and its matched_via lists the superseded note id(s) that matched. If the current note also matched directly, the two merge into one result. Expired notes are omitted. 'lifecycle_notices' holds one plain-English line per redirect (and per expired or superseded note you opted to see) - READ it whenever it is non-empty, and cite the successor, never the superseded note. Pass include_superseded: true to get superseded notes as themselves (flagged, with successor_title), include_expired: true to include expired notes (flagged). Each result carries status (active | superseded | expired), superseded_by, superseded_at, successor_title (null unless superseded), valid_until, provenance, version, matched_via ([] when it matched directly).
+
+Returns: { notes[], total_count, redirected, lifecycle_notices[], next_step }. total_count counts the matching candidates BEFORE redirection; because redirects can merge or drop results, notes.length may be smaller than total_count or limit (redirected is the number of candidates replaced by their successor).
+
 Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
 
 const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified, and at least one must be given. Tags and related_task_ids are full-replacement (provide complete arrays). Pass null to clear domain, source_url, provenance, or valid_until. Re-embeds on title/content/domain/tags change.
@@ -234,7 +249,7 @@ const SUPERSEDE_NOTE_DESC = `Retire a note because a newer note replaces it. The
 
 Workflow: (1) create the successor first with create_note — it must already exist; (2) call supersede_note({ id: <old note>, superseded_by: <new note> }). Both notes must be active: a superseded or expired note cannot be the successor (INVALID_SUCCESSOR), and a note cannot supersede itself (INVALID_SUCCESSOR). If the old note is already superseded you get STATUS_CONFLICT with the note as it is now under 'current' (its 'superseded_by' shows what replaced it). Pass expected_version (from get_note) to guard against the old note being edited concurrently: a stale value returns VERSION_CONFLICT with the current note.
 
-Superseded notes keep their content and are marked status 'superseded' with superseded_by pointing at the successor; get_note on the successor lists the old note under 'supersedes'. There is no un-supersede tool. If you superseded the WRONG note, the only recovery is delete_note on the successor — which PERMANENTLY deletes the successor and its history, and reactivates (or re-points down the chain) EVERY note that successor had superseded, not just the one you meant. Do that only when the successor was created for this supersession alone and you will re-create it; otherwise tell the user and leave the chain as it is.
+Superseded notes keep their content and are marked status 'superseded' with superseded_by pointing at the successor; get_note on the successor lists the old note under 'supersedes'. Search follows the chain for readers: search_notes and search_context redirect from a superseded note to its successor by default and say so in lifecycle_notices (pass include_superseded: true to see superseded notes themselves), so superseding does not hide the old wording from a query that only matches it. There is no un-supersede tool. If you superseded the WRONG note, the only recovery is delete_note on the successor — which PERMANENTLY deletes the successor and its history, and reactivates (or re-points down the chain) EVERY note that successor had superseded, not just the one you meant. Do that only when the successor was created for this supersession alone and you will re-create it; otherwise tell the user and leave the chain as it is.
 
 Returns { superseded: { id, title, version, superseded_by, superseded_at }, successor: { id, title } }. Errors: NOT_FOUND (either id missing; the message says which), VERSION_CONFLICT, STATUS_CONFLICT, INVALID_SUCCESSOR.`;
 
@@ -468,6 +483,18 @@ export function registerNoteTools(mcpServer: McpServer): void {
       scope: scopeEnum.nullable().optional().describe("Filter by scope"),
       domain: z.string().optional().describe("Filter by domain"),
       limit: z.number().min(1).max(50).optional().describe("Max results (1-50, default 10)"),
+      include_superseded: z
+        .boolean()
+        .optional()
+        .describe(
+          "false (default): a superseded note that matches is replaced by its current successor (see matched_via and lifecycle_notices). true: return superseded notes as themselves, flagged status 'superseded' with successor_title."
+        ),
+      include_expired: z
+        .boolean()
+        .optional()
+        .describe(
+          "false (default): notes whose valid_until has passed are omitted. true: include them, flagged status 'expired'."
+        ),
     },
     async (args) => {
       if (!args.query?.trim()) {
@@ -475,19 +502,28 @@ export function registerNoteTools(mcpServer: McpServer): void {
       }
 
       try {
+        const includeSuperseded = args.include_superseded ?? false;
+        const includeExpired = args.include_expired ?? false;
+
+        // Candidates span every status except expired (unless opted in).
+        // Superseded notes stay candidates so a query that only matches the
+        // OLD wording still finds the knowledge - they are redirected to the
+        // chain head below ("redirect, do not hide", design section 6.1).
+        // Columns are qualified because the data query self-joins `notes`.
         const conditions: string[] = [
-          `to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, '')) @@ plainto_tsquery('english', $1)`,
+          `to_tsvector('english', coalesce(notes.title, '') || ' ' || coalesce(notes.content, '')) @@ plainto_tsquery('english', $1)`,
+          lifecyclePredicateSql("notes", { excludeSuperseded: false, excludeExpired: !includeExpired }),
         ];
         const params: unknown[] = [args.query];
         let paramIdx = 2;
 
         if (args.scope) {
-          conditions.push(`scope = $${paramIdx++}`);
+          conditions.push(`notes.scope = $${paramIdx++}`);
           params.push(args.scope);
         }
 
         if (args.domain) {
-          conditions.push(`domain = $${paramIdx++}`);
+          conditions.push(`notes.domain = $${paramIdx++}`);
           params.push(args.domain);
         }
 
@@ -500,26 +536,105 @@ export function registerNoteTools(mcpServer: McpServer): void {
         );
         const totalCount = parseInt(countResult.rows[0].count, 10);
 
-        const dataResult = await query<NoteRow & { rank: number }>(
-          `SELECT *, ts_rank(
-            to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, '')),
-            plainto_tsquery('english', $1)
-          ) AS rank
-          FROM notes WHERE ${where}
-          ORDER BY rank DESC
-          LIMIT $${paramIdx}`,
+        type Candidate = NoteRow & {
+          rank: number;
+          effective_status: EffectiveNoteStatus;
+          successor_title: string | null;
+        };
+        const dataResult = await query<Candidate>(
+          `SELECT notes.*,
+                  ${effectiveStatusSql("notes")} AS effective_status,
+                  succ.title AS successor_title,
+                  ts_rank(
+                    to_tsvector('english', coalesce(notes.title, '') || ' ' || coalesce(notes.content, '')),
+                    plainto_tsquery('english', $1)
+                  ) AS rank
+             FROM notes
+             LEFT JOIN notes succ ON succ.id = notes.superseded_by
+            WHERE ${where}
+            ORDER BY rank DESC, notes.created_at DESC, notes.id
+            LIMIT $${paramIdx}`,
           [...params, limit]
         );
 
-        return jsonResponse({
-          notes: dataResult.rows.map((row) => ({
+        // Lifecycle facts for the candidates come straight from the rows.
+        const noteById = new Map<string, Candidate>();
+        const lifecycle = new Map<string, NoteLifecycleRow>();
+        for (const row of dataResult.rows) {
+          noteById.set(row.id, row);
+          lifecycle.set(row.id, lifecycleFromNoteRow(row));
+        }
+
+        // Follow-ups (only when something is superseded): walk chains to their
+        // heads, then load heads that were not themselves candidates.
+        const heads = new Map<string, string>();
+        if (!includeSuperseded) {
+          const supersededIds = dataResult.rows
+            .filter((r) => r.effective_status === "superseded")
+            .map((r) => r.id);
+          if (supersededIds.length > 0) {
+            for (const [from, to] of await resolveChainHeads(pool, supersededIds)) heads.set(from, to);
+            const missing = [...new Set(heads.values())].filter((id) => !noteById.has(id));
+            if (missing.length > 0) {
+              const headResult = await query<Candidate>(
+                `SELECT notes.*, ${effectiveStatusSql("notes")} AS effective_status,
+                        NULL::text AS successor_title, 0::real AS rank
+                   FROM notes WHERE notes.id = ANY($1::uuid[])`,
+                [missing]
+              );
+              for (const row of headResult.rows) {
+                noteById.set(row.id, row);
+                lifecycle.set(row.id, lifecycleFromNoteRow(row));
+              }
+            }
+          }
+        }
+
+        // The pure redirect operates on search-result rows; a candidate's
+        // ts_rank rides in rrf_score so "best score wins" works on merge.
+        const candidateRows: SearchResultRow[] = dataResult.rows.map((r) => ({
+          content_type: "note",
+          content_id: r.id,
+          content_text: "",
+          metadata: {},
+          rrf_score: r.rank,
+        }));
+        const redirect = applyLifecycleRedirect(candidateRows, lifecycle, heads, {
+          includeSuperseded,
+          includeExpired,
+        });
+
+        const notes = redirect.rows.map((r) => {
+          const row = noteById.get(r.content_id)!;
+          return {
             ...formatNote(row),
-            rank: row.rank,
-          })),
+            // Computed by Postgres (same clock as the candidate predicate).
+            status: r.note_status ?? row.effective_status,
+            successor_title: r.successor_title ?? null,
+            matched_via: r.matched_via ?? [],
+            rank: r.rrf_score ?? 0,
+          };
+        });
+
+        let nextStep: string;
+        if (notes.length > 0) {
+          nextStep =
+            "Notes contain documented decisions. Reference them by title in your response. Do not re-derive conclusions that contradict these notes.";
+        } else if (redirect.notices.length > 0) {
+          nextStep =
+            "Matching notes exist but none is current - read lifecycle_notices before creating a new note on this topic.";
+        } else {
+          nextStep =
+            "No matching notes found. If making a new decision on this topic, consider creating a note to document it.";
+        }
+        if (redirect.notices.length > 0) nextStep += ` ${LIFECYCLE_NEXT_STEP}`;
+
+        return jsonResponse({
+          notes,
           total_count: totalCount,
-          next_step: totalCount > 0
-            ? "Notes contain documented decisions. Reference them by title in your response. Do not re-derive conclusions that contradict these notes."
-            : "No matching notes found. If making a new decision on this topic, consider creating a note to document it.",
+          redirected: redirect.redirected,
+          lifecycle_notices: redirect.notices,
+          next_step: nextStep,
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");

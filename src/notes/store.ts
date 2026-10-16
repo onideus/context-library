@@ -658,3 +658,93 @@ export async function resolveChainHeads(
   for (const r of res.rows) result.set(r.start_id, r.head_id);
   return result;
 }
+
+// ── Search-time lifecycle reads ──────────────────────────────────────
+
+/**
+ * Lifecycle facts about one note, as search needs them. `status` is the
+ * COMPUTED status (active | superseded | expired) evaluated by Postgres with
+ * its own clock, so it agrees exactly with the `valid_until > now()` candidate
+ * predicate used in the same request. Timestamps are ISO strings so the
+ * redirect logic stays pure and clock-free.
+ */
+export interface NoteLifecycleRow {
+  id: string;
+  title: string;
+  status: EffectiveNoteStatus;
+  superseded_by: string | null;
+  superseded_at: string | null;
+  valid_until: string | null;
+  provenance: Provenance | null;
+  version: number;
+  /** Title of the DIRECT successor; null unless the note is superseded. */
+  successor_title: string | null;
+  scope: NoteScope;
+  created_at: string;
+  /** First 500 chars of "<title>\n<content>" — enough to show a head that has no embeddings row. */
+  text_preview: string;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isoOrNull(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+/**
+ * Fetch lifecycle facts for a set of note ids in ONE query (successor titles
+ * come from a self-join). Ids that are not UUIDs, or that name no note, are
+ * simply absent from the result — callers treat absence as "this note no
+ * longer exists". Read-only; safe on a pool or a client.
+ */
+export async function fetchNoteLifecycle(
+  exec: { query: PoolClient["query"] },
+  ids: string[]
+): Promise<Map<string, NoteLifecycleRow>> {
+  const result = new Map<string, NoteLifecycleRow>();
+  const valid = [...new Set(ids)].filter((id) => UUID_RE.test(id));
+  if (valid.length === 0) return result;
+  const res = await exec.query<{
+    id: string;
+    title: string;
+    effective_status: EffectiveNoteStatus;
+    superseded_by: string | null;
+    superseded_at: Date | string | null;
+    valid_until: Date | string | null;
+    provenance: Provenance | null;
+    version: number;
+    successor_title: string | null;
+    scope: NoteScope;
+    created_at: Date | string;
+    text_preview: string;
+  }>(
+    `SELECT n.id, n.title,
+            ${effectiveStatusSql("n")} AS effective_status,
+            n.superseded_by, n.superseded_at, n.valid_until, n.provenance, n.version,
+            succ.title AS successor_title,
+            n.scope, n.created_at,
+            LEFT(n.title || chr(10) || n.content, 500) AS text_preview
+       FROM notes n
+       LEFT JOIN notes succ ON succ.id = n.superseded_by
+      WHERE n.id = ANY($1::uuid[])`,
+    [valid]
+  );
+  for (const r of res.rows) {
+    result.set(r.id, {
+      id: r.id,
+      title: r.title,
+      status: r.effective_status,
+      superseded_by: r.superseded_by,
+      superseded_at: isoOrNull(r.superseded_at),
+      valid_until: isoOrNull(r.valid_until),
+      provenance: r.provenance,
+      version: r.version,
+      successor_title: r.successor_title,
+      scope: r.scope,
+      created_at: isoOrNull(r.created_at) ?? "",
+      text_preview: r.text_preview,
+    });
+  }
+  return result;
+}

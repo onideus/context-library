@@ -143,3 +143,88 @@ describe("search_context source deduplication", () => {
     expect(deduped).toHaveLength(2);
   });
 });
+
+/** A note search-result row (embeddings-shaped: no source_file, uuid-like content_id). */
+function makeNoteRow(contentText: string, contentId: string, extra?: { rrf_score?: number }) {
+  return {
+    content_type: "note",
+    content_id: contentId,
+    content_text: contentText,
+    metadata: { note_id: contentId, scope: "work", created_at: "2026-03-01T00:00:00.000Z" },
+    similarity: 0.8,
+    rrf_score: extra?.rrf_score ?? 0.03,
+  };
+}
+
+describe("search_context dedup - note rows", () => {
+  // A copy-and-edit successor shares its opening text with the stale note it
+  // replaces. Fingerprinting the first 500 chars would collapse them and could
+  // keep the stale one, so note rows with different ids must both survive.
+  const sharedOpening =
+    "Acme Corp deploy policy. All production deploys go through the release train. " +
+    "Deploys are scheduled for Friday afternoons after the weekly review meeting concludes.";
+
+  it("keeps two note rows with identical text and different content_ids", () => {
+    const stale = makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111", { rrf_score: 0.04 });
+    const successor = makeNoteRow(sharedOpening, "22222222-2222-4222-8222-222222222222", { rrf_score: 0.03 });
+
+    const { deduped, preDedupCount } = deduplicateResults([stale, successor]);
+
+    expect(preDedupCount).toBe(2);
+    expect(deduped.map((r) => r.content_id).sort()).toEqual([stale.content_id, successor.content_id].sort());
+  });
+
+  it("keeps every distinct note in a larger same-text group and folds a same-text handoff row into them", () => {
+    const rows = [
+      makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111"),
+      makeRow(sharedOpening, "2026-03-21T23-12-37-052Z-eeee5555.json"),
+      makeNoteRow(sharedOpening, "22222222-2222-4222-8222-222222222222"),
+      makeNoteRow(sharedOpening, "33333333-3333-4333-8333-333333333333"),
+    ];
+
+    const { deduped } = deduplicateResults(rows);
+
+    expect(deduped.filter((r) => r.content_type === "note")).toHaveLength(3);
+    expect(deduped.filter((r) => r.content_type === "handoff")).toHaveLength(0);
+  });
+
+  it("still collapses a note row and a handoff row with the same text, as before", () => {
+    const note = makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111");
+    const handoff = makeRow(sharedOpening, "2026-03-21T23-12-37-052Z-eeee5555.json");
+
+    const { deduped } = deduplicateResults([handoff, note]);
+
+    expect(deduped).toHaveLength(1);
+    // The row without a source_file sorts first - the same rule as before the note exception.
+    expect(deduped[0].content_type).toBe("note");
+  });
+
+  it("collapses repeats of the SAME note id and still collapses handoff-only groups", () => {
+    const note = makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111");
+    const noteAgain = makeNoteRow(sharedOpening, "11111111-1111-4111-8111-111111111111");
+    const handoffText = "Handoff only text that is shared by two chunks across two different session files.";
+    const rows = [
+      note,
+      noteAgain,
+      makeRow(handoffText, "2026-04-01T12-00-00-000Z-new111.json"),
+      makeRow(handoffText, "2026-03-15T08-30-00-000Z-old222.json"),
+    ];
+
+    const { deduped } = deduplicateResults(rows);
+
+    expect(deduped).toHaveLength(2);
+    expect(deduped.filter((r) => r.content_type === "note")).toHaveLength(1);
+    const handoff = deduped.find((r) => r.content_type === "handoff");
+    expect(handoff?.metadata.source_file).toBe("2026-03-15T08-30-00-000Z-old222.json");
+  });
+
+  it("does not change task rows: same-text tasks still collapse", () => {
+    const text = "Rotate the staging credentials for project-alpha before the next release window opens.";
+    const rows = [
+      { content_type: "task", content_id: "task-1", content_text: text, metadata: {}, similarity: 0.9 },
+      { content_type: "task", content_id: "task-2", content_text: text, metadata: {}, similarity: 0.85 },
+    ];
+
+    expect(deduplicateResults(rows).deduped).toHaveLength(1);
+  });
+});
