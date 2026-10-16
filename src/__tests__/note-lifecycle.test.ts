@@ -168,9 +168,12 @@ describe.skipIf(!pgAvailable)("Note Lifecycle", () => {
       shell: true,
     });
 
-    // Uncomment for debugging:
-    // serverProcess.stderr?.on("data", (d) => process.stderr.write(d));
-    // serverProcess.stdout?.on("data", (d) => process.stdout.write(d));
+    // Continuously drain child stdio so pipe buffers don't fill and block the
+    // child process when this suite runs alongside other parallel workers
+    // (same pattern as server.test.ts / handoff-nav.test.ts). Swap the no-op
+    // handlers for process.stderr.write(d) when debugging.
+    serverProcess.stderr?.on("data", () => {});
+    serverProcess.stdout?.on("data", () => {});
 
     await waitForServer(BASE_URL);
   }, 30_000);
