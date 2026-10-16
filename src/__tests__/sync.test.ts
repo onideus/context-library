@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { rm, mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
+import type { Client as PgClient } from "pg";
 
 /**
  * Sync foundation integration tests.
@@ -15,6 +16,15 @@ import { join } from "node:path";
  *   - individual stale-op rejection (never batch-fail)
  *   - conditional-UPDATE status transition race
  *   - patch_handoff expected_source precondition (HANDOFF_CONFLICT)
+ *
+ * and, for the note-lifecycle work (docs/design/note-lifecycle.md section 8):
+ *   - note snapshots carrying the lifecycle/provenance/version fields
+ *   - the corrected base_updated_at comparison for notes
+ *   - expected_version / expected_status preconditions and the strict
+ *     precondition schema
+ *   - the notes-only `supersede` op (and UNSUPPORTED_OP for tasks/artifacts)
+ *   - delete-time chain splice results (`relinked`)
+ *   - pending_embeddings enqueue on the push path
  *
  * Requires a running PostgreSQL instance. Skips gracefully otherwise.
  */
@@ -952,6 +962,791 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     });
   });
 
+  describe("note lifecycle over sync", () => {
+    // Design: docs/design/note-lifecycle.md section 8. The push path shares
+    // one write path with the MCP note tools (src/notes/store.ts). These
+    // tests pin the wire-visible behaviour: the new snapshot fields, the
+    // corrected base_updated_at comparison, expected_version /
+    // expected_status, the supersede op, the strict precondition schema, the
+    // delete-time chain splice, and the pending_embeddings enqueue.
+
+    interface PushResult {
+      op_uuid: string;
+      status: string;
+      entity_type: string;
+      entity_id: string;
+      op: string;
+      seq?: string;
+      snapshot?: any;
+      relinked?: Array<{ entity_id: string; snapshot: any }>;
+      conflict?: { reason: string; current: any; detail?: any };
+      error?: string;
+    }
+
+    function noteOp(
+      op: string,
+      entityId: string,
+      payload?: Record<string, unknown>,
+      precondition?: Record<string, unknown>,
+      opUuid: string = randomUUID()
+    ) {
+      return {
+        op_uuid: opUuid,
+        entity_type: "note" as const,
+        entity_id: entityId,
+        op,
+        ...(payload ? { payload } : {}),
+        ...(precondition ? { precondition } : {}),
+      };
+    }
+
+    async function pushOne(op: Record<string, unknown>): Promise<PushResult> {
+      const res = await syncPost("/sync/push", { ops: [op] });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { results: PushResult[] };
+      return body.results[0];
+    }
+
+    async function pushNoteInsert(payload: Record<string, unknown> = {}) {
+      const id = randomUUID();
+      const result = await pushOne(
+        noteOp("insert", id, {
+          title: "Acme Corp deploy policy",
+          content: "Deploys happen on Fridays.",
+          scope: "personal",
+          ...payload,
+        })
+      );
+      expect(result.status).toBe("applied");
+      return { id, result };
+    }
+
+    async function opLogRows(opUuid: string) {
+      return withPg(async (c) => {
+        const res = await c.query(
+          `SELECT entity_type, entity_id, op, change_seq::text AS change_seq
+             FROM sync_op_log WHERE op_uuid = $1`,
+          [opUuid]
+        );
+        return res.rows as Array<{
+          entity_type: string;
+          entity_id: string;
+          op: string;
+          change_seq: string | null;
+        }>;
+      });
+    }
+
+    async function changesFor(entityType: string, entityId: string, afterSeq: string) {
+      return withPg(async (c) => {
+        const res = await c.query(
+          `SELECT seq::text AS seq, op FROM changes
+            WHERE entity_type = $1 AND entity_id = $2 AND seq > $3::bigint
+            ORDER BY seq`,
+          [entityType, entityId, afterSeq]
+        );
+        return res.rows as Array<{ seq: string; op: string }>;
+      });
+    }
+
+    async function noteRow(id: string) {
+      return withPg(async (c) => {
+        const res = await c.query("SELECT * FROM notes WHERE id = $1", [id]);
+        return res.rows[0] as Record<string, any> | undefined;
+      });
+    }
+
+    async function pendingEmbeddingCount(id: string) {
+      return withPg(async (c) => {
+        const res = await c.query(
+          `SELECT count(*)::int AS n FROM pending_embeddings
+            WHERE content_type = 'note' AND content_id = $1`,
+          [id]
+        );
+        return res.rows[0].n as number;
+      });
+    }
+
+    async function clearPendingEmbedding(id: string) {
+      await withPg((c) =>
+        c.query(
+          "DELETE FROM pending_embeddings WHERE content_type = 'note' AND content_id = $1",
+          [id]
+        )
+      );
+    }
+
+    describe("snapshots", () => {
+      it("pull snapshots carry status, superseded_by, superseded_at, valid_until, provenance and version", async () => {
+        const before = await maxSeqDb();
+        const { id } = await pushNoteInsert({
+          provenance: "stated",
+          valid_until: "2031-06-01T12:00:00Z",
+        });
+        // A note written through the MCP tool, with none of the new fields set.
+        const viaMcp = await callTool("create_note", {
+          title: "Plain note via MCP",
+          content: "no lifecycle fields supplied",
+          scope: "personal",
+        });
+        expect(viaMcp.error).toBeUndefined();
+
+        const body = await (await syncGet(`/sync/changes?cursor=${before}&limit=100`)).json();
+
+        const pushed = body.snapshots[`note:${id}`];
+        expect(pushed).toMatchObject({
+          id,
+          status: "active",
+          superseded_by: null,
+          superseded_at: null,
+          provenance: "stated",
+          version: 1,
+        });
+        expect(new Date(pushed.valid_until).toISOString()).toBe("2031-06-01T12:00:00.000Z");
+
+        const mcp = body.snapshots[`note:${viaMcp.id}`];
+        expect(mcp).toMatchObject({
+          status: "active",
+          superseded_by: null,
+          superseded_at: null,
+          valid_until: null,
+          provenance: null,
+          version: 1,
+        });
+      });
+    });
+
+    describe("base_updated_at (Date-vs-ISO regression)", () => {
+      it("applies an update whose base_updated_at is the ISO string from the prior response", async () => {
+        const { id, result } = await pushNoteInsert();
+        const base = result.snapshot.updated_at as string;
+        expect(typeof base).toBe("string");
+
+        const first = await pushOne(
+          noteOp("update", id, { content: "edited once" }, { base_updated_at: base })
+        );
+        expect(first.status).toBe("applied");
+        expect(first.snapshot.content).toBe("edited once");
+
+        // The same (now stale) base must be rejected, with the current row.
+        const stale = await pushOne(
+          noteOp("update", id, { content: "edited from stale base" }, { base_updated_at: base })
+        );
+        expect(stale.status).toBe("conflict");
+        expect(stale.conflict!.reason).toBe("STALE_BASE");
+        expect(stale.conflict!.current.content).toBe("edited once");
+
+        // Chaining on the fresh updated_at works again.
+        const second = await pushOne(
+          noteOp(
+            "update",
+            id,
+            { content: "edited twice" },
+            { base_updated_at: first.snapshot.updated_at }
+          )
+        );
+        expect(second.status).toBe("applied");
+        expect(second.snapshot.content).toBe("edited twice");
+      });
+
+      it("applies an update using base_updated_at read from a /sync/changes snapshot", async () => {
+        const before = await maxSeqDb();
+        const viaMcp = await callTool("create_note", {
+          title: "Base from pull snapshot",
+          content: "before",
+          scope: "personal",
+        });
+        const body = await (await syncGet(`/sync/changes?cursor=${before}&limit=100`)).json();
+        const base = body.snapshots[`note:${viaMcp.id}`].updated_at as string;
+
+        const res = await pushOne(
+          noteOp("update", viaMcp.id, { content: "after" }, { base_updated_at: base })
+        );
+        expect(res.status).toBe("applied");
+        expect(res.snapshot.content).toBe("after");
+      });
+    });
+
+    describe("expected_version", () => {
+      it("rejects a stale expected_version with VERSION_CONFLICT carrying the current row", async () => {
+        const { id } = await pushNoteInsert();
+        const bump = await pushOne(noteOp("update", id, { content: "second revision" }));
+        expect(bump.status).toBe("applied");
+        expect(bump.snapshot.version).toBe(2);
+
+        const stale = await pushOne(
+          noteOp("update", id, { content: "from a stale client" }, { expected_version: 1 })
+        );
+        expect(stale.status).toBe("conflict");
+        expect(stale.conflict!.reason).toBe("VERSION_CONFLICT");
+        expect(stale.conflict!.current.version).toBe(2);
+        expect(stale.conflict!.current.content).toBe("second revision");
+        expect((await noteRow(id))!.content).toBe("second revision");
+
+        const fresh = await pushOne(
+          noteOp("update", id, { content: "third revision" }, { expected_version: 2 })
+        );
+        expect(fresh.status).toBe("applied");
+        expect(fresh.snapshot.version).toBe(3);
+      });
+
+      it("checks expected_version before base_updated_at and expected_status", async () => {
+        const { id } = await pushNoteInsert();
+        await pushOne(noteOp("update", id, { content: "bump" }));
+
+        const res = await pushOne(
+          noteOp(
+            "update",
+            id,
+            { content: "all three preconditions are wrong" },
+            {
+              expected_version: 1,
+              expected_status: "superseded",
+              base_updated_at: "1999-01-01T00:00:00.000Z",
+            }
+          )
+        );
+        expect(res.status).toBe("conflict");
+        expect(res.conflict!.reason).toBe("VERSION_CONFLICT");
+      });
+
+      it("returns NOT_FOUND (current null) when updating a note that does not exist", async () => {
+        const res = await pushOne(
+          noteOp("update", randomUUID(), { content: "orphan" }, { expected_version: 1 })
+        );
+        expect(res.status).toBe("conflict");
+        expect(res.conflict!.reason).toBe("NOT_FOUND");
+        expect(res.conflict!.current).toBeNull();
+      });
+    });
+
+    describe("expected_status on notes", () => {
+      it("rejects expected_status 'superseded' on an active note with STATUS_CONFLICT", async () => {
+        const { id } = await pushNoteInsert();
+        const res = await pushOne(
+          noteOp("update", id, { title: "should not apply" }, { expected_status: "superseded" })
+        );
+        expect(res.status).toBe("conflict");
+        expect(res.conflict!.reason).toBe("STATUS_CONFLICT");
+        expect(res.conflict!.current.status).toBe("active");
+        expect((await noteRow(id))!.title).toBe("Acme Corp deploy policy");
+      });
+
+      it("applies a title-only update when expected_status matches", async () => {
+        const { id } = await pushNoteInsert();
+        const res = await pushOne(
+          noteOp("update", id, { title: "renamed" }, { expected_status: "active" })
+        );
+        expect(res.status).toBe("applied");
+        expect(res.snapshot.title).toBe("renamed");
+      });
+    });
+
+    describe("provenance and valid_until", () => {
+      it("applies provenance and valid_until (offset normalised to UTC) and clears them with null", async () => {
+        const { id } = await pushNoteInsert();
+
+        const set = await pushOne(
+          noteOp("update", id, {
+            provenance: "inferred",
+            valid_until: "2030-01-01T00:00:00+02:00",
+          })
+        );
+        expect(set.status).toBe("applied");
+        expect(set.snapshot.provenance).toBe("inferred");
+        expect(new Date(set.snapshot.valid_until).toISOString()).toBe("2029-12-31T22:00:00.000Z");
+        const stored = await noteRow(id);
+        expect(stored!.provenance).toBe("inferred");
+        expect((stored!.valid_until as Date).toISOString()).toBe("2029-12-31T22:00:00.000Z");
+
+        const cleared = await pushOne(
+          noteOp("update", id, { provenance: null, valid_until: null })
+        );
+        expect(cleared.status).toBe("applied");
+        expect(cleared.snapshot.provenance).toBeNull();
+        expect(cleared.snapshot.valid_until).toBeNull();
+      });
+
+      it("rejects a valid_until without an offset as a per-op error and rolls the claim back", async () => {
+        const { id } = await pushNoteInsert();
+        const opUuid = randomUUID();
+        const bad = await pushOne(
+          noteOp("update", id, { valid_until: "2030-01-01T00:00:00" }, undefined, opUuid)
+        );
+        expect(bad.status).toBe("error");
+        expect(bad.error).toContain("VALIDATION_ERROR");
+        expect(bad.error).toMatch(/offset/i);
+        expect((await noteRow(id))!.valid_until).toBeNull();
+        expect(await opLogRows(opUuid)).toHaveLength(0);
+
+        // Corrected retry with the SAME op_uuid is applied, not deduplicated.
+        const retry = await pushOne(
+          noteOp("update", id, { valid_until: "2030-01-01T00:00:00Z" }, undefined, opUuid)
+        );
+        expect(retry.status).toBe("applied");
+      });
+
+      it("rejects an insert with an offset-less valid_until and creates no note", async () => {
+        const id = randomUUID();
+        const res = await pushOne(
+          noteOp("insert", id, { title: "bad expiry", valid_until: "2030-01-01" })
+        );
+        expect(res.status).toBe("error");
+        expect(res.error).toMatch(/offset/i);
+        expect(await noteRow(id)).toBeUndefined();
+      });
+
+      it("rejects an unknown provenance value", async () => {
+        const { id } = await pushNoteInsert();
+        const res = await pushOne(noteOp("update", id, { provenance: "guessed" }));
+        expect(res.status).toBe("error");
+        expect((await noteRow(id))!.provenance).toBeNull();
+      });
+    });
+
+    describe("supersede op", () => {
+      it("marks the old note superseded, bumps its version, and logs exactly one change row", async () => {
+        const { id: oldId } = await pushNoteInsert({ title: "Acme Corp Friday deploys" });
+        const { id: newId } = await pushNoteInsert({ title: "Acme Corp deploy freeze" });
+        const cursor = await maxSeqDb();
+
+        const opUuid = randomUUID();
+        const res = await pushOne(
+          noteOp("supersede", oldId, { superseded_by: newId }, { expected_version: 1 }, opUuid)
+        );
+        expect(res.status).toBe("applied");
+        expect(res.op).toBe("supersede");
+        expect(res.seq).toBeDefined();
+        expect(res.snapshot).toMatchObject({
+          id: oldId,
+          status: "superseded",
+          superseded_by: newId,
+          version: 2,
+        });
+        expect(res.snapshot.superseded_at).not.toBeNull();
+
+        // Exactly one new change row, for the OLD note (an update); none for the successor.
+        expect(await changesFor("note", oldId, cursor)).toEqual([{ seq: res.seq, op: "update" }]);
+        expect(await changesFor("note", newId, cursor)).toHaveLength(0);
+
+        // The dedupe-log row records the op kind and links the change.
+        const logRows = await opLogRows(opUuid);
+        expect(logRows).toHaveLength(1);
+        expect(logRows[0]).toMatchObject({ op: "supersede", change_seq: res.seq });
+
+        // The successor is untouched.
+        expect((await noteRow(newId))!.version).toBe(1);
+
+        // Pullers see the lifecycle move.
+        const pull = await (await syncGet(`/sync/changes?cursor=${cursor}&limit=100`)).json();
+        expect(pull.snapshots[`note:${oldId}`]).toMatchObject({
+          status: "superseded",
+          superseded_by: newId,
+        });
+      });
+
+      it("rolls the claim back on a stale expected_version, then applies a corrected retry (not dedup)", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: newId } = await pushNoteInsert();
+        const opUuid = randomUUID();
+
+        const stale = await pushOne(
+          noteOp("supersede", oldId, { superseded_by: newId }, { expected_version: 5 }, opUuid)
+        );
+        expect(stale.status).toBe("conflict");
+        expect(stale.conflict!.reason).toBe("VERSION_CONFLICT");
+        expect(stale.conflict!.current.version).toBe(1);
+        expect(await opLogRows(opUuid)).toHaveLength(0);
+        expect((await noteRow(oldId))!.status).toBe("active");
+
+        const retry = await pushOne(
+          noteOp("supersede", oldId, { superseded_by: newId }, { expected_version: 1 }, opUuid)
+        );
+        expect(retry.status).toBe("applied");
+        expect(retry.snapshot.status).toBe("superseded");
+        expect(await opLogRows(opUuid)).toHaveLength(1);
+      });
+
+      it("enforces expected_status on the stored status", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: newId } = await pushNoteInsert();
+        const res = await pushOne(
+          noteOp("supersede", oldId, { superseded_by: newId }, { expected_status: "superseded" })
+        );
+        expect(res.status).toBe("conflict");
+        expect(res.conflict!.reason).toBe("STATUS_CONFLICT");
+        expect((await noteRow(oldId))!.status).toBe("active");
+      });
+
+      it("rejects self-supersession with INVALID_SUCCESSOR", async () => {
+        const { id } = await pushNoteInsert();
+        const res = await pushOne(noteOp("supersede", id, { superseded_by: id }));
+        expect(res.status).toBe("conflict");
+        expect(res.conflict!.reason).toBe("INVALID_SUCCESSOR");
+        expect(typeof res.conflict!.detail.reason).toBe("string");
+        expect((await noteRow(id))!.status).toBe("active");
+      });
+
+      it("rejects superseding a note that is already superseded with STATUS_CONFLICT", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: firstId } = await pushNoteInsert();
+        const { id: secondId } = await pushNoteInsert();
+        const ok = await pushOne(noteOp("supersede", oldId, { superseded_by: firstId }));
+        expect(ok.status).toBe("applied");
+
+        const again = await pushOne(noteOp("supersede", oldId, { superseded_by: secondId }));
+        expect(again.status).toBe("conflict");
+        expect(again.conflict!.reason).toBe("STATUS_CONFLICT");
+        expect(again.conflict!.current.superseded_by).toBe(firstId);
+      });
+
+      it("rejects a successor that is itself superseded with INVALID_SUCCESSOR", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: staleSuccessor } = await pushNoteInsert();
+        const { id: head } = await pushNoteInsert();
+        await pushOne(noteOp("supersede", staleSuccessor, { superseded_by: head }));
+
+        const res = await pushOne(noteOp("supersede", oldId, { superseded_by: staleSuccessor }));
+        expect(res.status).toBe("conflict");
+        expect(res.conflict!.reason).toBe("INVALID_SUCCESSOR");
+        expect((await noteRow(oldId))!.status).toBe("active");
+      });
+
+      it("returns NOT_FOUND naming which id is missing", async () => {
+        const { id } = await pushNoteInsert();
+
+        const missingSuccessor = await pushOne(
+          noteOp("supersede", id, { superseded_by: randomUUID() })
+        );
+        expect(missingSuccessor.status).toBe("conflict");
+        expect(missingSuccessor.conflict!.reason).toBe("NOT_FOUND");
+        expect(missingSuccessor.conflict!.detail).toEqual({ missing: "superseded_by" });
+        expect((await noteRow(id))!.status).toBe("active");
+
+        const missingOld = await pushOne(
+          noteOp("supersede", randomUUID(), { superseded_by: id })
+        );
+        expect(missingOld.status).toBe("conflict");
+        expect(missingOld.conflict!.reason).toBe("NOT_FOUND");
+        expect(missingOld.conflict!.detail).toEqual({ missing: "id" });
+      });
+
+      it("rejects a payload without a UUID superseded_by as a per-op error", async () => {
+        const { id } = await pushNoteInsert();
+        const res = await pushOne(noteOp("supersede", id, { superseded_by: "not-a-uuid" }));
+        expect(res.status).toBe("error");
+        expect((await noteRow(id))!.status).toBe("active");
+      });
+
+      it("replaying a successful supersede op_uuid returns dedup with the same seq", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: newId } = await pushNoteInsert();
+        const op = noteOp("supersede", oldId, { superseded_by: newId }, { expected_version: 1 });
+
+        const first = await pushOne(op);
+        expect(first.status).toBe("applied");
+        const cursor = await maxSeqDb();
+
+        const replay = await pushOne(op);
+        expect(replay.status).toBe("dedup");
+        expect(replay.seq).toBe(first.seq);
+        // The replay did not re-apply anything.
+        expect(await maxSeqDb()).toBe(cursor);
+        expect((await noteRow(oldId))!.version).toBe(2);
+      });
+    });
+
+    describe("supersede is notes-only (UNSUPPORTED_OP)", () => {
+      it("rejects supersede on a task per op, with no dedupe-log row and the task unchanged", async () => {
+        const t = await callTool("create_task", { title: "Task not supersedable", scope: "personal" });
+        const cursor = await maxSeqDb();
+        const opUuid = randomUUID();
+        const res = await pushOne({
+          op_uuid: opUuid,
+          entity_type: "task",
+          entity_id: t.id,
+          op: "supersede",
+          payload: { superseded_by: randomUUID() },
+        });
+        expect(res.status).toBe("error");
+        expect(res.error).toContain("UNSUPPORTED_OP");
+        expect(await opLogRows(opUuid)).toHaveLength(0);
+        expect(await changesFor("task", t.id, cursor)).toHaveLength(0);
+        const reread = await callTool("get_task", { id: t.id });
+        expect(reread.title).toBe("Task not supersedable");
+      });
+
+      it("rejects supersede on an artifact per op without applying it as an update", async () => {
+        const a = await callTool("store_artifact", {
+          title: "Artifact not supersedable",
+          artifact_type: "cc-prompt",
+          scope: "personal",
+          content: "irrelevant",
+        });
+        const cursor = await maxSeqDb();
+        const opUuid = randomUUID();
+        const res = await pushOne({
+          op_uuid: opUuid,
+          entity_type: "artifact",
+          entity_id: a.id,
+          op: "supersede",
+          payload: { title: "must not be applied as an update" },
+        });
+        expect(res.status).toBe("error");
+        expect(res.error).toContain("UNSUPPORTED_OP");
+        expect(await opLogRows(opUuid)).toHaveLength(0);
+        expect(await changesFor("artifact", a.id, cursor)).toHaveLength(0);
+        const reread = await callTool("get_artifact", { id: a.id });
+        expect(reread.title).toBe("Artifact not supersedable");
+      });
+
+      it("does not poison the batch: a neighbouring valid op still applies", async () => {
+        const t = await callTool("create_task", { title: "Batch neighbour", scope: "personal" });
+        const good = noteOp("insert", randomUUID(), { title: "Neighbour note" });
+        const res = await syncPost("/sync/push", {
+          ops: [
+            {
+              op_uuid: randomUUID(),
+              entity_type: "task",
+              entity_id: t.id,
+              op: "supersede",
+              payload: { superseded_by: randomUUID() },
+            },
+            good,
+          ],
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { results: PushResult[] };
+        expect(body.results[0].status).toBe("error");
+        expect(body.results[1].status).toBe("applied");
+      });
+    });
+
+    describe("strict precondition", () => {
+      it("rejects an unknown precondition key with 400 INVALID_BODY and applies nothing", async () => {
+        const { id } = await pushNoteInsert();
+        const res = await syncPost("/sync/push", {
+          ops: [noteOp("update", id, { content: "must not apply" }, { expected_stauts: "active" })],
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.code).toBe("INVALID_BODY");
+        expect((await noteRow(id))!.content).toBe("Deploys happen on Fridays.");
+      });
+
+      it("rejects a non-integer or non-positive expected_version with 400 INVALID_BODY", async () => {
+        const { id } = await pushNoteInsert();
+        for (const bad of [0, -1, 1.5, "2"]) {
+          const res = await syncPost("/sync/push", {
+            ops: [noteOp("update", id, { content: "x" }, { expected_version: bad })],
+          });
+          expect(res.status).toBe(400);
+          expect((await res.json()).code).toBe("INVALID_BODY");
+        }
+      });
+
+      it("rejects expected_version where the server cannot enforce it, instead of ignoring it", async () => {
+        const t = await callTool("create_task", { title: "Version-less task", scope: "personal" });
+        const onTask = await pushOne({
+          op_uuid: randomUUID(),
+          entity_type: "task",
+          entity_id: t.id,
+          op: "update",
+          payload: { title: "must not apply" },
+          precondition: { expected_version: 1 },
+        });
+        expect(onTask.status).toBe("error");
+        expect(onTask.error).toContain("expected_version");
+        expect((await callTool("get_task", { id: t.id })).title).toBe("Version-less task");
+
+        const { id } = await pushNoteInsert();
+        const onDelete = await pushOne(noteOp("delete", id, undefined, { expected_version: 1 }));
+        expect(onDelete.status).toBe("error");
+        expect(await noteRow(id)).toBeDefined();
+      });
+
+      it("rejects base_updated_at on supersede", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: newId } = await pushNoteInsert();
+        const res = await pushOne(
+          noteOp(
+            "supersede",
+            oldId,
+            { superseded_by: newId },
+            { base_updated_at: "2030-01-01T00:00:00.000Z" }
+          )
+        );
+        expect(res.status).toBe("error");
+        expect(res.error).toContain("base_updated_at");
+        expect((await noteRow(oldId))!.status).toBe("active");
+      });
+    });
+
+    describe("delete splices supersession chains", () => {
+      it("reactivates the predecessor when the deleted note was the end of the chain", async () => {
+        const { id: oldId } = await pushNoteInsert({ title: "Acme Corp Friday deploys" });
+        const { id: headId } = await pushNoteInsert({ title: "Acme Corp deploy freeze" });
+        const sup = await pushOne(noteOp("supersede", oldId, { superseded_by: headId }));
+        expect(sup.status).toBe("applied");
+        const cursor = await maxSeqDb();
+
+        const del = await pushOne(noteOp("delete", headId));
+        expect(del.status).toBe("applied");
+        expect(del.snapshot).toBeNull();
+        expect(del.seq).toBeDefined();
+        expect(del.relinked).toHaveLength(1);
+        expect(del.relinked![0].entity_id).toBe(oldId);
+        expect(del.relinked![0].snapshot).toMatchObject({
+          id: oldId,
+          status: "active",
+          superseded_by: null,
+          superseded_at: null,
+          version: 3,
+        });
+
+        // Both the relinked predecessor and the deleted note have change rows.
+        expect((await changesFor("note", oldId, cursor)).map((c) => c.op)).toEqual(["update"]);
+        expect(await changesFor("note", headId, cursor)).toEqual([{ seq: del.seq, op: "delete" }]);
+        expect(await noteRow(headId)).toBeUndefined();
+
+        const pull = await (await syncGet(`/sync/changes?cursor=${cursor}&limit=100`)).json();
+        expect(pull.snapshots[`note:${oldId}`]).toMatchObject({ status: "active", superseded_by: null });
+        expect(pull.snapshots[`note:${headId}`]).toBeNull();
+      });
+
+      it("re-points the predecessor at the deleted note's successor for a middle-of-chain delete", async () => {
+        const { id: a } = await pushNoteInsert({ title: "Chain A" });
+        const { id: b } = await pushNoteInsert({ title: "Chain B" });
+        const { id: c } = await pushNoteInsert({ title: "Chain C" });
+        const ab = await pushOne(noteOp("supersede", a, { superseded_by: b }));
+        const bc = await pushOne(noteOp("supersede", b, { superseded_by: c }));
+        expect(ab.status).toBe("applied");
+        expect(bc.status).toBe("applied");
+        const supersededAt = ab.snapshot.superseded_at as string;
+        const cursor = await maxSeqDb();
+
+        const del = await pushOne(noteOp("delete", b));
+        expect(del.status).toBe("applied");
+        expect(del.relinked).toHaveLength(1);
+        expect(del.relinked![0].entity_id).toBe(a);
+        expect(del.relinked![0].snapshot).toMatchObject({
+          id: a,
+          status: "superseded",
+          superseded_by: c,
+          version: 3,
+        });
+        // superseded_at records when the knowledge stopped being current; the re-point keeps it.
+        expect(del.relinked![0].snapshot.superseded_at).toBe(supersededAt);
+
+        expect((await changesFor("note", a, cursor)).map((x) => x.op)).toEqual(["update"]);
+        expect(await changesFor("note", c, cursor)).toHaveLength(0);
+        expect((await noteRow(c))!.version).toBe(1);
+      });
+
+      it("returns an empty relinked list for a note with no predecessors", async () => {
+        const { id } = await pushNoteInsert();
+        const del = await pushOne(noteOp("delete", id));
+        expect(del.status).toBe("applied");
+        expect(del.relinked).toEqual([]);
+      });
+
+      it("keeps deleting a non-existent note harmless: tombstone applied, replay dedups", async () => {
+        const id = randomUUID();
+        const cursor = await maxSeqDb();
+        const op = noteOp("delete", id);
+        const first = await pushOne(op);
+        expect(first.status).toBe("applied");
+        expect(first.snapshot).toBeNull();
+        expect(await changesFor("note", id, cursor)).toEqual([{ seq: first.seq, op: "delete" }]);
+
+        const replay = await pushOne(op);
+        expect(replay.status).toBe("dedup");
+        expect(replay.seq).toBe(first.seq);
+      });
+
+      it("removes the deleted note's embedding after commit", async () => {
+        const { id } = await pushNoteInsert();
+        // Seed an embedding row directly; no embedding server runs in this suite.
+        const vector = `[1${",0".repeat(767)}]`;
+        await withPg((c) =>
+          c.query(
+            `INSERT INTO embeddings (content_type, content_id, content_text, embedding)
+             VALUES ('note', $1, 'seeded', $2::vector)`,
+            [id, vector]
+          )
+        );
+        const count = () =>
+          withPg(async (c) => {
+            const res = await c.query(
+              "SELECT count(*)::int AS n FROM embeddings WHERE content_type = 'note' AND content_id = $1",
+              [id]
+            );
+            return res.rows[0].n as number;
+          });
+        expect(await count()).toBe(1);
+
+        const del = await pushOne(noteOp("delete", id));
+        expect(del.status).toBe("applied");
+        expect(await count()).toBe(0);
+      });
+    });
+
+    describe("pending_embeddings enqueue on the push path", () => {
+      it("queues a note insert", async () => {
+        const { id } = await pushNoteInsert();
+        expect(await pendingEmbeddingCount(id)).toBe(1);
+      });
+
+      it("queues text edits once (ON CONFLICT), and not metadata-only edits", async () => {
+        const { id } = await pushNoteInsert();
+        await clearPendingEmbedding(id);
+
+        // scope does not feed the embedding text.
+        const scopeOnly = await pushOne(noteOp("update", id, { scope: "work" }));
+        expect(scopeOnly.status).toBe("applied");
+        expect(await pendingEmbeddingCount(id)).toBe(0);
+
+        const content = await pushOne(noteOp("update", id, { content: "Deploys are frozen." }));
+        expect(content.status).toBe("applied");
+        expect(await pendingEmbeddingCount(id)).toBe(1);
+
+        // A second text edit before any drain keeps the single queue row.
+        const title = await pushOne(noteOp("update", id, { title: "Acme Corp deploy freeze" }));
+        expect(title.status).toBe("applied");
+        expect(await pendingEmbeddingCount(id)).toBe(1);
+      });
+
+      it("does not queue a text edit that changes nothing", async () => {
+        const { id } = await pushNoteInsert();
+        await clearPendingEmbedding(id);
+        const noop = await pushOne(noteOp("update", id, { title: "Acme Corp deploy policy" }));
+        expect(noop.status).toBe("applied");
+        expect(noop.seq).toBeUndefined();
+        expect(noop.snapshot.version).toBe(1);
+        expect(await pendingEmbeddingCount(id)).toBe(0);
+      });
+
+      it("does not queue when the op conflicts (the transaction rolled back)", async () => {
+        const { id } = await pushNoteInsert();
+        await clearPendingEmbedding(id);
+        const res = await pushOne(
+          noteOp("update", id, { content: "stale write" }, { expected_version: 9 })
+        );
+        expect(res.status).toBe("conflict");
+        expect(await pendingEmbeddingCount(id)).toBe(0);
+      });
+
+      it("does not queue on supersede (the text did not change)", async () => {
+        const { id: oldId } = await pushNoteInsert();
+        const { id: newId } = await pushNoteInsert();
+        await clearPendingEmbedding(oldId);
+        const res = await pushOne(noteOp("supersede", oldId, { superseded_by: newId }));
+        expect(res.status).toBe("applied");
+        expect(await pendingEmbeddingCount(oldId)).toBe(0);
+      });
+    });
+  });
+
   describe("streaming body-cap enforcement (#225)", () => {
     // Content-Length can be omitted under HTTP/1.1 chunked transfer encoding.
     // The push handler must count bytes as they arrive on the wire and
@@ -1037,4 +1832,34 @@ async function getMaxSeq(): Promise<string> {
   // test log accumulates, bump limit or paginate. For unit-scale tests, 500
   // is enough.
   return body.next_cursor;
+}
+
+// Helper: run `fn` against a direct connection to the suite's database. Used
+// to read sync_op_log / changes / pending_embeddings and to seed rows the
+// public surface cannot create. A fresh connection per call keeps the helper
+// independent of the server's own pool.
+async function withPg<T>(fn: (client: PgClient) => Promise<T>): Promise<T> {
+  const pg = await import("pg");
+  const client = new pg.default.Client({
+    host: PG_HOST,
+    port: parseInt(PG_PORT),
+    user: PG_USER,
+    password: PG_PASSWORD,
+    database: PG_DATABASE,
+  });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
+// Helper: current max change-log seq, read straight from the table so it never
+// depends on /sync/changes pagination.
+async function maxSeqDb(): Promise<string> {
+  return withPg(async (c) => {
+    const res = await c.query("SELECT COALESCE(max(seq), 0)::text AS seq FROM changes");
+    return res.rows[0].seq as string;
+  });
 }

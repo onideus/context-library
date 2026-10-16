@@ -4,7 +4,17 @@ import { z } from "zod";
 import { config } from "../config.js";
 import { query } from "../db/client.js";
 import { withTransaction, appendChange } from "../db/changes.js";
-import type { EntityType, ChangeOp } from "../db/changes.js";
+import type { EntityType } from "../db/changes.js";
+import {
+  PROVENANCE_VALUES,
+  conflictCode,
+  deleteNoteInTx,
+  insertNoteInTx,
+  parseIsoWithOffset,
+  supersedeNoteInTx,
+  updateNoteInTx,
+} from "../notes/store.js";
+import type { NoteInsert, NotePatch, NoteRow, NoteWriteConflict } from "../notes/store.js";
 import { syncAuthMiddleware } from "./auth.js";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -27,6 +37,36 @@ import { HANDOFFS_DIR } from "../tools/handoff.js";
  *     rejected op returns the current server state so the client can rebase.
  *   - Replays (same op_uuid twice) are harmless: the second one dedupes and
  *     returns the earlier outcome.
+ *
+ * Push op kinds: `insert`, `update`, `delete`, and `supersede`. `supersede`
+ * is notes-only: it retires a note in favour of a successor note and is
+ * rejected per op (UNSUPPORTED_OP) for tasks and artifacts, so it can never
+ * fall through into a plain update. Note writes go through the shared store
+ * in src/notes/store.ts, the same code the MCP note tools use, so versioning,
+ * history, and preconditions cannot drift between the two paths. Design:
+ * docs/design/note-lifecycle.md §8.
+ *
+ * Preconditions (the `precondition` object is STRICT — unknown keys are a 400
+ * INVALID_BODY rather than being silently dropped, because a dropped guard
+ * would let a write apply unguarded):
+ *   - `expected_version` (notes, update + supersede) — enforced whenever
+ *     present, checked BEFORE the other preconditions so it wins when several
+ *     fail (VERSION_CONFLICT). Rejected per op on any other entity/op.
+ *   - `expected_status` — enforced whenever present, regardless of which
+ *     fields the payload touches (STATUS_CONFLICT). Notes compare the STORED
+ *     status ('active' | 'superseded'); expiry is computed client-side.
+ *   - `base_updated_at` — instant match against the row's updated_at
+ *     (STALE_BASE). Not accepted on supersede.
+ *
+ * Note deletes splice supersession chains (a predecessor is re-pointed at the
+ * deleted note's successor, or reactivated at the end of a chain); the
+ * affected predecessors are returned as `relinked` with fresh snapshots, and
+ * each one also has its own change-log row so pullers re-snapshot it.
+ *
+ * Note inserts and content edits enqueue a `pending_embeddings` row inside
+ * the push transaction (no embedding-server call on the push path); the
+ * existing drain embeds the note later. A pushed note delete removes the
+ * note's embedding best-effort after commit, matching the MCP delete tool.
  */
 
 // ── Snapshot loaders ─────────────────────────────────────────────────
@@ -103,6 +143,9 @@ interface ChangeRow {
  * Per-entity mutation applier. Each returns:
  *   - `applied` — the mutation was applied and returns the new snapshot
  *   - `conflict` — a precondition failed; caller sees current server state
+ * An applier may also throw OpRejected for an op it refuses outright
+ * (UNSUPPORTED_OP, an unparseable valid_until); that surfaces as a per-op
+ * `error` result and rolls the dedupe claim back like a conflict does.
  *
  * Only tasks, notes, and artifacts are pushable in Phase 1a. Handoffs are
  * write-through-MCP only for now — the mobile client reads handoffs via
@@ -115,14 +158,52 @@ interface ChangeRow {
  * a permanently dedupe-blocked op_uuid on any transient failure.
  */
 
+interface ApplyConflict {
+  reason: string;
+  current: Record<string, unknown> | null;
+  /**
+   * Extra structured context for conflicts that need it: NOT_FOUND on a
+   * supersede says which id was missing (`{ missing }`), INVALID_SUCCESSOR
+   * says why (`{ reason }`).
+   */
+  detail?: Record<string, unknown>;
+}
+
+/** A note re-pointed or reactivated by the delete-time chain splice. */
+interface RelinkedNote {
+  entity_id: string;
+  snapshot: Record<string, unknown> | null;
+}
+
 interface ApplyResult {
   status: "applied" | "conflict";
   snapshot: Record<string, unknown> | null;
   seq?: string;
-  conflict?: {
-    reason: string;
-    current: Record<string, unknown> | null;
-  };
+  /** Note deletes only: predecessors changed by the chain splice. */
+  relinked?: RelinkedNote[];
+  conflict?: ApplyConflict;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Sentinel for a per-op rejection that is neither a precondition conflict nor
+ * a driver failure: an op kind the entity does not support (UNSUPPORTED_OP),
+ * or a payload/precondition value the server refuses to interpret
+ * (VALIDATION_ERROR). Thrown from inside the per-op transaction so the
+ * sync_op_log claim rolls back with it — a corrected retry that reuses the
+ * same op_uuid is therefore NOT spuriously deduplicated. processPushOp turns
+ * it into `{ status: "error", error: "<code>: <message>" }`.
+ */
+class OpRejected extends Error {
+  constructor(
+    public readonly code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "OpRejected";
+  }
 }
 
 const taskPatchSchema = z
@@ -183,7 +264,15 @@ async function applyTaskOp(
     const change = await appendChange(client, "task", op.entity_id, "delete");
     return { status: "applied" as const, snapshot: null, seq: change.seq };
   }
-  // update
+  // Only `update` remains. `supersede` is a notes-only op: reject it per op
+  // rather than letting it fall through into the update code and be applied
+  // (and logged) as something it is not.
+  if (op.op !== "update") {
+    throw new OpRejected(
+      "UNSUPPORTED_OP",
+      `op '${op.op}' is not supported for entity_type 'task'`
+    );
+  }
   const payload = taskPatchSchema.parse(op.payload ?? {});
   const precondition = op.precondition ?? {};
   const current = await client.query<Record<string, unknown>>(
@@ -268,74 +357,171 @@ const notePatchSchema = z
     scope: z.enum(["work", "personal", "shared"]).optional(),
     source_url: z.string().nullable().optional(),
     related_task_ids: z.array(z.string()).optional(),
+    provenance: z.enum(PROVENANCE_VALUES).nullable().optional(),
+    // ISO-8601 with an explicit offset; validated by parseIsoWithOffset in the
+    // applier (not here) so a bad value becomes a per-op VALIDATION_ERROR that
+    // names the offset requirement, instead of an opaque schema dump.
+    valid_until: z.string().nullable().optional(),
   })
   .strict();
 
-async function applyNoteOp(op: PushOp, client: PoolClient): Promise<ApplyResult> {
-  if (op.op === "insert") {
-    const payload = notePatchSchema.parse(op.payload ?? {});
-    const res = await client.query<Record<string, unknown>>(
-      `INSERT INTO notes (id, title, content, domain, tags, scope, source_url, related_task_ids)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        op.entity_id,
-        payload.title ?? "(untitled)",
-        payload.content ?? "",
-        payload.domain ?? null,
-        payload.tags ?? [],
-        payload.scope ?? "personal",
-        payload.source_url ?? null,
-        payload.related_task_ids ?? [],
-      ]
+// Lifecycle columns (status, superseded_by, superseded_at) are deliberately
+// NOT patchable: they move only through the `supersede` op and the
+// delete-time chain splice.
+const noteSupersedePayloadSchema = z
+  .object({
+    superseded_by: z.string().regex(UUID_RE, "superseded_by must be a UUID"),
+  })
+  .strict();
+
+function noteSnapshot(row: NoteRow): Record<string, unknown> {
+  return row as unknown as Record<string, unknown>;
+}
+
+/**
+ * Validate and normalise a pushed `valid_until`. Offset-less values are
+ * refused — JS and Postgres would read them in different zones — using the
+ * same parser as the MCP note tools so both paths accept identical inputs.
+ * `undefined` (leave alone) and `null` (clear) pass through untouched.
+ */
+function normaliseValidUntil(value: string | null | undefined): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  const iso = parseIsoWithOffset(value);
+  if (iso === null) {
+    throw new OpRejected(
+      "VALIDATION_ERROR",
+      "valid_until must be an ISO-8601 date-time with an explicit UTC offset (Z or +hh:mm / -hh:mm), e.g. 2026-05-01T00:00:00Z"
     );
-    const change = await appendChange(client, "note", op.entity_id, "insert");
-    return { status: "applied" as const, snapshot: res.rows[0], seq: change.seq };
   }
-  if (op.op === "delete") {
-    await client.query("DELETE FROM notes WHERE id = $1", [op.entity_id]);
-    const change = await appendChange(client, "note", op.entity_id, "delete");
-    return { status: "applied" as const, snapshot: null, seq: change.seq };
+  return iso;
+}
+
+/** Map a store-level write conflict onto the sync conflict shape. */
+function noteConflict(conflict: NoteWriteConflict): ApplyResult {
+  const result: ApplyConflict = {
+    reason: conflictCode(conflict),
+    current: conflict.kind === "not_found" ? null : noteSnapshot(conflict.current),
+  };
+  if (conflict.kind === "not_found" && conflict.missing) {
+    result.detail = { missing: conflict.missing };
+  } else if (conflict.kind === "invalid_successor") {
+    result.detail = { reason: conflict.reason };
   }
-  const payload = notePatchSchema.parse(op.payload ?? {});
-  const precondition = op.precondition ?? {};
-  const current = await client.query<Record<string, unknown>>(
-    "SELECT * FROM notes WHERE id = $1",
-    [op.entity_id]
+  return { status: "conflict" as const, snapshot: null, conflict: result };
+}
+
+/**
+ * Queue a note for (re-)embedding inside the push transaction. There is no
+ * embedding-server call on the push path and nothing the client can observe;
+ * the existing pending_embeddings drain (server startup, next
+ * search_context/reindex) embeds the note. Without this a note written from a
+ * sync client would never be embedded at all. ON CONFLICT DO NOTHING keeps the
+ * queue to one row per note however many edits land before a drain.
+ */
+async function enqueueNoteEmbedding(client: PoolClient, noteId: string): Promise<void> {
+  await client.query(
+    `INSERT INTO pending_embeddings (content_type, content_id)
+     VALUES ('note', $1)
+     ON CONFLICT (content_type, content_id) DO NOTHING`,
+    [noteId]
   );
-  if (current.rows.length === 0) {
-    return {
-      status: "conflict" as const,
-      snapshot: null,
-      conflict: { reason: "NOT_FOUND", current: null },
-    };
+}
+
+async function applyNoteOp(op: PushOp, client: PoolClient): Promise<ApplyResult> {
+  // Postgres hands uuids back as canonical lowercase text and the store keys
+  // its row lookups on that, so normalise whatever case the client sent.
+  const noteId = op.entity_id.toLowerCase();
+
+  switch (op.op) {
+    case "insert": {
+      const payload = notePatchSchema.parse(op.payload ?? {});
+      const fields: NoteInsert = {
+        title: payload.title ?? "(untitled)",
+        content: payload.content ?? "",
+        scope: payload.scope ?? "personal",
+        domain: payload.domain ?? null,
+        tags: payload.tags ?? [],
+        source_url: payload.source_url ?? null,
+        related_task_ids: payload.related_task_ids ?? [],
+        provenance: payload.provenance ?? null,
+        valid_until: normaliseValidUntil(payload.valid_until) ?? null,
+      };
+      const { row, seq } = await insertNoteInTx(client, fields, { id: noteId });
+      await enqueueNoteEmbedding(client, row.id);
+      return { status: "applied" as const, snapshot: noteSnapshot(row), seq };
+    }
+
+    case "update": {
+      const payload = notePatchSchema.parse(op.payload ?? {});
+      const precondition = op.precondition ?? {};
+      const patch: NotePatch = {
+        ...payload,
+        valid_until: normaliseValidUntil(payload.valid_until),
+      };
+      const result = await updateNoteInTx(client, noteId, patch, {
+        expectedVersion: precondition.expected_version,
+        expectedStatus: precondition.expected_status,
+        baseUpdatedAt: precondition.base_updated_at,
+        via: "sync_push",
+      });
+      if (!result.ok) return noteConflict(result.conflict);
+      const { row, changed, seq } = result.value;
+      // Only fields that feed the embedding text warrant a re-embed.
+      const touchedEmbeddedText =
+        payload.title !== undefined ||
+        payload.content !== undefined ||
+        payload.domain !== undefined ||
+        payload.tags !== undefined;
+      if (changed && touchedEmbeddedText) {
+        await enqueueNoteEmbedding(client, row.id);
+      }
+      return { status: "applied" as const, snapshot: noteSnapshot(row), seq };
+    }
+
+    case "delete": {
+      const outcome = await deleteNoteInTx(client, noteId, { via: "sync_push" });
+      if (outcome === null) {
+        // Deleting a non-existent note is a no-op, not a conflict, so replays
+        // stay harmless. The tombstone is still logged so pullers can
+        // reconcile regardless.
+        const change = await appendChange(client, "note", noteId, "delete");
+        return { status: "applied" as const, snapshot: null, seq: change.seq };
+      }
+      return {
+        status: "applied" as const,
+        snapshot: null,
+        seq: outcome.seq,
+        relinked: outcome.relinked.map((r) => ({
+          entity_id: r.id,
+          snapshot: noteSnapshot(r),
+        })),
+      };
+    }
+
+    case "supersede": {
+      const payload = noteSupersedePayloadSchema.parse(op.payload ?? {});
+      const precondition = op.precondition ?? {};
+      const result = await supersedeNoteInTx(
+        client,
+        noteId,
+        payload.superseded_by.toLowerCase(),
+        {
+          expectedVersion: precondition.expected_version,
+          expectedStatus: precondition.expected_status,
+          via: "sync_push",
+        }
+      );
+      if (!result.ok) return noteConflict(result.conflict);
+      // Only the old note changed (the successor is untouched), so there is
+      // exactly one change-log row, for the old note. No re-embed: the text
+      // did not change and search reads lifecycle state from `notes`.
+      return {
+        status: "applied" as const,
+        snapshot: noteSnapshot(result.value.old),
+        seq: result.value.seq,
+      };
+    }
   }
-  if (
-    typeof precondition.base_updated_at === "string" &&
-    String(current.rows[0].updated_at) !== precondition.base_updated_at
-  ) {
-    return {
-      status: "conflict" as const,
-      snapshot: null,
-      conflict: { reason: "STALE_BASE", current: current.rows[0] },
-    };
-  }
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
-  for (const [k, v] of Object.entries(payload)) {
-    sets.push(`${k} = $${idx++}`);
-    params.push(v);
-  }
-  if (sets.length === 0) {
-    return { status: "applied" as const, snapshot: current.rows[0] };
-  }
-  const upd = await client.query<Record<string, unknown>>(
-    `UPDATE notes SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`,
-    [...params, op.entity_id]
-  );
-  const change = await appendChange(client, "note", op.entity_id, "update");
-  return { status: "applied" as const, snapshot: upd.rows[0], seq: change.seq };
 }
 
 const artifactPatchSchema = z
@@ -375,6 +561,14 @@ async function applyArtifactOp(op: PushOp, client: PoolClient): Promise<ApplyRes
     await client.query("DELETE FROM artifacts WHERE id = $1", [op.entity_id]);
     const change = await appendChange(client, "artifact", op.entity_id, "delete");
     return { status: "applied" as const, snapshot: null, seq: change.seq };
+  }
+  // Only `update` remains. `supersede` is a notes-only op: reject it per op
+  // rather than letting it fall through into the update code.
+  if (op.op !== "update") {
+    throw new OpRejected(
+      "UNSUPPORTED_OP",
+      `op '${op.op}' is not supported for entity_type 'artifact'`
+    );
   }
   // update — conditional on expected_status when the caller supplies one and
   // the mutation itself changes status. Mirrors the item-3 pattern in
@@ -439,21 +633,26 @@ async function applyArtifactOp(op: PushOp, client: PoolClient): Promise<ApplyRes
 
 // ── Push op schema ───────────────────────────────────────────────────
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 const pushOpSchema = z.object({
   op_uuid: z.string().regex(UUID_RE, "op_uuid must be a UUID"),
   entity_type: z.enum(["task", "note", "artifact"]),
   entity_id: z.string().min(1),
-  op: z.enum(["insert", "update", "delete"]),
+  // `supersede` is notes-only; the task/artifact appliers reject it per op
+  // (UNSUPPORTED_OP). It stays in the shared enum so the rejection is a
+  // per-op result, not a whole-batch 400.
+  op: z.enum(["insert", "update", "delete", "supersede"]),
   payload: z.record(z.unknown()).optional(),
+  // STRICT: an unknown key is a 400 INVALID_BODY, never silently dropped. A
+  // precondition the server ignores is a guard that silently isn't there - a
+  // newer client's `expected_version` reaching an older server must fail
+  // loudly instead of letting the write apply unguarded.
   precondition: z
     .object({
       base_updated_at: z.string().optional(),
       expected_status: z.string().optional(),
+      expected_version: z.number().int().min(1).optional(),
     })
-    .partial()
+    .strict()
     .optional(),
 });
 
@@ -464,10 +663,38 @@ const pushBodySchema = z.object({
 type PushOp = z.infer<typeof pushOpSchema>;
 
 /**
+ * Refuse a precondition the target applier cannot enforce. The strict schema
+ * only proves the key is known; it does not prove this particular op honours
+ * it, and a guard that is accepted but ignored is worse than no guard.
+ *   - `expected_version` is enforced for note `update` and `supersede` only.
+ *   - `base_updated_at` is not part of the `supersede` contract (version or
+ *     status are the guards there).
+ * Thrown as OpRejected so the dedupe claim rolls back with the transaction.
+ */
+function assertPreconditionsHonourable(op: PushOp): void {
+  const pre = op.precondition;
+  if (!pre) return;
+  const versioned = op.entity_type === "note" && (op.op === "update" || op.op === "supersede");
+  if (pre.expected_version !== undefined && !versioned) {
+    throw new OpRejected(
+      "VALIDATION_ERROR",
+      `expected_version is only supported on note update and supersede ops, not '${op.op}' on '${op.entity_type}'`
+    );
+  }
+  if (pre.base_updated_at !== undefined && op.op === "supersede") {
+    throw new OpRejected(
+      "VALIDATION_ERROR",
+      "base_updated_at is not supported on supersede ops; use expected_version or expected_status"
+    );
+  }
+}
+
+/**
  * Dispatch a single push op to the right entity applier. Runs inside the
  * caller-provided transaction so dedupe + apply commit or roll back together.
  */
 async function applyOp(op: PushOp, client: PoolClient): Promise<ApplyResult> {
+  assertPreconditionsHonourable(op);
   switch (op.entity_type) {
     case "task":
       return applyTaskOp(op, client);
@@ -485,12 +712,7 @@ async function applyOp(op: PushOp, client: PoolClient): Promise<ApplyResult> {
  * sync_op_log claim — no compensating DELETE required.
  */
 class OpConflict extends Error {
-  constructor(
-    public readonly conflict: {
-      reason: string;
-      current: Record<string, unknown> | null;
-    }
-  ) {
+  constructor(public readonly conflict: ApplyConflict) {
     super(conflict.reason);
     this.name = "OpConflict";
   }
@@ -508,13 +730,19 @@ type AppliedOutcome = {
   kind: "applied";
   seq?: string;
   snapshot: Record<string, unknown> | null;
+  relinked?: RelinkedNote[];
 };
 type TxOutcome = DedupOutcome | AppliedOutcome;
 
 async function processPushOp(op: PushOp): Promise<
-  | { status: "applied"; seq?: string; snapshot: Record<string, unknown> | null }
+  | {
+      status: "applied";
+      seq?: string;
+      snapshot: Record<string, unknown> | null;
+      relinked?: RelinkedNote[];
+    }
   | { status: "dedup"; seq?: string }
-  | { status: "conflict"; conflict: OpConflict["conflict"] }
+  | { status: "conflict"; conflict: ApplyConflict }
   | { status: "error"; error: string }
 > {
   try {
@@ -561,6 +789,7 @@ async function processPushOp(op: PushOp): Promise<
         kind: "applied",
         seq: result.seq,
         snapshot: result.snapshot,
+        relinked: result.relinked,
       };
     });
 
@@ -571,10 +800,17 @@ async function processPushOp(op: PushOp): Promise<
       status: "applied",
       seq: outcome.seq,
       snapshot: outcome.snapshot,
+      relinked: outcome.relinked,
     };
   } catch (err) {
     if (err instanceof OpConflict) {
       return { status: "conflict", conflict: err.conflict };
+    }
+    if (err instanceof OpRejected) {
+      // Per-op rejection (UNSUPPORTED_OP, VALIDATION_ERROR). The throw rolled
+      // the transaction back, so the sync_op_log claim is gone and a
+      // corrected retry with the same op_uuid is applied, not deduplicated.
+      return { status: "error", error: `${err.code}: ${err.message}` };
     }
     return { status: "error", error: (err as Error).message };
   }
@@ -657,6 +893,25 @@ async function readBodyWithCap(
 
   const buf = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)));
   return { oversized: false, text: buf.toString("utf-8") };
+}
+
+/**
+ * Best-effort removal of a deleted note's embedding after the delete has
+ * committed. Mirrors the MCP delete_note tool. Never throws: the response must
+ * not wait on, or fail because of, index housekeeping.
+ */
+async function removeNoteEmbedding(entityId: string): Promise<void> {
+  try {
+    await query(
+      "DELETE FROM embeddings WHERE content_type = 'note' AND content_id = $1",
+      [entityId.toLowerCase()]
+    );
+  } catch (err) {
+    console.warn(
+      "[sync] Failed to remove embedding for deleted note:",
+      (err as Error).message
+    );
+  }
 }
 
 /**
@@ -831,10 +1086,12 @@ export function registerSyncRoutes(app: Hono): void {
       status: "applied" | "dedup" | "conflict" | "error";
       entity_type: string;
       entity_id: string;
-      op: ChangeOp;
+      op: PushOp["op"];
       seq?: string;
       snapshot?: Record<string, unknown> | null;
-      conflict?: { reason: string; current: Record<string, unknown> | null };
+      /** Note deletes: predecessors re-pointed or reactivated by the splice. */
+      relinked?: RelinkedNote[];
+      conflict?: ApplyConflict;
       error?: string;
     }> = [];
 
@@ -847,7 +1104,7 @@ export function registerSyncRoutes(app: Hono): void {
         op_uuid: op.op_uuid,
         entity_type: op.entity_type,
         entity_id: op.entity_id,
-        op: op.op as ChangeOp,
+        op: op.op,
       };
       if (outcome.status === "applied") {
         results.push({
@@ -855,7 +1112,14 @@ export function registerSyncRoutes(app: Hono): void {
           status: "applied",
           seq: outcome.seq,
           snapshot: outcome.snapshot,
+          ...(outcome.relinked ? { relinked: outcome.relinked } : {}),
         });
+        if (op.entity_type === "note" && op.op === "delete") {
+          // Post-commit parity with the MCP delete_note tool: drop the note's
+          // embedding. Best-effort - the delete is already committed, and
+          // search_context's note filter ignores orphaned embeddings anyway.
+          await removeNoteEmbedding(op.entity_id);
+        }
       } else if (outcome.status === "dedup") {
         results.push({ ...base, status: "dedup", seq: outcome.seq });
       } else if (outcome.status === "conflict") {
