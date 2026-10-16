@@ -177,6 +177,26 @@ export function conflictMessage(conflict: NoteWriteConflict, id: string): string
   }
 }
 
+// ── Input normalisation ──────────────────────────────────────────────
+
+const ISO_WITH_OFFSET_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Validate a `valid_until` value: ISO-8601 date-time WITH an explicit offset
+ * (`Z` or `±hh:mm`). Offset-less values are rejected on purpose — JS parses
+ * them as local time while Postgres uses the session zone, so the same
+ * string would mean two different instants. Returns the normalised UTC ISO
+ * string, or null when the value is not acceptable. Shared by the MCP tools
+ * and the sync applier so both paths accept exactly the same inputs.
+ */
+export function parseIsoWithOffset(value: string): string | null {
+  if (typeof value !== "string" || !ISO_WITH_OFFSET_RE.test(value.trim())) return null;
+  const ms = Date.parse(value.trim());
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
 // ── Lifecycle SQL fragments ──────────────────────────────────────────
 
 /**
