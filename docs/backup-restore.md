@@ -52,6 +52,19 @@ to `tar -czf` to produce the archive. There is no server dependency — you
 can run the script against a running deployment (the `SELECT`s are
 short-lived and read-only) or against an offline database.
 
+**The table export is one consistent snapshot.** Every table's `SELECT`
+(and the row counts the manifest declares) runs on a single connection inside
+one `REPEATABLE READ` read-only transaction, so the JSONL files describe the
+database as of one instant even when you export a live deployment. This
+matters because a note's edit history (`note_versions`) is written in the
+same transaction as the edit itself: read from separate snapshots, an export
+could capture a note at version 3 alongside a history row for version 3 — a
+restore of which would leave that note permanently uneditable — or a history
+row for a note the earlier read missed. The snapshot is held only while the
+tables are read, not while handoffs are copied or the tarball is built, so it
+does not block writers. (Handoff files are copied separately and are not part
+of the database snapshot.)
+
 **Nothing is uploaded anywhere.** The output lives on your local
 filesystem, full stop. Ship it to backup storage yourself.
 
@@ -73,12 +86,27 @@ npm run import <tarball> -- --force
 1. Extract the tarball into a temp directory (cleaned up on exit).
 2. Read `manifest.json`.
 3. Verify each `tables/<name>.jsonl` row count matches the manifest — a
-   corrupt tarball fails fast before any database write.
+   corrupt tarball fails fast before any database write. A second,
+   cross-table **consistency pre-flight** runs alongside it: every
+   `note_versions` row must belong to a note in `notes.jsonl` and carry a
+   version strictly below that note's current `version`. A tarball that
+   violates this (for example one exported before the single-snapshot fix, or
+   edited by hand) is refused with `Tarball inconsistent: ...` before any
+   truncate or insert — restoring it would leave the note permanently
+   uneditable. The check is skipped when `note_versions.jsonl` is absent.
 4. Verify the destination `_migrations` table is at or beyond every
-   migration named in the manifest. If it isn't, run `runMigrations()`
-   from the local codebase (idempotent). If migrations named in the
-   manifest still aren't present after that, refuse to continue and tell
-   the operator to upgrade the codebase first.
+   migration named in the manifest, **and** that it has applied every
+   migration this checkout ships. If either check finds a gap, run
+   `runMigrations()` from the local codebase (idempotent) before anything
+   else happens. The second check matters because the server normally
+   migrates at startup, but a restore can run on a freshly upgraded checkout
+   before the server has started: an older tarball names nothing the
+   destination lacks, yet the load writes the current schema's columns — and
+   with `--force` the truncate would already have run when a missing column
+   made the load fail. If migrations named in the manifest still aren't
+   present after running, refuse to continue and tell the operator to
+   upgrade the codebase first. `--dry-run` lists the pending migrations
+   without applying them.
 5. Check that every managed table is empty and `DATA_DIR/handoffs/` has no
    files. If either check fails and `--force` is not set, refuse.
 6. If `--force` is set and the destination is non-empty, `TRUNCATE ...
@@ -86,13 +114,27 @@ npm run import <tarball> -- --force
    `DATA_DIR/handoffs/` — **except `handoffs/archive/`, which is never
    cleared.** It is append-only and may hold originals the tarball does not
    (for example, a tarball exported before archives were exported).
-7. Load each JSONL file in its own transaction, INSERT with the manifest's
-   column order, and verify the loaded count against the manifest before
-   committing.
+7. Load each JSONL file in its own transaction, INSERT with the table
+   registry's column order, and verify the loaded count against the manifest
+   before committing. Deferrable constraints are deferred to each table's
+   `COMMIT` (`SET CONSTRAINTS ALL DEFERRED`), which lets notes that point at a
+   successor via `superseded_by` load in `id` order regardless of which comes
+   first.
 8. Copy handoff files into `DATA_DIR/handoffs/`, then merge the tarball's
    `handoffs/archive/` in without overwriting any archive file already
    present (archived originals are byte-exact, so an existing one is kept).
 9. Queue re-embed through `pending_embeddings` — see below.
+
+**Older tarballs still restore.** A column that is *absent* from a JSONL row
+(as opposed to present with `null`) is loaded as the column's `DEFAULT`, and a
+table with no JSONL file loads as zero rows. So a tarball exported before
+migration 013 — no note lifecycle columns, no `note_versions.jsonl` — restores
+with every note `status = 'active'`, `version = 1`, and `provenance`,
+`valid_until`, `superseded_by` and `superseded_at` all `NULL`, and an empty
+history. The reverse is refused: a tarball whose manifest lists a migration
+the destination (even after running the local runner) does not have is
+rejected before any truncation, so a 013 tarball cannot be loaded into
+pre-013 code.
 
 ### Re-embed policy
 
@@ -167,7 +209,7 @@ drill:
    the plan — every table's post-import count should equal the manifest.
 5. `npm run import ./drill/context-library-*.tar.gz`.
 6. Spot-verify:
-   - `psql $PG* -c 'select count(*) from tasks; select count(*) from notes; select count(*) from artifacts;'`
+   - `psql $PG* -c 'select count(*) from tasks; select count(*) from notes; select count(*) from note_versions; select count(*) from artifacts;'`
      match the manifest.
    - Start the server against the drill database and call
      `get_latest_handoff` — the response should carry the same filename
