@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
+import { runScriptSync } from "./helpers/spawn-server.js";
 import { readFile, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import pg from "pg";
@@ -61,17 +62,7 @@ function runScript(
   args: string[],
   env: NodeJS.ProcessEnv
 ): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync("npx", ["tsx", script, ...args], {
-    cwd: process.cwd(),
-    env,
-    encoding: "utf8",
-    timeout: SCRIPT_TIMEOUT_MS,
-  });
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+  return runScriptSync(script, args, env, SCRIPT_TIMEOUT_MS);
 }
 
 // ── Fresh DB + migrations ─────────────────────────────────────────

@@ -142,6 +142,8 @@ src/
     indexer.ts             # Embedding indexer with pending queue
     text.ts                # Text extraction and chunking
   __tests__/
+    helpers/
+      spawn-server.ts      # spawnServer/stopServer/runScriptSync: cross-platform tsx child processes
     server.test.ts         # Integration: server spawn + HTTP
     merge.test.ts          # Unit: mergeHandoff logic
     indexer.test.ts        # Unit: text extraction + chunking
@@ -277,6 +279,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 - Use `parseSseResponse()` to extract data from SSE responses.
 - Parse tool results with `JSON.parse(data.result.content[0].text)`.
 - Integration tests use unique ports (3199, 3197) and isolated data directories.
+- Spawn the server through `spawnServer(env)` / `stopServer(proc)` from `src/__tests__/helpers/spawn-server.ts` (and scripts through `runScriptSync()`): it runs `node node_modules/tsx/dist/cli.mjs` directly — no `npx`, no shell — so the same spawn works on Linux, macOS and Windows, stdio is always drained, and teardown reaches the real server process instead of a shell wrapper. Never add a new `spawn("npx", …)` to a test.
 
 ## Docker
 

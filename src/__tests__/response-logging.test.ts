@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -69,30 +70,26 @@ async function waitForLogEntries(
   return parseLogEntries(stdout.slice(baseline)).filter(predicate);
 }
 
-function spawnServer(
+function spawnLoggedServer(
   port: number,
   dataDir: string,
   extraEnv: Record<string, string> = {}
 ): { proc: ChildProcess; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
   const stderr: string[] = [];
-  const proc = spawn("npx", ["tsx", "src/server.ts"], {
-    cwd: process.cwd(),
-    env: (() => {
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        MCP_PORT: String(port),
-        DATA_DIR: dataDir,
-        ...extraEnv,
-      };
-      // Force the spawned server through the package.json fallback path in
-      // getVersion(); inheriting APP_VERSION from the parent (e.g. when
-      // Docker sets it) would short-circuit that branch.
-      delete env.APP_VERSION;
-      return env;
-    })(),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const proc = spawnServer((() => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      MCP_PORT: String(port),
+      DATA_DIR: dataDir,
+      ...extraEnv,
+    };
+    // Force the spawned server through the package.json fallback path in
+    // getVersion(); inheriting APP_VERSION from the parent (e.g. when
+    // Docker sets it) would short-circuit that branch.
+    delete env.APP_VERSION;
+    return env;
+  })());
 
   // Buffer the lines so tests can search for log entries after the request.
   let outBuf = "";
@@ -142,8 +139,8 @@ async function mcpPost(baseUrl: string, body: unknown): Promise<Response> {
   });
 }
 
-let offServer: ReturnType<typeof spawnServer>;
-let onServer: ReturnType<typeof spawnServer>;
+let offServer: ReturnType<typeof spawnLoggedServer>;
+let onServer: ReturnType<typeof spawnLoggedServer>;
 let offPort: number;
 let onPort: number;
 
@@ -156,8 +153,8 @@ beforeAll(async () => {
   offPort = await pickFreePort();
   onPort = await pickFreePort();
 
-  offServer = spawnServer(offPort, TEST_DATA_DIR_OFF);
-  onServer = spawnServer(onPort, TEST_DATA_DIR_ON, {
+  offServer = spawnLoggedServer(offPort, TEST_DATA_DIR_OFF);
+  onServer = spawnLoggedServer(onPort, TEST_DATA_DIR_ON, {
     LOG_RESPONSE_BODIES: "true",
   });
 
@@ -167,32 +164,12 @@ beforeAll(async () => {
   ]);
 }, 45_000);
 
-/**
- * Wait for a child process to exit, falling back to SIGKILL after the
- * deadline. Awaiting the `exit` event avoids both flake on slow CI
- * (where 300ms isn't enough for the process to shut down) and the dead
- * wait on fast CI (where it would have exited immediately).
- */
-async function killAndWait(proc: ChildProcess, deadlineMs = 2_000): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return;
-  await new Promise<void>((resolve) => {
-    const onExit = () => {
-      clearTimeout(killTimer);
-      resolve();
-    };
-    proc.once("exit", onExit);
-    const killTimer = setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
-    }, deadlineMs);
-    proc.kill("SIGTERM");
-  });
-}
 
 afterAll(async () => {
   await Promise.all(
     [offServer, onServer]
       .filter((s) => s?.proc)
-      .map((s) => killAndWait(s.proc))
+      .map((s) => stopServer(s.proc))
   );
   await rm(TEST_DATA_DIR_OFF, { recursive: true, force: true });
   await rm(TEST_DATA_DIR_ON, { recursive: true, force: true });

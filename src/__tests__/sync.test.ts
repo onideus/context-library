@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -147,21 +148,16 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     await rm(TEST_DATA_DIR, { recursive: true, force: true });
     await mkdir(TEST_DATA_DIR, { recursive: true });
 
-    serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        MCP_PORT: String(TEST_PORT),
-        DATA_DIR: TEST_DATA_DIR,
-        PGHOST: PG_HOST,
-        PGPORT: PG_PORT,
-        PGUSER: PG_USER,
-        PGPASSWORD: PG_PASSWORD,
-        PGDATABASE: PG_DATABASE,
-        SYNC_BEARER_TOKEN: BEARER,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
+    serverProcess = spawnServer({
+      ...process.env,
+      MCP_PORT: String(TEST_PORT),
+      DATA_DIR: TEST_DATA_DIR,
+      PGHOST: PG_HOST,
+      PGPORT: PG_PORT,
+      PGUSER: PG_USER,
+      PGPASSWORD: PG_PASSWORD,
+      PGDATABASE: PG_DATABASE,
+      SYNC_BEARER_TOKEN: BEARER,
     });
 
     // Uncomment for debugging:
@@ -173,9 +169,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
 
   afterAll(async () => {
     if (serverProcess) {
-      serverProcess.kill("SIGTERM");
-      await new Promise((r) => setTimeout(r, 500));
-      if (!serverProcess.killed) serverProcess.kill("SIGKILL");
+      await stopServer(serverProcess);
     }
     await rm(TEST_DATA_DIR, { recursive: true, force: true });
   });
