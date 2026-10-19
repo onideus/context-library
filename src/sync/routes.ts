@@ -675,7 +675,7 @@ const pushOpSchema = z.object({
   // (UNSUPPORTED_OP). It stays in the shared enum so the rejection is a
   // per-op result, not a whole-batch 400.
   op: z.enum(["insert", "update", "delete", "supersede"]),
-  payload: z.record(z.unknown()).optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
   // Deliberately PERMISSIVE at the body level. A malformed precondition must
   // fail only its own op (parsePrecondition, inside the per-op transaction),
   // never the whole batch with a 400: a rejected precondition never poisons
