@@ -47,7 +47,7 @@ Adds structured task management, permanent knowledge capture, generated-output t
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -147,12 +147,15 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_tasks` | Postgres | Paginated filtering with status, scope, priority, tags |
 | `update_task` | Postgres | Field updates + lifecycle actions (complete/cancel/defer/reopen) |
 | `search_tasks` | Postgres | Full-text search with PostgreSQL FTS |
-| `create_note` | Postgres | Capture permanent knowledge (decisions, patterns, insights) |
-| `get_note` | Postgres | Retrieve note by UUID |
-| `list_notes` | Postgres | Browse notes with scope, domain, and tag filters |
+| `create_note` | Postgres | Capture permanent knowledge (decisions, patterns, insights) with optional `provenance` and `valid_until` |
+| `get_note` | Postgres | Retrieve note by UUID, with lifecycle status, successor, predecessors, and version |
+| `list_notes` | Postgres | Browse notes with scope, domain, tag, and lifecycle-status filters |
 | `search_notes` | Postgres | Full-text search across note titles and content |
-| `update_note` | Postgres | Update note fields; re-embeds on content change |
-| `delete_note` | Postgres | Permanently delete a note and its embedding |
+| `update_note` | Postgres | Update note fields with optional `expected_version` precondition; every effective edit is versioned; re-embeds on content change |
+| `delete_note` | Postgres | Permanently delete a note, its history, and its embedding; splices any supersession chain through it |
+| `supersede_note` | Postgres | Mark a note as replaced by another (both must be active); the old note keeps its content with `status='superseded'` |
+| `get_note_history` | Postgres | Read a note's prior versions (title, content, what changed, who changed it) |
+| `prune_note_history` | Postgres | Drop all but the newest N history rows of a note — the only way to remove content edited out of it |
 | `store_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
 | `get_artifact` | Postgres | Retrieve artifact by UUID (full content + pointer + metadata) |
 | `list_artifacts` | Postgres | Browse artifacts with type, status, scope, and tag filters; execution_order-aware sort |
@@ -352,7 +355,7 @@ Every push to `main` builds, scans, and publishes a SHA-tagged image. Tagged rel
 
 **Image pipeline (on push to main):**
 ```
-Push → CI checks → Docker build → Snyk dep scan → Snyk container scan → Push sha-<hash> to GHCR
+Push → CI checks → Snyk dep scan → Docker build → Trivy container scan → Push sha-<hash> to GHCR
 ```
 
 **Release pipeline (on tag push):**
@@ -360,7 +363,7 @@ Push → CI checks → Docker build → Snyk dep scan → Snyk container scan �
 Tag v* → Pull validated sha image → Retag as <version> + latest → Push → GitHub Release
 ```
 
-Insecure images never reach the registry — Snyk gates the push. By the time a release tag exists, the image it points to has already passed every gate.
+Insecure images never reach the registry — the Snyk dependency scan and the Trivy container scan gate the push. By the time a release tag exists, the image it points to has already passed every gate.
 
 **To cut a release:**
 
@@ -399,20 +402,22 @@ docker compose up -d
 
 For Tier 2 (Postgres) or Tier 3 (embeddings), download the additional compose files from the repo and stack them as described in [Deployment Tiers](#deployment-tiers).
 
-## Snyk Setup (Maintainer)
+## Security Scanning Setup (Maintainer)
 
-The CI and release pipelines require a `SNYK_TOKEN` repository secret for dependency and container vulnerability scanning.
+Two scanners gate the pipeline. Only high and critical severity findings block it; medium and low are reported but do not fail the build.
 
-**Setup:**
+**Dependency scan (Snyk, `ci-checks.yml`)** runs on pushes to `main` and needs a `SNYK_TOKEN` repository secret:
 
-1. Sign up for a free Snyk account at [snyk.io](https://snyk.io) (free tier covers open-source projects)
-2. Generate an API token from **Account Settings → API Token**
+1. Sign up for a free Snyk account at [snyk.io](https://snyk.io).
+2. Generate an API token from **Account Settings → API Token**.
 3. Add it as a repository secret:
    ```bash
    gh secret set SNYK_TOKEN --repo onideus/context-library
    ```
 
-The scan threshold is `high` — only high and critical severity vulnerabilities block the pipeline. Medium and low findings are reported but do not fail the build.
+The scan passes `--remote-repo-url` pointing at this public repository. That is what tells Snyk the test belongs to a public repo, and Snyk's Free-plan test limits apply to private repositories only. If the counter on the Snyk org's Usage page still moves after a push to `main`, that flag is the first thing to check.
+
+**Container scan (Trivy, `image.yml`)** runs on the freshly built image before it is pushed to GHCR. It needs no account, token, or secret. It fails on HIGH and CRITICAL CVEs that have a fix available, in OS packages and Node modules alike, and ignores CVEs with no fix (the base image carries dozens of those in Debian packages that nobody downstream can patch). A fixable base-image CVE means rebuilding on a newer `node:22-slim`.
 
 ## Maintainer Notes
 
@@ -476,6 +481,7 @@ See `.env.example` for all configuration options.
 | `DATA_DIR` | `./data` | Handoff file storage path |
 | `RETENTION_COUNT` | `0` | Max handoff files to retain (`0` = unlimited) |
 | `COMPACTION_MODE` | `archive` | How the superseded handoff is treated after a store: `archive` (keep a byte-exact original in `handoffs/archive/`), `off` (never rewrite), `in-place` (legacy, lossy) |
+| `NOTE_HISTORY_MAX_VERSIONS` | `0` | Max prior versions kept per note in `note_versions` (`0` = unlimited); `prune_note_history` is the per-note manual control |
 | `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
 
 ### PostgreSQL (Tier 2)

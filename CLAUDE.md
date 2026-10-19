@@ -1,6 +1,6 @@
 # Context Library
 
-> **Last verified:** June 2026 (v0.10.0, commit 4151b25). If this file seems wrong, it probably is — check the source.
+> **Last verified:** October 2026 (v0.12.0, note-lifecycle PR on top of commit b4bc6a1). If this file seems wrong, it probably is — check the source.
 
 ## What This Is
 
@@ -49,7 +49,7 @@ All four content layers are built and deployed.
 
 2. **Tasks** (lifecycle) — Action items with status lifecycle (open/completed/deferred/cancelled). Stored in PostgreSQL. Full-text search via `to_tsvector`. Tools: `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`.
 
-3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migration `005_notes.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `delete_note`, `search_notes`. Indexed for `search_context`.
+3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migrations `005_notes.sql` + `013_note_lifecycle.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `delete_note`, `search_notes`, `supersede_note`, `get_note_history`, `prune_note_history`. Indexed for `search_context`. Notes have a **lifecycle** (`active` → `superseded` via `supersede_note`; `expired` is computed from `valid_until`, never stored), a **provenance** field (`stated | decided | inferred | fetched | derived`, nullable = not recorded), and **version history** (`note_versions`, written by a database trigger on every effective update). See `docs/design/note-lifecycle.md` and the "Note lifecycle invariants" block under Database.
 
 4. **Artifacts** (lifecycle outputs) — CC prompts, research documents, generated content. Stored in PostgreSQL (`artifacts` table, migration `006_artifacts.sql`). Status lifecycle: `draft -> ready -> executing -> completed -> superseded`. Execution ordering and dependency tracking. Tools: `store_artifact`, `get_artifact`, `list_artifacts`, `update_artifact`, `search_artifacts`. Indexed for `search_context`.
 
@@ -91,7 +91,8 @@ src/
     tasks.ts               # Task CRUD + search_tasks
     task-summary.ts        # Server-computed task_summary for handoff responses
     artifact-summary.ts    # Server-computed artifact_summary for handoff responses
-    notes.ts               # Note CRUD + search_notes
+    notes.ts               # Note CRUD + search_notes + supersede_note, get_note_history,
+                           #   prune_note_history (writes go through notes/store.ts)
     artifacts.ts           # Artifact CRUD + search_artifacts, status lifecycle
     search.ts              # search_context (hybrid), reindex
     search-aliases.ts      # Query alias expansion for semantic search
@@ -106,6 +107,11 @@ src/
     changes.ts             # Sync change-log helpers: appendChange (in-tx),
                            #   withTransaction, appendChangeBestEffort (handoffs),
                            #   backfillHandoffChanges (startup reconciliation)
+  notes/
+    store.ts               # Shared note write path (MCP tools + /sync/push): row locks,
+                           #   expected_version / expected_status / base_updated_at
+                           #   preconditions, supersede + delete-splice, change-log rows,
+                           #   history retention, lifecycle SQL fragments
   entities/
     pipeline.ts            # Extraction pipeline (extractAndStore, fire-and-forget)
     prompts.ts             # Extraction prompt templates
@@ -134,6 +140,8 @@ src/
       010_task_scope_shared.sql  # Extends task_scope enum to include 'shared'
       011_changes_log.sql  # changes table + sync_op_log for sync foundation
       012_sync_content_hash_index.sql  # Functional B-tree on artifacts((metadata->>'content_hash')) for /sync/content/
+      013_note_lifecycle.sql  # notes lifecycle/provenance/version columns, note_versions,
+                           #   notes_version_history trigger
   sync/
     auth.ts                # SyncAuthenticator interface + StaticTokenAuthenticator + middleware
     routes.ts              # GET /sync/changes, POST /sync/push (bearer-token protected)
@@ -149,6 +157,11 @@ src/
     search-aliases.test.ts # Unit: alias expansion
     tasks.test.ts          # Integration: task CRUD (Postgres-gated)
     notes.test.ts          # Integration: note CRUD (Postgres-gated)
+    note-lifecycle.test.ts # Integration: supersede_note, get_note_history, prune_note_history,
+                           #   expected_version conflicts, delete splice (Postgres-gated)
+    note-store.test.ts     # Integration: notes/store.ts directly — migration 013 over
+                           #   existing rows, versioning trigger, two-client lock/race,
+                           #   retention cap (Postgres-gated); pure helpers ungated
     artifacts.test.ts      # Integration: artifact CRUD + lifecycle (Postgres-gated)
     artifact-summary.test.ts  # Integration: artifact_summary on handoff retrieval (Postgres-gated)
     artifact-type-normalization.test.ts  # Unit: type normalization
@@ -166,6 +179,20 @@ src/
                            #   conditional-UPDATE race, patch_handoff conflict,
                            #   GET /sync/content/:content_hash content-on-demand
                            #   (Postgres-gated)
+    export-import.test.ts  # Integration: full export → wipe → import round-trip
+                           #   across every managed table + handoff file tree;
+                           #   also covers non-empty-refusal, --dry-run, --force,
+                           #   and manifest model mismatch → re-embed queue
+                           #   (Postgres-gated)
+scripts/
+  export.ts                # npm run export — tarball + per-table JSONL + manifest
+  import.ts                # npm run import — restore + re-embed queue
+  portability/
+    tables.ts              # Shared table registry (columns, orderBy, casts)
+    rows.ts                # buildInsert: JSONL row → INSERT (absent column → DEFAULT)
+    rows.test.ts           # Unit: buildInsert
+    io.ts                  # JSONL / tar helpers
+    manifest.ts            # ExportManifest shape
 ```
 
 ### Operational scripts
@@ -175,6 +202,9 @@ The `scripts/` directory contains tooling for one-off operations, data migration
 - `audit-compaction.ts` — READ-ONLY blast-radius audit of handoff compaction. Reports how many handoffs are compacted vs intact, when compaction happened (a wall of same-dated compacted files means `compact-history.ts` was run; a trickle means only the per-store path fired), and whether each compacted file’s pre-compaction text is still recoverable from `embeddings.content_text`. Verdicts: RECOVERABLE / LOST (re-indexed after compaction) / NO_ROWS / UNKNOWN (Postgres unreachable). Writes a JSON report to `DATA_DIR/audit/` — a gitignored path; audit output describes real content and must never enter the repo. Exposed as `npm run audit-compaction`.
 - `backfill-content-hashes.ts` — Adds `content_hash` to the `metadata` of existing locked artifacts (`ready`, `executing`, `completed`) that are missing it. Safe to re-run; already-hashed artifacts are skipped. Run once after upgrading from a version prior to the lockable-artifacts feature (PR #85). Run with `npx tsx scripts/backfill-content-hashes.ts`.
 - `compact-history.ts` — Compacts all handoff JSON files except the most recent, reducing file sizes by stripping non-essential keys. Skips handoffs whose embedding is still queued in `pending_embeddings`. Idempotent. Honours `COMPACTION_MODE`: archives each original first under `archive` (the default), and refuses to run under `off`. Exposed as `npm run compact-history`.
+- `export.ts` — Produces a single gzipped tarball containing per-table JSONL, the handoff file tree (including the `handoffs/archive/` compaction originals — the only full copy of a compacted handoff), and `manifest.json` (app version, applied migrations, embedding model + dimensions, per-table row counts, handoff schema versions). All table reads and row counts come from ONE `REPEATABLE READ READ ONLY` transaction — `note_versions` is written in the same transaction as every note edit, so per-table snapshots could capture a history row at or above the note's own version and leave a restored note permanently uneditable. Deterministic ordering per table so consecutive exports of an unchanged database diff cleanly — this is what makes a nightly-commit backup pattern work. Embeddings are excluded by default; `--include-embeddings` opts back in. `--out <dir>` overrides the default `<DATA_DIR>/exports/` output location. Exposed as `npm run export`. Table registry is shared with `import.ts` via `scripts/portability/tables.ts`.
+- `import.ts` — Restores an export tarball into a deployment. Verifies destination `_migrations` is at or beyond the manifest (runs the local migration runner if behind); refuses to import into a non-empty database without `--force`; pre-flights row counts and `notes`/`note_versions` consistency (every history row's `note_id` exists and its `version` is below the note's) before any write; loads each JSONL file in a per-table transaction (`SET CONSTRAINTS ALL DEFERRED`, so self-referencing `superseded_by` rows load in id order) with a manifest row-count check before commit; a column absent from a JSONL row is inserted as `DEFAULT` (so a pre-013 tarball restores with `status='active', version=1`); copies handoff files; queues re-embed through `pending_embeddings` when the tarball excluded embeddings or when the manifest's `embedding_model`/`embedding_dimensions` disagree with the destination's current config. `--dry-run` prints the plan without modifying the DB or filesystem. `--force` truncates every managed table (RESTART IDENTITY CASCADE) and clears `DATA_DIR/handoffs` before restoring — except `handoffs/archive/`, which is never cleared; the tarball's archive is merged in without overwriting existing originals. Exposed as `npm run import`. Full restore drill lives in `docs/backup-restore.md`.
+- `portability/` — Shared library for `export.ts` and `import.ts`. `tables.ts` is the single source of truth for which Postgres tables ship in an export, in what column order, sorted by which key, with which per-column type casts on restore. `io.ts` holds JSONL / tar helpers (system `tar` is shelled out to; no Node tar dependency). `manifest.ts` defines the manifest shape.
 - `extract-entities.ts` — Reads handoff JSON files from the configured data directory, batches them to the Anthropic API for entity extraction, and writes/merges a draft `entities.seed.json` for human review. Idempotent: an existing seed file is merged, preserving human-edited constraints. Exposed as `npm run extract-entities`. Requires `ANTHROPIC_API_KEY`.
 - `rehydrate-handoffs.ts` — Reconstructs the text of compacted handoffs from the chunks embedded before compaction ran. Only touches files `audit-compaction.ts` classifies RECOVERABLE. `--dry-run` is the DEFAULT; `--write` emits, `--force` regenerates. Output is a sidecar at `DATA_DIR/handoffs/archive/<filename>.recovered.json` — the compacted file itself is never modified. Honest limitation, stated in the script header, the recovered record, and its report: `extractHandoffText` flattened the handoff to prose before chunking, so this restores the TEXT of `active_context`, not its key structure; chunk seams are marked rather than guessed. Exposed as `npm run rehydrate-handoffs`.
 - `merge-entities.ts` — Pure merge logic for the entity seeding pipeline. Extracted from `extract-entities.ts` for testability. Not directly runnable.
@@ -190,7 +220,8 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 **Tables:**
 - `tasks` — UUID PK, title, context, status (enum), scope (enum), priority (enum), tags (text[]), blocked_reason, scheduled/due dates, timestamps. FTS index on title+context. Auto-updated `updated_at` trigger.
 - `embeddings` — UUID PK, content_type + content_id (unique), content_text, embedding (vector(768)), metadata (JSONB). HNSW index for cosine similarity (m=16, ef_construction=128). FTS index on content_text.
-- `notes` — UUID PK, title, content, scope, domain, tags (text[]), source_url, related_task_ids (uuid[]), timestamps. FTS on title+content.
+- `notes` — UUID PK, title, content, scope, domain, tags (text[]), source_url, related_task_ids (uuid[]), timestamps. FTS on title+content. Lifecycle columns (migration 013): `status` (`active` | `superseded`; CHECK), `superseded_by` (self-FK, NO ACTION, `DEFERRABLE INITIALLY IMMEDIATE`), `superseded_at`, `valid_until`, `provenance` (CHECK over the five values, nullable), `version` (INTEGER, trigger-owned). CHECKs: superseded ⇔ `superseded_by` set ⇔ `superseded_at` set; no self-supersede. `expired` is never stored — computed as `status='active' AND valid_until <= now()`. Trigger `notes_version_history` (BEFORE UPDATE) bumps `version` and writes a `note_versions` row on every effective update; a no-op UPDATE is a true no-op (no bump, no history, `updated_at` unchanged).
+- `note_versions` — PK (`note_id`, `version`); `snapshot` (JSONB of the row as it was at that version, minus id/version/created_at), `changed_fields` (text[]), `changed_via` (writer name from the transaction-local GUC `app.changed_via`, `'sql'` when unset), `changed_at`. Cascades with the note. Not a sync entity (never in `/sync/changes`); exported/imported.
 - `artifacts` — UUID PK, title, content, artifact_type, status (enum), scope, tags (text[]), pointer (JSONB), dependencies (uuid[]), execution_order (integer, unique per type), related_task_ids (uuid[]), metadata (JSONB), timestamps. FTS on title+content. `content_hash` (SHA-256 hex string) is auto-computed server-side and stored inside `metadata` whenever `content` is provided on `store_artifact` or `update_artifact`. The server-computed hash overrides any caller-supplied value. The hash is cleared on revert to `draft`. The tool layer strips any caller-supplied `content_hash` from metadata updates on all statuses when content is not changing in the same call. On promotion to a locked status, content_hash is recomputed from current row content if missing from metadata.
 - `entities` — Entity knowledge base for context_envelope generation. Seeded from deployment-local JSON.
 - `entity_nodes` — Canonical extracted entities, deduplicated across extraction runs. UNIQUE(canonical_name, entity_type), mention counting, first/last seen timestamps.
@@ -201,7 +232,19 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `sync_op_log` — Server-side dedupe of client push ops. UNIQUE(op_uuid) so replays return the earlier outcome without re-applying.
 - `_migrations` — filename PK, applied_at timestamp.
 
-**Migration count:** 12 migrations (001 through 012). New migrations must be added as the next numbered file — count what exists before naming.
+**Migration count:** 13 migrations (001 through 013). New migrations must be added as the next numbered file — count what exists before naming.
+
+**Note lifecycle invariants** (design: `docs/design/note-lifecycle.md`):
+- Every note write — MCP tools, `/sync/push`, future tools, raw SQL — is versioned by the `notes_version_history` trigger. Application code never sets `version` and never inserts into `note_versions` directly. Writers identify themselves with `set_config('app.changed_via', <name>, true)` inside the transaction; `src/notes/store.ts` does this.
+- All note mutations from MCP and sync go through `src/notes/store.ts` (`insertNoteInTx`, `updateNoteInTx`, `supersedeNoteInTx`, `deleteNoteInTx`, `pruneNoteHistoryInTx`). Do not add a second SQL path for notes — a fix to the store is a fix to both surfaces.
+- `expected_version` is **enforced whenever present**, on both MCP and sync, regardless of which fields the payload touches. Mismatch → `VERSION_CONFLICT` with the current row. It is checked before `expected_status` (→ `STATUS_CONFLICT`) and `base_updated_at` (→ `STALE_BASE`).
+- Lifecycle moves only through `supersede_note` (both notes must be active; successor must not be expired; cycles are impossible by construction) and the delete-time splice: deleting a note that superseded others re-points them to its own successor, or reactivates them when it was the end of the chain; each relinked predecessor gets its own change-log row. The `superseded_by` FK is NO ACTION, so a raw `DELETE` of a successor fails loudly rather than leaving a predecessor "superseded by nothing".
+- `supersede_note`, `delete_note`, and `prune_note_history` serialise on `pg_advisory_xact_lock(7013001)`; `update_note` does not. Multi-row locks use `ORDER BY id FOR UPDATE`.
+- `valid_until` must carry an explicit offset (`Z` or `±hh:mm`) on both paths (`parseIsoWithOffset`); offset-less values are rejected because JS and Postgres would read them as different instants.
+- Lifecycle state lives in `notes`, never in `embeddings.metadata` (the sync path cannot refresh it). Search-time lifecycle filtering joins/sub-selects `notes`.
+- `NOTE_HISTORY_MAX_VERSIONS` (default 0 = unlimited) trims history after each versioned write; `prune_note_history` is the per-note manual control and the only way to remove content edited out of a note. It writes no change-log row (the note row does not change).
+- **Data migrations that `UPDATE notes` fire the trigger too:** every touched row gets a version bump and a history row (`changed_via = 'sql'`) but no change-log row, so paired sync clients would hit `VERSION_CONFLICT` with no pull signal. A bulk data migration must either `ALTER TABLE notes DISABLE TRIGGER notes_version_history` for its duration (and say so), or append `changes` rows for the rows it touched.
+- Note ids are UUID text and Postgres returns them lowercase; `src/notes/store.ts` compares ids case-insensitively, and the sync push handler lowercases every pushed UUID `entity_id` (all entity types, plus `payload.superseded_by` on supersede) before anything else, so the change log, `sync_op_log`, the result `entity_id`, `relinked` and snapshot keys always agree; `op_uuid` is echoed exactly as sent.
 
 ## Sync foundation (Phase 1a)
 
@@ -209,7 +252,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 **Endpoints (all require `Authorization: Bearer <token>`):**
 - `GET /sync/changes?cursor=N&limit=M` — Returns changes rows after cursor N plus current row snapshots per referenced entity. Snapshot application on the client MUST be idempotent (pulling the same range twice reaches the same end state). Deletes appear as tombstone rows.
-- `POST /sync/push` — Applies a batch of client mutations. Each op has a client-generated `op_uuid` (server dedupes replays), an entity reference, an op kind, a payload, and an optional precondition (task/note edits carry `base_updated_at`; task/artifact edits may carry `expected_status`). Stale ops are rejected INDIVIDUALLY — each rejection returns current server state; the batch never fails as a whole. Whole-request body is capped by `SYNC_PUSH_MAX_BYTES` (default 5 MiB) and each op by `SYNC_PUSH_MAX_OP_BYTES` (default 128 KiB) — over-cap requests return HTTP 413. The body cap is enforced by a **streaming byte counter** that cancels the reader as soon as the cumulative size exceeds the cap, so a client that omits `Content-Length` and streams a chunked body cannot force the server to buffer a multi-hundred-MiB payload before rejection.
+- `POST /sync/push` — Applies a batch of client mutations. Each op has a client-generated `op_uuid` (server dedupes replays), an entity reference, an op kind (`insert` | `update` | `delete`, plus `supersede` for notes only — on a task or artifact it is rejected per op with `UNSUPPORTED_OP`), a payload, and an optional precondition object whose allowed keys are exactly `base_updated_at` (string), `expected_status` (string) and `expected_version` (integer ≥ 1), validated **per op** — an unknown key, a wrong type or `expected_version` < 1 fails only that op (`VALIDATION_ERROR` naming the key), never the batch; `insert` and `delete` accept no preconditions at all. Note ops: payload may carry `provenance` and `valid_until` (ISO with offset); `expected_version` → `VERSION_CONFLICT`, `expected_status` → `STATUS_CONFLICT` (both enforced whenever present), `base_updated_at` → `STALE_BASE` (likewise enforced on task AND artifact `update` — artifact previously ignored it — with the same ISO / string-equality comparison); `supersede` carries `payload.superseded_by`; a note `delete` result lists `relinked` predecessors; note `insert`/content `update` enqueue `pending_embeddings` inside the push transaction (no TEI call on the push path). Snapshots of notes carry `status` (stored), `superseded_by`, `superseded_at`, `valid_until`, `provenance`, `version` — clients compute `expired` from `valid_until` with their own clock and should use `version` as their edit precondition. Wire details: a conflict may carry `detail` (`{missing: "id" | "superseded_by"}` on a note `NOT_FOUND` — `"superseded_by"` only from `supersede`; `{reason}` on `INVALID_SUCCESSOR`); a note delete result carries `relinked: [{entity_id, snapshot}]`; per-op rejections are `status: "error"` with `error: "<CODE>: <message>"` — `UNSUPPORTED_OP` (supersede on a non-note) and `VALIDATION_ERROR` (bad `valid_until`; malformed or unknown precondition keys; any precondition key on `insert`/`delete`; `expected_version` on anything but note `update`/`supersede`; `base_updated_at` on `supersede`) — and, like conflicts, roll the `sync_op_log` claim back so a corrected retry with the same `op_uuid` applies. Stale ops are rejected INDIVIDUALLY — each rejection returns current server state; the batch never fails as a whole. Whole-request body is capped by `SYNC_PUSH_MAX_BYTES` (default 5 MiB) and each op by `SYNC_PUSH_MAX_OP_BYTES` (default 128 KiB) — over-cap requests return HTTP 413. The body cap is enforced by a **streaming byte counter** that cancels the reader as soon as the cumulative size exceeds the cap, so a client that omits `Content-Length` and streams a chunked body cannot force the server to buffer a multi-hundred-MiB payload before rejection.
 - `GET /sync/content/:content_hash` — Content-on-demand fetch for artifacts. Snapshot rows carry `content_hash` (in `metadata`) but never raw `content`; the mobile client caches content addressed by hash so status flips don't invalidate the cache. This endpoint materialises the body given a hash. Read-only — no change-log row, no side effects. Response shape on success: `{"content_hash": "...", "content": "..."}` with `Content-Type: application/json`. Errors: `400 INVALID_CONTENT_HASH` if the path parameter is not 64 lowercase hex chars (validated pre-query); `404 CONTENT_NOT_FOUND` if no artifact carries that hash; `404 CONTENT_NOT_INLINE` if a match exists but the artifact's content lives behind a `pointer` with no inline body — treat as not-viewable-on-device rather than resolving the pointer server-side. Content is content-addressed: multiple artifacts may share a hash, and the endpoint returns the content once regardless.
 
 **Protocol invariants (see design-doc §3–§4):**
@@ -217,12 +260,13 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 - **Known gap-under-concurrent-commits window in `seq`.** BIGSERIAL numbers are handed out at INSERT time, not at COMMIT time. If tx A gets `seq=100` then tx B gets `seq=101` and B commits first, a puller can observe `seq=101` and record `next_cursor=101` before A commits — then when A finally commits, `seq=100` becomes visible below the cursor and is missed. Change-log transactions are short (single INSERT + `appendChange` inside the entity mutation), so the window is narrow. The design tolerates this: sync ops are at-least-once, snapshot application on the client is idempotent, and pushes dedupe on `op_uuid`, so a puller that later re-sees a "missed" row through a broader range simply upserts the current snapshot with no ill effect. iOS/other pullers must NOT, however, treat cursor progression as strict-total-order (e.g. cross-entity causal ordering derived from `seq`). If strict ordering ever becomes a hard requirement (e.g. server-side rollup), swap the pull query to filter on `pg_snapshot_xmin(pg_current_snapshot())` as a low-water-mark rather than raising the naive `MAX(seq)`.
 - Change-log inserts happen in the SAME transaction as the entity mutation for tasks/notes/artifacts. Handoff appends are fire-and-forget so the file-mode graceful-degradation path stays working under Postgres outage; server startup runs `backfillHandoffChanges` to reconcile any handoff files that landed on disk while Postgres was down so pullers eventually see them.
 - `/sync/push` dedupe claim and the entity mutation share ONE transaction. On precondition conflict the transaction rolls back — the sync_op_log claim disappears with it, so a subsequent retry with a fresh precondition isn't spuriously deduped. Never rely on a compensating DELETE after the claim commits.
-- Individual push ops process independently; a rejected precondition never poisons the batch.
+- Individual push ops process independently; a rejected precondition (stale or malformed) never poisons the batch.
 - Replays are harmless: the second push with the same `op_uuid` returns `dedup` plus the earlier `seq`.
 
 **Concurrency hardening baked in with the sync foundation:**
 - `update_artifact` and `update_task` (both MCP paths) AND the `/sync/push` task/artifact update paths use conditional-UPDATE for status transitions: `UPDATE ... WHERE id=$id AND status=$expected RETURNING ...`. Lost writes return `STATUS_CONFLICT` with the current server state. The MCP and sync paths must stay in sync — a fix to one is only half-done until the other has it.
 - **`expected_status` semantic — sync path enforces whenever present; MCP path enforces only when status changes.** On the `/sync/push` task and artifact update paths, `expected_status` is a claim about the row's current state and is enforced whenever the caller supplies it — regardless of whether the payload itself mutates status. A title-only push op that carries `expected_status="draft"` while the row is now `ready` returns `STATUS_CONFLICT`. Rationale: an `expected_status` in a sync precondition is the client asserting "I believe the row looks like X"; the truthful response to a mismatch is a conflict, not a silent stale-write. The MCP `update_task` / `update_artifact` handlers CURRENTLY diverge — they only apply the conditional-UPDATE guard when the payload mutates status, so a title-only MCP call passing a stale `expected_status` silently applies. This is a known asymmetry pending a follow-up; the sync path is the load-bearing one for the mobile client, so it was hardened first. When the MCP handlers are eventually brought into alignment, do NOT reintroduce the "only enforce when status changes" split on either side — the stricter "whenever present" is the target semantic.
+- Notes use `version` (trigger-owned integer) as the primary optimistic-concurrency token on both paths: `expected_version` → `VERSION_CONFLICT`. The note `base_updated_at` comparison is done by `updatedAtMatches` in `src/notes/store.ts` (ISO string or same-instant match) — the earlier `String(Date)` comparison could never succeed and is gone; task and artifact updates share `baseUpdatedAtIsStale` in `src/sync/routes.ts`.
 - `patch_handoff` accepts optional `expected_source` (the filename the caller intended to patch against). If the current latest handoff has moved, returns `HANDOFF_CONFLICT` — closes the read-merge-write lost-update race.
 - `artifacts.metadata->>'content_hash'` is indexed by migration `012_sync_content_hash_index.sql` (functional B-tree over the extracted text, `WHERE metadata ? 'content_hash'`). `GET /sync/content/:content_hash` and any future content-addressed lookup must go through this index — a full-table scan on the mobile hot path is a shipping defect.
 
@@ -284,7 +328,7 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned.
 
 - **`ci.yml`** — Trigger for pull_request and push to main. Calls `ci-checks.yml`.
 - **`ci-checks.yml`** — Reusable workflow: `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16), Snyk dependency scan. Notifies via ntfy.
-- **`image.yml`** — On push to main: runs ci-checks, builds Docker image, Snyk container scan (with base image exclusion), pushes `sha-<short>` tagged image to GHCR.
+- **`image.yml`** — On push to main: runs ci-checks, builds Docker image, Trivy container scan (HIGH/CRITICAL, fixed CVEs only, no account needed), pushes `sha-<short>` tagged image to GHCR.
 - **`release.yml`** — On `v*` tag push or workflow_dispatch: promotes a SHA-tagged image to version tag + `latest` (skips latest for prereleases), creates GitHub Release with auto-generated notes, notifies via ntfy.
 - **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `image.yml` normally (GITHUB_TOKEN pushes do not trigger downstream workflows).
 - **`cleanup.yml`** — Cleans up old container images and stale resources.
@@ -301,6 +345,7 @@ Key variables:
 - `DATA_DIR` (default: `./data`) — Handoff file storage path.
 - `RETENTION_COUNT` (default: `0`, unlimited) — Max handoff files to retain before pruning oldest. Never applies to `handoffs/archive/`.
 - `COMPACTION_MODE` (default: `archive`) — What happens to the handoff a `store_handoff` supersedes. `archive` copies the byte-exact original to `DATA_DIR/handoffs/archive/` before rewriting it; `off` never rewrites (the archival-deployment setting); `in-place` is the legacy lossy rewrite. Unrecognised values fall back to `archive` with a warning — a typo must never select the destructive path.
+- `NOTE_HISTORY_MAX_VERSIONS` (default: `0`, unlimited) — Max `note_versions` rows kept per note; trimmed after each versioned write. `prune_note_history` is the per-note manual control.
 - `CORS_ORIGINS` (default: `https://claude.ai,https://claude.com`) — Comma-separated allowed origins.
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.

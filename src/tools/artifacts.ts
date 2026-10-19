@@ -257,7 +257,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       dependencies: z.array(z.string()).optional().describe("UUIDs of artifacts that must complete before this one"),
       execution_order: z.number().int().optional().describe("Ordering within a batch (1, 2, 3...). Use for sequenced prompt chains."),
       related_task_ids: z.array(z.string()).optional().describe("UUIDs of tasks this artifact relates to"),
-      metadata: z.record(z.unknown()).optional().describe("Flexible metadata. Pipeline contract for cc-prompt artifacts: 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it), 'target_org' (optional, defaults per interceptor config), 'base_branch', 'working_branch', 'model', 'surface', 'batch_label', 'risk_hint'. 'content_hash' is auto-computed server-side — do NOT supply it; any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo' (kept one release for reader compatibility)."),
+      metadata: z.record(z.string(), z.unknown()).optional().describe("Flexible metadata. Pipeline contract for cc-prompt artifacts: 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it), 'target_org' (optional, defaults per interceptor config), 'base_branch', 'working_branch', 'model', 'surface', 'batch_label', 'risk_hint'. 'content_hash' is auto-computed server-side — do NOT supply it; any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo' (kept one release for reader compatibility)."),
     },
     async (args) => {
       if (!args.title?.trim()) {
@@ -555,7 +555,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
       dependencies: z.array(z.string()).optional().describe("New dependencies (full replacement)"),
       execution_order: z.number().int().nullable().optional().describe("New execution_order, or null to clear"),
       related_task_ids: z.array(z.string()).optional().describe("New related task IDs (full replacement)"),
-      metadata: z.record(z.unknown()).optional().describe("Metadata to merge (top-level keys). Pipeline contract for cc-prompt artifacts: set 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it) and optionally 'target_org'. 'content_hash' is auto-computed server-side and any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo'."),
+      metadata: z.record(z.string(), z.unknown()).optional().describe("Metadata to merge (top-level keys). Pipeline contract for cc-prompt artifacts: set 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it) and optionally 'target_org'. 'content_hash' is auto-computed server-side and any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo'."),
       expected_status: statusEnum.optional().describe(
         "Optimistic concurrency precondition. When provided AND status is being changed, the UPDATE runs conditionally against this value — if the row is no longer in expected_status, returns STATUS_CONFLICT with current server state instead of silently overwriting a concurrent transition. When omitted, the row's current status (as of the read at the top of this call) is used as the precondition."
       ),
