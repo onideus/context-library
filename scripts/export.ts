@@ -8,8 +8,18 @@
  *   - `tables/*.jsonl` — one JSON line per row per Postgres table, sorted
  *     deterministically so consecutive exports of an unchanged database
  *     produce byte-identical output (this is what makes a nightly-commit
- *     backup pattern diff cleanly)
+ *     backup pattern diff cleanly). Every table is read from one
+ *     REPEATABLE READ snapshot, so the files are mutually consistent even
+ *     when the export races a write (see exportAllTables)
  *   - `handoffs/*.json` — verbatim copy of the handoff file tree
+ *
+ * The database schema must be at least as new as this checkout: the SELECTs
+ * name every column in the table registry (scripts/portability/tables.ts), so
+ * exporting from a checkout newer than the schema fails fast with
+ * `column ... does not exist` (SQLSTATE 42703). That is by design — a tarball
+ * quietly missing the new columns would be a lossy backup. Start the server
+ * once (it migrates at startup) or run the migration runner, then export. Only
+ * a wholly missing TABLE (42P01) is tolerated: it is written as an empty file.
  *
  * Embeddings are excluded by default because they are recomputable — a
  * re-embed on import is cheaper than paying to ship the vectors around and
@@ -37,9 +47,11 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { PoolClient } from "pg";
+
 import { config } from "../src/config.js";
 import { ARCHIVE_DIRNAME } from "../src/storage/json-store.js";
-import { pool, query } from "../src/db/client.js";
+import { pool, getClient } from "../src/db/client.js";
 import {
   TABLES,
   type TableSpec,
@@ -123,11 +135,12 @@ async function resolveAppVersion(): Promise<string> {
 // ── Table export ──────────────────────────────────────────────────
 
 async function exportTable(
+  client: PoolClient,
   spec: TableSpec,
   stagingDir: string
 ): Promise<number> {
   const sql = `SELECT ${spec.columns.join(", ")} FROM ${spec.name} ORDER BY ${spec.orderBy}`;
-  const res = await query<Record<string, unknown>>(sql);
+  const res = await client.query<Record<string, unknown>>(sql);
   const lines = res.rows.map((row) => rowToJsonLine(row, spec.columns));
   await writeJsonlFile(join(stagingDir, "tables", `${spec.name}.jsonl`), lines);
   return lines.length;
@@ -225,15 +238,102 @@ function isUndefinedTableError(err: unknown): boolean {
   );
 }
 
-async function readAppliedMigrations(): Promise<string[]> {
+/**
+ * Run `fn` inside a savepoint so an undefined_table error (42P01) does not
+ * poison the surrounding snapshot transaction. On 42P01 the savepoint is
+ * rolled back — the transaction stays usable and keeps its snapshot — and
+ * `undefined` is returned; any other error re-throws and fails the export.
+ */
+async function orIfTableMissing<T>(
+  client: PoolClient,
+  fn: () => Promise<T>
+): Promise<T | undefined> {
+  await client.query("SAVEPOINT export_step");
   try {
-    const res = await query<{ filename: string }>(
+    const value = await fn();
+    await client.query("RELEASE SAVEPOINT export_step");
+    return value;
+  } catch (err) {
+    if (!isUndefinedTableError(err)) throw err;
+    await client.query("ROLLBACK TO SAVEPOINT export_step");
+    return undefined;
+  }
+}
+
+async function readAppliedMigrations(client: PoolClient): Promise<string[]> {
+  const rows = await orIfTableMissing(client, async () => {
+    const res = await client.query<{ filename: string }>(
       "SELECT filename FROM _migrations ORDER BY filename"
     );
     return res.rows.map((r) => r.filename);
+  });
+  return rows ?? [];
+}
+
+// ── Snapshot export ───────────────────────────────────────────────
+
+/**
+ * Reads every table (and the migration inventory) from ONE snapshot and
+ * returns the per-table row counts the manifest declares. The counts are the
+ * lengths of the very result sets that were written, so they cannot disagree
+ * with the JSONL files.
+ *
+ * Why a single REPEATABLE READ transaction rather than one autocommit SELECT
+ * per table: note_versions is written in the same transaction as every note
+ * edit (a trigger), so reading `notes` and `note_versions` at two different
+ * instants can capture a note at version N alongside a history row (id, N) —
+ * the restored note would then collide with its own history on the next edit
+ * and be permanently uneditable — or a history row whose note the earlier read
+ * missed, which fails the restore half-way through. The same skew existed
+ * latently between entity_nodes and entity_relations. READ ONLY guarantees the
+ * export cannot write. The snapshot lives only as long as the table reads
+ * (JSONL is staged to disk while it is open), not the handoff copy or the tar
+ * step.
+ */
+async function exportAllTables(
+  includeEmbeddings: boolean,
+  staging: string
+): Promise<{ rowCounts: Record<string, number>; appliedMigrations: string[] }> {
+  const tablesStaging = join(staging, "tables");
+  const rowCounts: Record<string, number> = {};
+  const client = await getClient();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+
+    for (const spec of TABLES) {
+      if (spec.embeddingsOnly && !includeEmbeddings) continue;
+      // A missing table (fresh install that has never applied a given
+      // migration) is not fatal — record zero and keep going. Only PG's
+      // undefined_table (42P01) is treated this way. Any other error
+      // re-throws to fail fast.
+      const n = await orIfTableMissing(client, () =>
+        exportTable(client, spec, staging)
+      );
+      if (n !== undefined) {
+        rowCounts[spec.name] = n;
+        console.log(`[export] tables/${spec.name}.jsonl: ${n} row(s)`);
+        continue;
+      }
+      rowCounts[spec.name] = 0;
+      await writeJsonlFile(join(tablesStaging, `${spec.name}.jsonl`), []);
+      if (spec.embeddingsOnly && includeEmbeddings) {
+        console.warn(
+          `[export] --include-embeddings requested but ${spec.name} table is absent; ` +
+            "wrote empty JSONL. Import will queue every row for re-embed as usual."
+        );
+      } else {
+        console.warn(`[export] tables/${spec.name}.jsonl: table missing, wrote empty file`);
+      }
+    }
+
+    const appliedMigrations = await readAppliedMigrations(client);
+    await client.query("COMMIT");
+    return { rowCounts, appliedMigrations };
   } catch (err) {
-    if (isUndefinedTableError(err)) return [];
+    await client.query("ROLLBACK").catch(() => {});
     throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -263,39 +363,11 @@ async function main(): Promise<void> {
   await ensureDir(tablesStaging);
 
   try {
-    const rowCounts: Record<string, number> = {};
-
-    for (const spec of TABLES) {
-      if (spec.embeddingsOnly && !args.includeEmbeddings) continue;
-      try {
-        const n = await exportTable(spec, staging);
-        rowCounts[spec.name] = n;
-        console.log(`[export] tables/${spec.name}.jsonl: ${n} row(s)`);
-      } catch (err) {
-        // A missing table (fresh install that has never applied a given
-        // migration) is not fatal — record zero and keep going. Only PG's
-        // undefined_table (42P01) is treated this way. Any other error
-        // re-throws to fail fast.
-        if (
-          typeof err === "object" &&
-          err !== null &&
-          (err as { code?: unknown }).code === "42P01"
-        ) {
-          rowCounts[spec.name] = 0;
-          await writeJsonlFile(join(tablesStaging, `${spec.name}.jsonl`), []);
-          if (spec.embeddingsOnly && args.includeEmbeddings) {
-            console.warn(
-              `[export] --include-embeddings requested but ${spec.name} table is absent; ` +
-                "wrote empty JSONL. Import will queue every row for re-embed as usual."
-            );
-          } else {
-            console.warn(`[export] tables/${spec.name}.jsonl: table missing, wrote empty file`);
-          }
-        } else {
-          throw err;
-        }
-      }
-    }
+    // Every table read and the migration inventory come from one snapshot.
+    const { rowCounts, appliedMigrations } = await exportAllTables(
+      args.includeEmbeddings,
+      staging
+    );
 
     const handoffsSrc = join(config.dataDir, "handoffs");
     const handoffs = await copyHandoffs(handoffsSrc, staging);
@@ -312,7 +384,7 @@ async function main(): Promise<void> {
     const manifest: ExportManifest = {
       manifest_version: MANIFEST_VERSION,
       app_version: appVersion,
-      applied_migrations: await readAppliedMigrations(),
+      applied_migrations: appliedMigrations,
       handoff_schema_versions: handoffs.schema_versions,
       handoff_file_count: handoffs.count,
       handoff_archive_file_count: archiveCount,

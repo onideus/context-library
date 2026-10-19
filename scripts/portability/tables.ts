@@ -6,8 +6,12 @@
  * order and INSERTs with the listed column list. Add a new table by adding
  * one entry — do not fan changes across export.ts and import.ts.
  *
- * Ordering matters:
+ * Ordering matters for LOAD (import reads the files in this order):
  *   - `entities` (JIT seeds) and `entity_nodes` have no cross-table FKs, load first
+ *   - `note_versions` FKs notes(id), so it follows `notes`. `notes` also has a
+ *     self-referencing FK (`superseded_by` → `notes.id`); import runs
+ *     `SET CONSTRAINTS ALL DEFERRED` per table so those rows load in `id`
+ *     order regardless of which note references which
  *   - `entity_relations` FKs source_entity_id / target_entity_id → entity_nodes
  *   - `sync_op_log.change_seq` FKs changes.seq (ON DELETE SET NULL, but we
  *     preserve the reference where possible)
@@ -18,6 +22,12 @@
  * The `orderBy` clause is the deterministic sort key — consecutive exports
  * of an unchanged database must produce byte-identical JSONL so the
  * nightly-commit-to-a-private-backup-repo pattern actually diffs cleanly.
+ *
+ * Restore tolerates older tarballs: a column that is ABSENT from a JSONL row
+ * (as opposed to present with `null`) is emitted as the SQL keyword DEFAULT
+ * (see rows.ts), and a table with no JSONL file loads as zero rows. That is
+ * how a tarball written before a column or table existed still restores —
+ * the destination's column defaults supply the missing values.
  */
 
 export interface TableSpec {
@@ -39,7 +49,10 @@ export interface TableSpec {
 
 /**
  * Table load order for import. Parent tables (referenced by FKs) come first.
- * The reverse of this list is the safe wipe order for --force.
+ *
+ * This list is NOT a wipe order. `--force` truncates every table in this same
+ * forward order with `TRUNCATE ... RESTART IDENTITY CASCADE`, and CASCADE
+ * handles the FK dependencies, so iteration order is not load-bearing there.
  */
 export const TABLES: TableSpec[] = [
   {
@@ -77,10 +90,38 @@ export const TABLES: TableSpec[] = [
       "scope",
       "source_url",
       "related_task_ids",
+      // Lifecycle / provenance / version columns (migration 013). `version`
+      // is restored verbatim so it stays above every note_versions row.
+      "status",
+      "superseded_by",
+      "superseded_at",
+      "valid_until",
+      "provenance",
+      "version",
       "created_at",
       "updated_at",
     ],
     orderBy: "id",
+  },
+  {
+    // Per-note edit history (migration 013), written by a BEFORE UPDATE trigger
+    // on notes. Row (note_id, k) is the note as it was at version k; the
+    // current row in `notes` is the latest version. Import must load it after
+    // `notes` (FK) and its versions must all be < the note's current version —
+    // import verifies that before writing anything.
+    name: "note_versions",
+    columns: [
+      "note_id",
+      "version",
+      "snapshot",
+      "changed_fields",
+      "changed_via",
+      "changed_at",
+    ],
+    orderBy: "note_id, version",
+    casts: {
+      snapshot: "jsonb",
+    },
   },
   {
     name: "artifacts",
