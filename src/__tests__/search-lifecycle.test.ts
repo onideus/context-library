@@ -823,7 +823,11 @@ async function startStub(): Promise<Stub> {
         }
         send(404, { error: "not found" });
       } catch (err) {
-        send(500, { error: String(err) });
+        // Never echo the error into the response (CodeQL: information
+        // exposure through a stack trace). The stub is test-only, so the
+        // detail goes to stderr for whoever is debugging the test instead.
+        console.error("[search-lifecycle stub] request failed:", (err as Error).message);
+        send(500, { error: "stub request failed" });
       }
     });
   });
