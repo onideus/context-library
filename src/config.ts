@@ -112,7 +112,7 @@ export const config = {
     return Number.isFinite(v) && v > 0 ? v : 100;
   })(),
   // Whole-request ceiling on /sync/push. Each op's `payload` and
-  // `precondition` are z.unknown()/z.record(z.unknown()) so field-level Zod
+  // `precondition` are z.unknown()/z.record(z.string(), z.unknown()) so field-level Zod
   // caps don't help; we cap the wire body instead to keep a
   // bearer-authenticated client from posting a 200-op batch of multi-MB
   // artifact content.
