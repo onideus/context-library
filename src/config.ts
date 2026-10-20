@@ -90,6 +90,14 @@ export const config = {
     const v = parseInt(process.env.ENTITY_GRAPH_MAX_CANDIDATES ?? "50", 10);
     return Number.isFinite(v) && v > 0 ? v : 50;
   })(),
+  // Cap on note_versions rows retained per note. 0 (default) = unlimited,
+  // matching the RETENTION_COUNT convention. Enforced by the shared note
+  // write path (src/notes/store.ts) after each versioned write;
+  // prune_note_history is the per-note manual control.
+  noteHistoryMaxVersions: (function () {
+    const v = parseInt(process.env.NOTE_HISTORY_MAX_VERSIONS ?? "0", 10);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  })(),
   // Sync bearer token for the reference authenticator. The repo commits the
   // auth *boundary* (pluggable interface + static-token impl); deployments
   // choose their own value via env. If unset, the /sync/* routes reject all
@@ -104,7 +112,7 @@ export const config = {
     return Number.isFinite(v) && v > 0 ? v : 100;
   })(),
   // Whole-request ceiling on /sync/push. Each op's `payload` and
-  // `precondition` are z.unknown()/z.record(z.unknown()) so field-level Zod
+  // `precondition` are z.unknown()/z.record(z.string(), z.unknown()) so field-level Zod
   // caps don't help; we cap the wire body instead to keep a
   // bearer-authenticated client from posting a 200-op batch of multi-MB
   // artifact content.
