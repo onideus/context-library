@@ -100,6 +100,16 @@ Follow-up fixes surfaced during PR #39 review.
 
 - **`npm run export`** and **`npm run import`** ship the four primitives + entity graph + sync tables + handoff file tree as a single portable tarball with a `manifest.json` (app version, applied migrations, embedding model + dimensions, row counts, handoff schema versions). Deterministic JSONL ordering so consecutive exports diff cleanly. Embeddings excluded by default and re-embedded through the existing `pending_embeddings` queue on import; `--include-embeddings` opts back in for exact restores. Import guards a non-empty destination behind `--force`; `--dry-run` is pure. Restore drill lives in `docs/backup-restore.md`. Table registry shared between the two scripts (`scripts/portability/tables.ts`). This lands earlier than its ROADMAP v0.15 slot because backup / DR rehearsal + embedding-model migration + adopter-restore are hard-blocked without it.
 
+### v0.12 (in-flight) — Notes lifecycle, provenance, version history
+
+The note-side half of the v0.12 "Memory Lifecycle" item, built as two stacked PRs (design: `docs/design/note-lifecycle.md`).
+
+- **Lifecycle (migration `013_note_lifecycle.sql`):** `status` (`active` | `superseded`), `superseded_by`, `superseded_at`, `valid_until` on `notes`; existing rows backfill to `active`. `expired` is computed from `valid_until` at read time, never stored. Supersession is a **separate `supersede_note` tool**, not an `update_note` action — CLAUDE.md rule #1 (no polymorphic tools) wins over the earlier sketch below. Deleting a successor splices the chain (re-point, or reactivate at chain end).
+- **Provenance:** `provenance` ∈ `stated | decided | inferred | fetched | derived`, nullable (= not recorded), optional on `create_note`/`update_note` with honesty steering in the descriptions.
+- **Version history + edit precondition:** trigger-owned `version` counter and `note_versions` table written on every effective update by every writer (MCP, `/sync/push`, raw SQL); `get_note_history` reads it; `prune_note_history` and `NOTE_HISTORY_MAX_VERSIONS` bound it. `update_note` / `supersede_note` and the sync note ops take `expected_version` → `VERSION_CONFLICT`. One shared write path (`src/notes/store.ts`) serves MCP and sync.
+- **Sync + export:** `supersede` push op (notes only), strict preconditions, `expected_status` enforced for notes, the note `base_updated_at` comparison fixed; export runs in one `REPEATABLE READ` snapshot; import defers the self-FK and restores pre-013 tarballs with defaults.
+- **Search awareness** (second PR): `search_notes` / `search_context` redirect a superseded hit to its chain head and say so; expired notes hidden by default; `include_superseded` / `include_expired` opt back in.
+
 ## Planned
 
 Ordered by expected leverage, not strict sequence. Version targets are tentative — entries may merge, split, or reorder as design work surfaces dependencies.
@@ -122,8 +132,8 @@ Handoffs and notes accumulate forever (`RETENTION_COUNT` defaults to unlimited) 
 
 **Rough design:**
 
-- **Notes lifecycle (new migration):** add `status` (`active`/`superseded`/`expired`), `superseded_by UUID`, and `valid_until TIMESTAMPTZ` to `notes`. `update_note` gains a supersede action that links old → new (mirroring the artifact lifecycle pattern). Existing rows backfill to `active`.
-- **Search awareness:** `search_context` excludes superseded/expired notes by default (opt back in via `include_superseded`), annotates any superseded result with its successor, and the context envelope states it explicitly: "decision X was superseded by Y on <date>".
+- **Notes lifecycle, provenance, version history** — *in flight; see the v0.12 (in-flight) entry under Completed.* Shipped as a separate `supersede_note` tool rather than an `update_note` action (CLAUDE.md rule #1), with `expired` computed from `valid_until` rather than stored.
+- **Search awareness** — *in flight (second stacked PR).* `search_notes` and `search_context` redirect a superseded hit to the head of its chain and annotate it ("note X matched but was superseded by Y on <date> — showing the successor"); expired notes are hidden by default; `include_superseded` / `include_expired` opt back in. Redirect rather than hide, so a query that matches the old wording still reaches the current fact.
 - **Recency weighting:** optional exponential decay on RRF scores with a configurable half-life env var (default off until the eval harness can prove the right setting).
 - **Consolidation pipeline (`npm run consolidate`):** distill handoffs older than N days into durable notes ("what's still true") using the existing entity-extraction provider abstraction (Ollama or API), then archive the raw files to `data/handoffs/archive/`. Grows out of `compact-history`. Idempotent, dry-run mode, and human-review output before any write — same review-first pattern as `extract-entities`.
 

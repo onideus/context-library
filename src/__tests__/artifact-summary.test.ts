@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -122,33 +123,23 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
     await rm(TEST_DATA_DIR, { recursive: true, force: true });
     await mkdir(TEST_DATA_DIR, { recursive: true });
 
-    serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        MCP_PORT: String(TEST_PORT),
-        DATA_DIR: TEST_DATA_DIR,
-        PGHOST: PG_HOST,
-        PGPORT: PG_PORT,
-        PGUSER: PG_USER,
-        PGPASSWORD: PG_PASSWORD,
-        PGDATABASE: PG_DATABASE,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
+    serverProcess = spawnServer({
+      ...process.env,
+      MCP_PORT: String(TEST_PORT),
+      DATA_DIR: TEST_DATA_DIR,
+      PGHOST: PG_HOST,
+      PGPORT: PG_PORT,
+      PGUSER: PG_USER,
+      PGPASSWORD: PG_PASSWORD,
+      PGDATABASE: PG_DATABASE,
     });
-
-    serverProcess.stderr?.on("data", () => {});
-    serverProcess.stdout?.on("data", () => {});
 
     await waitForServer(BASE_URL);
   }, 20_000);
 
   afterAll(async () => {
     if (serverProcess) {
-      serverProcess.kill("SIGTERM");
-      await new Promise((r) => setTimeout(r, 500));
-      if (!serverProcess.killed) serverProcess.kill("SIGKILL");
+      await stopServer(serverProcess);
     }
     await rm(TEST_DATA_DIR, { recursive: true, force: true });
   });

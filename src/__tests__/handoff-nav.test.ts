@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -80,40 +81,28 @@ beforeAll(async () => {
   await rm(TEST_DATA_DIR, { recursive: true, force: true });
   await mkdir(TEST_DATA_DIR, { recursive: true });
 
-  serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      MCP_PORT: String(TEST_PORT),
-      DATA_DIR: TEST_DATA_DIR,
-      // This suite is file-based — force the Postgres-unavailable path
-      // deterministically by pointing pg at a closed port (instant
-      // ECONNREFUSED). Without this the server inherits PG* env or pg's
-      // defaults (localhost:5432, OS user, no password) and, when a local
-      // Postgres is running, every query fails mid-SASL-auth — node-postgres
-      // leaks the socket and the backend sits in authentication until
-      // timeout, exhausting connection slots for the Postgres-gated suites
-      // running in parallel.
-      PGHOST: "127.0.0.1",
-      PGPORT: "1",
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: true,
+  serverProcess = spawnServer({
+    ...process.env,
+    MCP_PORT: String(TEST_PORT),
+    DATA_DIR: TEST_DATA_DIR,
+    // This suite is file-based — force the Postgres-unavailable path
+    // deterministically by pointing pg at a closed port (instant
+    // ECONNREFUSED). Without this the server inherits PG* env or pg's
+    // defaults (localhost:5432, OS user, no password) and, when a local
+    // Postgres is running, every query fails mid-SASL-auth — node-postgres
+    // leaks the socket and the backend sits in authentication until
+    // timeout, exhausting connection slots for the Postgres-gated suites
+    // running in parallel.
+    PGHOST: "127.0.0.1",
+    PGPORT: "1",
   });
-
-  // Continuously drain child stdio so pipe buffers don't fill and block the
-  // child process when this suite runs alongside other parallel workers.
-  serverProcess.stderr?.on("data", () => {});
-  serverProcess.stdout?.on("data", () => {});
 
   await waitForServer(BASE_URL);
 }, 45_000);
 
 afterAll(async () => {
   if (serverProcess) {
-    serverProcess.kill("SIGTERM");
-    await new Promise((r) => setTimeout(r, 500));
-    if (!serverProcess.killed) serverProcess.kill("SIGKILL");
+    await stopServer(serverProcess);
   }
   await rm(TEST_DATA_DIR, { recursive: true, force: true });
 });

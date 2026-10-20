@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { countOccurrences, literalReplace, appendWithNewline } from "../tools/note-edits.js";
@@ -151,20 +152,15 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
     await rm(TEST_DATA_DIR, { recursive: true, force: true });
     await mkdir(TEST_DATA_DIR, { recursive: true });
 
-    serverProcess = spawn("npx", ["tsx", "src/server.ts"], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        MCP_PORT: String(TEST_PORT),
-        DATA_DIR: TEST_DATA_DIR,
-        PGHOST: PG_HOST,
-        PGPORT: PG_PORT,
-        PGUSER: PG_USER,
-        PGPASSWORD: PG_PASSWORD,
-        PGDATABASE: PG_DATABASE,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
+    serverProcess = spawnServer({
+      ...process.env,
+      MCP_PORT: String(TEST_PORT),
+      DATA_DIR: TEST_DATA_DIR,
+      PGHOST: PG_HOST,
+      PGPORT: PG_PORT,
+      PGUSER: PG_USER,
+      PGPASSWORD: PG_PASSWORD,
+      PGDATABASE: PG_DATABASE,
     });
 
     // Uncomment for debugging:
@@ -176,9 +172,7 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
 
   afterAll(async () => {
     if (serverProcess) {
-      serverProcess.kill("SIGTERM");
-      await new Promise((r) => setTimeout(r, 500));
-      if (!serverProcess.killed) serverProcess.kill("SIGKILL");
+      await stopServer(serverProcess);
     }
     await rm(TEST_DATA_DIR, { recursive: true, force: true });
   });
@@ -595,6 +589,72 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       await callTool("str_replace_note", { id: created.id, old_str: "beta", new_str: "gamma" });
       expect(await noteUpdateChangeCount(created.id)).toBe(1);
     });
+
+    it("versions the edit and records changed_via str_replace_note in history", async () => {
+      const created = await makeNote("Status: in progress");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "in progress",
+        new_str: "done",
+      });
+      expect(result.version).toBe(2);
+      expect(result.changed).toBe(true);
+
+      const history = await callTool("get_note_history", { id: created.id });
+      expect(history.current_version).toBe(2);
+      const prior = history.entries[1];
+      expect(prior.version).toBe(1);
+      expect(prior.content).toBe("Status: in progress");
+      expect(prior.changed_fields).toEqual(["content"]);
+      expect(prior.changed_via).toBe("str_replace_note");
+    });
+
+    it("treats a replacement that leaves content identical as a true no-op", async () => {
+      const created = await makeNote("Status: done");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "done",
+        new_str: "done",
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(false);
+      expect(result.version).toBe(1);
+      expect(result.replacements).toBe(1);
+      expect(await noteUpdateChangeCount(created.id)).toBe(0);
+    });
+
+    it("applies the edit when expected_version matches", async () => {
+      const created = await makeNote("Owner: Jane Developer");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "Jane Developer",
+        new_str: "John Developer",
+        expected_version: 1,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.version).toBe(2);
+    });
+
+    it("returns VERSION_CONFLICT for a stale expected_version, ahead of NO_MATCH", async () => {
+      const created = await makeNote("Status: in progress");
+      await callTool("update_note", { id: created.id, content: "Status: blocked" });
+
+      // old_str no longer occurs, but the stale version is the real problem.
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "in progress",
+        new_str: "done",
+        expected_version: 1,
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VERSION_CONFLICT");
+      expect(result.current.version).toBe(2);
+      expect(result.current.content).toBe("Status: blocked");
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("Status: blocked");
+      expect(fetched.version).toBe(2);
+    });
   });
 
   describe("append_note", () => {
@@ -697,6 +757,67 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
         expect(contentLines.filter((l) => l === line).length).toBe(1);
       }
       expect(await noteUpdateChangeCount(created.id)).toBe(N);
+      expect(fetched.version).toBe(N + 1);
+    });
+
+    it("versions each append and records changed_via append_note in history", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp log",
+        content: "start",
+        scope: "work",
+      });
+      const result = await callTool("append_note", { id: created.id, content: "next" });
+      expect(result.version).toBe(2);
+      expect(result.changed).toBe(true);
+
+      const history = await callTool("get_note_history", { id: created.id });
+      const prior = history.entries[1];
+      expect(prior.content).toBe("start");
+      expect(prior.changed_via).toBe("append_note");
+    });
+
+    it("returns VERSION_CONFLICT for a stale expected_version and writes nothing", async () => {
+      const created = await callTool("create_note", {
+        title: "Acme Corp log",
+        content: "start",
+        scope: "work",
+      });
+      await callTool("append_note", { id: created.id, content: "first" });
+
+      const stale = await callTool("append_note", {
+        id: created.id,
+        content: "second",
+        expected_version: 1,
+      });
+      expect(stale.error).toBe(true);
+      expect(stale.code).toBe("VERSION_CONFLICT");
+      expect(stale.current.version).toBe(2);
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("start\nfirst");
+      expect(await noteUpdateChangeCount(created.id)).toBe(1);
+    });
+
+    it("appends to a superseded note without changing its status", async () => {
+      const old = await callTool("create_note", {
+        title: "project-alpha plan v1",
+        content: "v1 plan",
+        scope: "work",
+      });
+      const successor = await callTool("create_note", {
+        title: "project-alpha plan v2",
+        content: "v2 plan",
+        scope: "work",
+      });
+      await callTool("supersede_note", { id: old.id, superseded_by: successor.id });
+
+      const result = await callTool("append_note", { id: old.id, content: "postscript" });
+      expect(result.error).toBeUndefined();
+
+      const fetched = await callTool("get_note", { id: old.id });
+      expect(fetched.content).toBe("v1 plan\npostscript");
+      expect(fetched.status).toBe("superseded");
+      expect(fetched.successor.id).toBe(successor.id);
     });
   });
 
