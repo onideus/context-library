@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { runScriptSync } from "./helpers/spawn-server.js";
 import { readFile, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
