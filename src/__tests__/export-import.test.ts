@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { runScriptSync } from "./helpers/spawn-server.js";
 import { readFile, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
@@ -73,18 +74,7 @@ function runScript(
   args: string[],
   env: NodeJS.ProcessEnv
 ): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync(process.execPath, [TSX_CLI, script, ...args], {
-    cwd: process.cwd(),
-    env,
-    encoding: "utf8",
-    timeout: SCRIPT_TIMEOUT_MS,
-  });
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    // A failure to spawn at all (result.error) has no stderr; surface it.
-    stderr: (result.stderr ?? "") + (result.error ? `\n${result.error.message}` : ""),
-  };
+  return runScriptSync(script, args, env, SCRIPT_TIMEOUT_MS);
 }
 
 /** Async variant for the one test that must act while the script is running. */

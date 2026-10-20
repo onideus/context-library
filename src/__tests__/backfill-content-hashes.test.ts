@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawnSync } from "node:child_process";
+import { runScriptSync } from "./helpers/spawn-server.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import pg from "pg";
@@ -30,9 +30,10 @@ function sha256(content: string): string {
 }
 
 function runBackfill(): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync("npx", ["tsx", SCRIPT_PATH], {
-    cwd: process.cwd(),
-    env: {
+  return runScriptSync(
+    SCRIPT_PATH,
+    [],
+    {
       ...process.env,
       PGHOST: PG_HOST,
       PGPORT: PG_PORT,
@@ -40,14 +41,8 @@ function runBackfill(): { status: number; stdout: string; stderr: string } {
       PGPASSWORD: PG_PASSWORD,
       PGDATABASE: PG_DATABASE,
     },
-    encoding: "utf8",
-    timeout: 30_000,
-  });
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+    30_000
+  );
 }
 
 async function checkPostgres(): Promise<boolean> {
@@ -158,7 +153,7 @@ describe.skipIf(!pgAvailable)("backfill-content-hashes script", () => {
     await client.end();
   });
 
-  // Each case spawns `npx tsx` against a real DB, which can exceed the
+  // Each case spawns the script under tsx against a real DB, which can exceed the
   // 5-second default in CI. Bump the per-test timeout to 30s.
   const SCRIPT_TIMEOUT_MS = 30_000;
 
