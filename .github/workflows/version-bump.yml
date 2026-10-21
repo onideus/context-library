@@ -5,7 +5,7 @@ name: version-bump
 # Updated release flow:
 # 1. Trigger this workflow with the desired bump type (patch/minor/major) or a custom version string,
 #    then merge the resulting PR (chore/version-bump-X.Y.Z → main)
-# 2. Verify image.yml succeeds (builds, Snyk passes, pushes SHA image to GHCR)
+# 2. Verify ci succeeds on main (build, tests), then image.yml, which starts after it (builds, Trivy, pushes SHA image to GHCR)
 # 3. Trigger release.yml with the new version string
 # 4. (Optional) Pull new image: `docker compose pull && docker compose up -d`
 #
@@ -99,7 +99,7 @@ jobs:
           BODY="Automated version bump to v${NEW_VERSION}.
 
           **Next steps after merging:**
-          1. Verify image.yml succeeds (builds, Snyk passes, pushes SHA image to GHCR)
+          1. Verify ci succeeds on main (build, tests), then image.yml, which starts after it (builds, Trivy, pushes SHA image to GHCR)
           2. Trigger release.yml with the new version string
           3. (Optional) Pull new image: \`docker compose pull && docker compose up -d\`"
 
