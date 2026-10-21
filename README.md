@@ -406,17 +406,24 @@ For Tier 2 (Postgres) or Tier 3 (embeddings), download the additional compose fi
 
 ## Security Scanning Setup (Maintainer)
 
-One scanner gates the pipeline, and nothing needs to be set up for it. Only high and critical severity findings block it; medium and low are reported but do not fail the build.
+Three scans gate code on its way in, and none needs an account or secret. Only high and critical severity findings block; medium and low are reported but do not fail anything.
 
-**Container scan (Trivy, `image.yml`)** runs on the freshly built image before it is pushed to GHCR. It needs no account, token, or secret. It fails on HIGH and CRITICAL CVEs that have a fix available, in OS packages and Node modules alike, and ignores CVEs with no fix (the base image carries dozens of those in Debian packages that nobody downstream can patch). A fixable base-image CVE means rebuilding on a newer `node:22-slim`.
+**Before merge (on every PR):**
 
-Between pushes, **Dependabot alerts** (repository Settings → Code security) flag vulnerable packages in `package-lock.json`, and Dependabot opens update PRs for them.
+- **Dependency review (`ci-checks.yml`)** diffs the PR's changes to `package.json` / `package-lock.json` against GitHub's advisory database and fails if the PR adds, or upgrades to, a package with a HIGH or CRITICAL advisory, runtime or dev dependency. It is the first step of the `ci / ci` check, so it takes seconds and fails before install and tests spend any minutes.
+- **CodeQL (GitHub default setup)** analyses JavaScript/TypeScript and the workflows themselves. The `main` ruleset blocks a merge that introduces a HIGH or CRITICAL security alert, or an error-level alert.
+
+**After merge (on every push to `main`):**
+
+- **Container scan (Trivy, `image.yml`)** runs on the freshly built image before it is pushed to GHCR. It needs no account, token, or secret. It fails on HIGH and CRITICAL CVEs that have a fix available, in OS packages and Node modules alike, and ignores CVEs with no fix (the base image carries dozens of those in Debian packages that nobody downstream can patch). A fixable base-image CVE means rebuilding on a newer `node:22-slim`.
+
+An advisory published after a package is already on `main` is not something a PR gate can catch. Between pushes, **Dependabot alerts** (repository Settings → Code security) flag vulnerable packages in `package-lock.json`, and Dependabot opens update PRs for them.
 
 ## Maintainer Notes
 
 ### Branch Protection
 
-`main` is protected by a repository ruleset rather than classic branch protection. It requires a pull request with code-owner review, linear history, no force-pushes or deletion, and the CI check to pass.
+`main` is protected by a repository ruleset rather than classic branch protection. It requires a pull request with code-owner review, linear history, no force-pushes or deletion, the CI check to pass (which includes dependency review), and no new HIGH or CRITICAL CodeQL alerts.
 
 The check to require is **`ci / ci`**, not `ci`: `ci.yml` calls the reusable `ci-checks.yml`, so GitHub reports the check as `<caller job> / <called job>`. Requiring a context that never reports blocks every merge. Pin it to the GitHub Actions app (integration ID `15368`) so no other app can satisfy it.
 
@@ -448,6 +455,14 @@ To create the ruleset on a fresh copy of the repo, save this as `ruleset.json`:
         "strict_required_status_checks_policy": false,
         "required_status_checks": [{ "context": "ci / ci", "integration_id": 15368 }]
       }
+    },
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          { "tool": "CodeQL", "security_alerts_threshold": "high_or_higher", "alerts_threshold": "errors" }
+        ]
+      }
     }
   ]
 }
@@ -456,6 +471,8 @@ To create the ruleset on a fresh copy of the repo, save this as `ruleset.json`:
 ```bash
 gh api -X POST /repos/onideus/context-library/rulesets --input ruleset.json
 ```
+
+The `code_scanning` rule needs CodeQL to be running on PRs: enable **default setup** under Settings → Code security → Code scanning first.
 
 `strict_required_status_checks_policy` is `false` on purpose: `true` makes every open PR re-run CI each time `main` moves, which mostly burns CI minutes on Dependabot PRs. `ci.yml` still runs on every push to `main`, so a bad interaction between merged PRs shows up there right away.
 
