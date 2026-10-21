@@ -49,7 +49,7 @@ All four content layers are built and deployed.
 
 2. **Tasks** (lifecycle) — Action items with status lifecycle (open/completed/deferred/cancelled). Stored in PostgreSQL. Full-text search via `to_tsvector`. Tools: `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`.
 
-3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migrations `005_notes.sql` + `013_note_lifecycle.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `delete_note`, `search_notes`, `supersede_note`, `get_note_history`, `prune_note_history`. Indexed for `search_context`. Notes have a **lifecycle** (`active` → `superseded` via `supersede_note`; `expired` is computed from `valid_until`, never stored), a **provenance** field (`stated | decided | inferred | fetched | derived`, nullable = not recorded), and **version history** (`note_versions`, written by a database trigger on every effective update). See `docs/design/note-lifecycle.md` and the "Note lifecycle invariants" block under Database.
+3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migrations `005_notes.sql` + `013_note_lifecycle.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `search_notes`, `supersede_note`, `get_note_history`, `prune_note_history`. Indexed for `search_context`. Notes have a **lifecycle** (`active` → `superseded` via `supersede_note`; `expired` is computed from `valid_until`, never stored), a **provenance** field (`stated | decided | inferred | fetched | derived`, nullable = not recorded), and **version history** (`note_versions`, written by a database trigger on every effective update). See `docs/design/note-lifecycle.md` and the "Note lifecycle invariants" block under Database.
 
 4. **Artifacts** (lifecycle outputs) — CC prompts, research documents, generated content. Stored in PostgreSQL (`artifacts` table, migration `006_artifacts.sql`). Status lifecycle: `draft -> ready -> executing -> completed -> superseded`. Execution ordering and dependency tracking. Tools: `store_artifact`, `get_artifact`, `list_artifacts`, `update_artifact`, `search_artifacts`. Indexed for `search_context`.
 
@@ -93,8 +93,10 @@ src/
     tasks.ts               # Task CRUD + search_tasks
     task-summary.ts        # Server-computed task_summary for handoff responses
     artifact-summary.ts    # Server-computed artifact_summary for handoff responses
-    notes.ts               # Note CRUD + search_notes + supersede_note, get_note_history,
-                           #   prune_note_history (writes go through notes/store.ts)
+    notes.ts               # Note CRUD + search_notes + str_replace_note, append_note,
+                           #   supersede_note, get_note_history, prune_note_history
+                           #   (writes go through notes/store.ts)
+    note-edits.ts          # Pure literal-replace / append helpers for the partial-edit tools
     artifacts.ts           # Artifact CRUD + search_artifacts, status lifecycle
     search.ts              # search_context (hybrid), reindex
     search-aliases.ts      # Query alias expansion for semantic search
@@ -162,7 +164,8 @@ src/
     search-dedup.test.ts   # Unit: deduplication
     search-aliases.test.ts # Unit: alias expansion
     tasks.test.ts          # Integration: task CRUD (Postgres-gated)
-    notes.test.ts          # Integration: note CRUD (Postgres-gated)
+    notes.test.ts          # Integration: note CRUD + partial edits (Postgres-gated);
+                           #   note-edits helpers ungated
     note-lifecycle.test.ts # Integration: supersede_note, get_note_history, prune_note_history,
                            #   expected_version conflicts, delete splice (Postgres-gated)
     note-store.test.ts     # Integration: notes/store.ts directly — migration 013 over

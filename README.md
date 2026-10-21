@@ -47,7 +47,7 @@ Adds structured task management, permanent knowledge capture, generated-output t
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -152,6 +152,8 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_notes` | Postgres | Browse notes with scope, domain, tag, and lifecycle-status filters |
 | `search_notes` | Postgres | Full-text search across note titles and content; a superseded hit is redirected to its current successor (`include_superseded` / `include_expired` opt out) |
 | `update_note` | Postgres | Update note fields with optional `expected_version` precondition; every effective edit is versioned; re-embeds on content change |
+| `str_replace_note` | Postgres | Replace an exact text span in a note's content (literal match; optional `expected_version`; versioned; compact response, no content echo) |
+| `append_note` | Postgres | Append text to a note on a new line (logs, dated entries; optional `expected_version`; versioned; compact response) |
 | `delete_note` | Postgres | Permanently delete a note, its history, and its embedding; splices any supersession chain through it |
 | `supersede_note` | Postgres | Mark a note as replaced by another (both must be active); the old note keeps its content with `status='superseded'` |
 | `get_note_history` | Postgres | Read a note's prior versions (title, content, what changed, who changed it) |
