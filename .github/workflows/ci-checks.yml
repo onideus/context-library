@@ -7,6 +7,8 @@ on:
         required: true
       NTFY_URL:
         required: false
+      NTFY_TOKEN:
+        required: false
 
 jobs:
   ci:
@@ -56,25 +58,14 @@ jobs:
 
       - name: Notify on completion
         if: always()
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [ -z "$NTFY_URL" ]; then
-            echo "Notifications skipped: NTFY_URL is not set."
-            exit 0
-          fi
-          STATUS="${{ job.status }}"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            TITLE="PR #${PR_NUMBER}: ${PR_TITLE}"
-          else
-            TITLE="Push to ${REF_NAME}"
-          fi
-          curl -s -o /dev/null \
-            -H "Title: CI ${STATUS}: ${TITLE}" \
-            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
-            -H "Tags: $( [ "$STATUS" = "success" ] && echo "white_check_mark" || echo "x" )" \
-            -d "Build ${STATUS} for context-library" \
-            "$NTFY_URL" || true
+        uses: ./.github/actions/ntfy-notify
+        with:
+          url: ${{ secrets.NTFY_URL }}
+          token: ${{ secrets.NTFY_TOKEN }}
+          title: >-
+            CI ${{ job.status }}: ${{ github.event_name == 'pull_request'
+            && format('PR #{0}: {1}', github.event.pull_request.number, github.event.pull_request.title)
+            || format('Push to {0}', github.ref_name) }}
+          message: Build ${{ job.status }} for context-library
+          priority: ${{ job.status == 'success' && 'default' || 'high' }}
+          tags: ${{ job.status == 'success' && 'white_check_mark' || 'x' }}

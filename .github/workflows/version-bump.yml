@@ -115,18 +115,11 @@ jobs:
 
       - name: Notify on completion
         if: always()
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-          STATUS: ${{ job.status }}
-          NEW_VERSION: ${{ steps.version.outputs.new_version }}
-        run: |
-          if [ -z "$NTFY_URL" ]; then
-            echo "Notifications skipped: NTFY_URL is not set."
-            exit 0
-          fi
-          curl -s -o /dev/null \
-            -H "Title: Version bump ${STATUS}: v${NEW_VERSION:-unknown}" \
-            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
-            -H "Tags: $( [ "$STATUS" = "success" ] && echo "label" || echo "x" )" \
-            -d "package.json bumped to v${NEW_VERSION:-unknown} — merge the PR, then image.yml will run" \
-            "$NTFY_URL" || true
+        uses: ./.github/actions/ntfy-notify
+        with:
+          url: ${{ secrets.NTFY_URL }}
+          token: ${{ secrets.NTFY_TOKEN }}
+          title: "Version bump ${{ job.status }}: v${{ steps.version.outputs.new_version || 'unknown' }}"
+          message: package.json bumped to v${{ steps.version.outputs.new_version || 'unknown' }} — merge the PR, then image.yml will run
+          priority: ${{ job.status == 'success' && 'default' || 'high' }}
+          tags: ${{ job.status == 'success' && 'label' || 'x' }}

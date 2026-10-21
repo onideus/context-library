@@ -19,6 +19,12 @@ jobs:
     permissions:
       packages: write
     steps:
+      # Only for the local ntfy-notify action; nothing else here reads the repo.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/actions
+          persist-credentials: false
+
       - name: Prune old SHA-tagged images
         id: prune
         env:
@@ -78,19 +84,11 @@ jobs:
 
       - name: Notify on completion
         if: always()
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-        run: |
-          if [ -z "$NTFY_URL" ]; then
-            echo "Notifications skipped: NTFY_URL is not set."
-            exit 0
-          fi
-          STATUS="${{ job.status }}"
-          PRUNED="${{ steps.prune.outputs.pruned || '?' }}"
-          PRESERVED="${{ steps.prune.outputs.preserved || '?' }}"
-          curl -s -o /dev/null \
-            -H "Title: GHCR cleanup ${STATUS}" \
-            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
-            -H "Tags: $( [ "$STATUS" = "success" ] && echo "broom" || echo "x" )" \
-            -d "Pruned ${PRUNED}, preserved ${PRESERVED}" \
-            "$NTFY_URL" || true
+        uses: ./.github/actions/ntfy-notify
+        with:
+          url: ${{ secrets.NTFY_URL }}
+          token: ${{ secrets.NTFY_TOKEN }}
+          title: GHCR cleanup ${{ job.status }}
+          message: Pruned ${{ steps.prune.outputs.pruned || '?' }}, preserved ${{ steps.prune.outputs.preserved || '?' }}
+          priority: ${{ job.status == 'success' && 'default' || 'high' }}
+          tags: ${{ job.status == 'success' && 'broom' || 'x' }}

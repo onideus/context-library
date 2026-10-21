@@ -97,17 +97,11 @@ jobs:
 
       - name: Notify on release
         if: always()
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-        run: |
-          if [ -z "$NTFY_URL" ]; then
-            echo "Notifications skipped: NTFY_URL is not set."
-            exit 0
-          fi
-          STATUS="${{ job.status }}"
-          curl -s -o /dev/null \
-            -H "Title: Release ${STATUS}: v${{ steps.resolve.outputs.version }}" \
-            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
-            -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
-            -d "Context Library v${{ steps.resolve.outputs.version }} — release $( [ "$STATUS" = "success" ] && echo 'published' || echo 'FAILED' )" \
-            "$NTFY_URL" || true
+        uses: ./.github/actions/ntfy-notify
+        with:
+          url: ${{ secrets.NTFY_URL }}
+          token: ${{ secrets.NTFY_TOKEN }}
+          title: "Release ${{ job.status }}: v${{ steps.resolve.outputs.version }}"
+          message: Context Library v${{ steps.resolve.outputs.version }} — release ${{ job.status == 'success' && 'published' || 'FAILED' }}
+          priority: ${{ job.status == 'success' && 'default' || 'urgent' }}
+          tags: ${{ job.status == 'success' && 'rocket' || 'rotating_light' }}

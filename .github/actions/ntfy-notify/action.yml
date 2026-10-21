@@ -1,0 +1,71 @@
+name: ntfy notify
+description: >
+  Publish a CI notification to ntfy. Skips quietly when neither NTFY_URL nor
+  NTFY_TOKEN is set (forks never have the secrets), warns when only one is set,
+  and never fails the calling job: a failed publish becomes a warning annotation.
+
+inputs:
+  url:
+    description: ntfy topic URL, e.g. https://ntfy.example.com/my-topic (the NTFY_URL secret).
+    required: false
+    default: ''
+  token:
+    description: ntfy access token with write access to the topic (the NTFY_TOKEN secret).
+    required: false
+    default: ''
+  title:
+    description: Notification title. Non-ASCII is fine (sent RFC 2047-encoded).
+    required: true
+  message:
+    description: Notification body.
+    required: true
+  priority:
+    description: ntfy priority (min, low, default, high, urgent).
+    required: false
+    default: default
+  tags:
+    description: Comma-separated ntfy tags / emoji shortcodes.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Publish to ntfy
+      shell: bash
+      # Inputs reach the script only through env, never by ${{ }} interpolation,
+      # so PR titles and other untrusted text cannot inject shell.
+      env:
+        NTFY_URL: ${{ inputs.url }}
+        NTFY_TOKEN: ${{ inputs.token }}
+        NTFY_TITLE: ${{ inputs.title }}
+        NTFY_MESSAGE: ${{ inputs.message }}
+        NTFY_PRIORITY: ${{ inputs.priority }}
+        NTFY_TAGS: ${{ inputs.tags }}
+      run: |
+        if [ -z "$NTFY_URL" ] && [ -z "$NTFY_TOKEN" ]; then
+          echo "Notifications skipped: NTFY_URL and NTFY_TOKEN are not set."
+          exit 0
+        fi
+        if [ -z "$NTFY_URL" ] || [ -z "$NTFY_TOKEN" ]; then
+          echo "::warning title=ntfy not configured::Set both NTFY_URL and NTFY_TOKEN secrets; only one is set, so no notification was sent."
+          exit 0
+        fi
+
+        # HTTP headers are ASCII-only; ntfy decodes RFC 2047 encoded-words.
+        title="=?UTF-8?B?$(printf '%s' "$NTFY_TITLE" | base64 -w0)?="
+
+        code=$(curl -sS -o /dev/null -w '%{http_code}' \
+          --max-time 15 --retry 2 \
+          -H "Authorization: Bearer ${NTFY_TOKEN}" \
+          -H "Title: ${title}" \
+          -H "Priority: ${NTFY_PRIORITY}" \
+          -H "Tags: ${NTFY_TAGS}" \
+          --data-binary "$NTFY_MESSAGE" \
+          "$NTFY_URL") || code="000"
+
+        if [ "$code" = "200" ]; then
+          echo "Notification sent."
+        else
+          echo "::warning title=ntfy notification failed::ntfy returned HTTP ${code}. Check that NTFY_URL is the topic URL and NTFY_TOKEN is valid with write access."
+        fi
