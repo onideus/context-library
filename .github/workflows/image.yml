@@ -79,10 +79,14 @@ jobs:
         env:
           NTFY_URL: ${{ secrets.NTFY_URL }}
         run: |
+          if [ -z "$NTFY_URL" ]; then
+            echo "Notifications skipped: NTFY_URL is not set."
+            exit 0
+          fi
           STATUS="${{ job.status }}"
           curl -s -o /dev/null \
             -H "Title: Image ${STATUS}: sha-${{ steps.sha.outputs.short_sha }}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "white_check_mark" || echo "x" )" \
             -d "Image build ${STATUS} for sha-${{ steps.sha.outputs.short_sha }}" \
-            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
+            "$NTFY_URL" || true

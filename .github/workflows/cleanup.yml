@@ -81,6 +81,10 @@ jobs:
         env:
           NTFY_URL: ${{ secrets.NTFY_URL }}
         run: |
+          if [ -z "$NTFY_URL" ]; then
+            echo "Notifications skipped: NTFY_URL is not set."
+            exit 0
+          fi
           STATUS="${{ job.status }}"
           PRUNED="${{ steps.prune.outputs.pruned || '?' }}"
           PRESERVED="${{ steps.prune.outputs.preserved || '?' }}"
@@ -89,4 +93,4 @@ jobs:
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "broom" || echo "x" )" \
             -d "Pruned ${PRUNED}, preserved ${PRESERVED}" \
-            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
+            "$NTFY_URL" || true

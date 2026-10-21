@@ -100,10 +100,14 @@ jobs:
         env:
           NTFY_URL: ${{ secrets.NTFY_URL }}
         run: |
+          if [ -z "$NTFY_URL" ]; then
+            echo "Notifications skipped: NTFY_URL is not set."
+            exit 0
+          fi
           STATUS="${{ job.status }}"
           curl -s -o /dev/null \
             -H "Title: Release ${STATUS}: v${{ steps.resolve.outputs.version }}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "urgent" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "rocket" || echo "rotating_light" )" \
             -d "Context Library v${{ steps.resolve.outputs.version }} — release $( [ "$STATUS" = "success" ] && echo 'published' || echo 'FAILED' )" \
-            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
+            "$NTFY_URL" || true

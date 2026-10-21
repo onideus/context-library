@@ -120,10 +120,13 @@ jobs:
           STATUS: ${{ job.status }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
-          # Fallback topic is a public ntfy.sh channel — matches pattern used by other workflows
+          if [ -z "$NTFY_URL" ]; then
+            echo "Notifications skipped: NTFY_URL is not set."
+            exit 0
+          fi
           curl -s -o /dev/null \
             -H "Title: Version bump ${STATUS}: v${NEW_VERSION:-unknown}" \
             -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
             -H "Tags: $( [ "$STATUS" = "success" ] && echo "label" || echo "x" )" \
             -d "package.json bumped to v${NEW_VERSION:-unknown} — merge the PR, then image.yml will run" \
-            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
+            "$NTFY_URL" || true

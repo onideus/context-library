@@ -338,7 +338,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 ## CI/CD Workflows
 
-All workflows are in `.github/workflows/`. Action SHAs are pinned.
+All workflows are in `.github/workflows/`. Action SHAs are pinned. Notifications go to the `NTFY_URL` secret only and are skipped when it is unset, so forks never notify.
 
 - **`ci.yml`** — Trigger for pull_request and push to main. Calls `ci-checks.yml`.
 - **`ci-checks.yml`** — Reusable workflow: `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16), Snyk dependency scan. Notifies via ntfy.
