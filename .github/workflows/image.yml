@@ -14,6 +14,7 @@ jobs:
     secrets:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       NTFY_URL: ${{ secrets.NTFY_URL }}
+      NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
 
   image:
     needs: ci
@@ -76,13 +77,11 @@ jobs:
 
       - name: Notify on completion
         if: always()
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-        run: |
-          STATUS="${{ job.status }}"
-          curl -s -o /dev/null \
-            -H "Title: Image ${STATUS}: sha-${{ steps.sha.outputs.short_sha }}" \
-            -H "Priority: $( [ "$STATUS" = "success" ] && echo "default" || echo "high" )" \
-            -H "Tags: $( [ "$STATUS" = "success" ] && echo "white_check_mark" || echo "x" )" \
-            -d "Image build ${STATUS} for sha-${{ steps.sha.outputs.short_sha }}" \
-            "${NTFY_URL:-https://ntfy.sh/context-library-ci}" || true
+        uses: ./.github/actions/ntfy-notify
+        with:
+          url: ${{ secrets.NTFY_URL }}
+          token: ${{ secrets.NTFY_TOKEN }}
+          title: "Image ${{ job.status }}: sha-${{ steps.sha.outputs.short_sha }}"
+          message: Image build ${{ job.status }} for sha-${{ steps.sha.outputs.short_sha }}
+          priority: ${{ job.status == 'success' && 'default' || 'high' }}
+          tags: ${{ job.status == 'success' && 'white_check_mark' || 'x' }}

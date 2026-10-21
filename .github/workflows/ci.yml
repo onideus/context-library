@@ -15,3 +15,4 @@ jobs:
     secrets:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       NTFY_URL: ${{ secrets.NTFY_URL }}
+      NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
