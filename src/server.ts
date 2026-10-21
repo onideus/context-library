@@ -209,7 +209,9 @@ app.post("/mcp", async (c) => {
   let response: Response;
   let handlerError: Error | null = null;
   try {
-    const transport = new StreamableHTTPTransport();
+    // @hono/mcp >= 0.3 accepts a missing or partial Accept header by default;
+    // keep the MCP-spec contract (must accept application/json AND text/event-stream).
+    const transport = new StreamableHTTPTransport({ strictAcceptHeader: true });
     await server.connect(transport);
     const transportResponse = await transport.handleRequest(c);
     if (transportResponse) {
