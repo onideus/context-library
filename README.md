@@ -353,28 +353,34 @@ Because routing lives in the dashboard, domain names and tunnel IDs stay out of 
 
 ## Release Workflow
 
-Every push to `main` builds, scans, and publishes a SHA-tagged image. Tagged releases promote a validated image — no rebuild required.
+Every push to `main` builds, scans, and publishes a SHA-tagged image. A release promotes one of those tested images — no version-bump commit, no rebuild, no test re-run.
 
 **Image pipeline (on push to main):**
 ```
 Push → ci (build + tests) → on success: Docker build → Trivy container scan → Push sha-<hash> to GHCR
 ```
 
-**Release pipeline (on tag push):**
+**Release pipeline (one button):**
 ```
-Tag v* → Pull validated sha image → Retag as <version> + latest → Push → GitHub Release
+Pick version + newest sha image → Trivy re-scan (today's CVE data) → Stamp version (no rebuild)
+  → /health must report the new version → Push <version> + latest → Tag + GitHub Release
 ```
 
-Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. By the time a release tag exists, the image it points to has already passed every gate.
+Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. The release re-scans the same image, so a CVE published between the merge and the release blocks it.
 
-**To cut a release:**
+**Versions** live in git tags and the image, not in `package.json` (frozen at `0.0.0-development`). Unreleased images report `0.0.0-sha.<hash>` from `/health`; a released image reports its version, because the release sets `APP_VERSION` on the tested image without touching its code layers.
+
+**To cut a release:** Actions → **release** → **Run workflow**, choose patch / minor / major, run. Or:
 
 ```bash
-git tag v0.10.0
-git push origin v0.10.0
+gh workflow run release.yml -f bump=patch
+gh workflow run release.yml -f version=0.13.0-rc.1      # exact version; prereleases don't move latest
+gh workflow run release.yml -f bump=minor -f dry_run=true  # validate everything, publish nothing
 ```
 
-Old SHA-tagged images are pruned weekly (90-day retention), preserving any image referenced by a release tag.
+If newer commits on `main` have no image yet (ci failed, or `image.yml` is still running), the release uses the newest commit that has one and warns about the ones it skipped. Pass `-f source_sha=<commit>` to choose a commit explicitly.
+
+Old SHA-tagged images are pruned weekly (90-day retention). Released images carry their version tag and are kept.
 
 ## Pulling Without Cloning
 
