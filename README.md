@@ -371,13 +371,16 @@ Every GitHub Release carries three files for downstream consumers:
 
 - **`RELEASE_NOTES.md`**, also the release description. It has:
   - the image tag and pinnable digest;
-  - the security alerts closed since the previous release, split into those in the released image, those in source code (CodeQL), and dev-only tooling;
+  - what the release fixed: the known vulnerabilities in the previous release's image that this image no longer has (both scanned with the same data), the CodeQL alerts closed, and security-related PRs;
+  - what is new: vulnerabilities in packages added or changed since the previous release;
   - the release-time scan result;
   - the merged changes grouped by type (from conventional-commit PR titles), with a compare link.
 - **`sbom.cdx.json`**, a CycloneDX SBOM of every OS and npm package in the image.
 - **`trivy-report.json`**, the release-time vulnerability scan at all severities, including known issues with no upstream fix.
 
 A dry run produces the same files as a workflow artifact without publishing anything.
+
+Optional: the workflow's own token cannot read Dependabot alerts. To also list the Dependabot alerts closed in each release (split into runtime and dev-only), create a fine-grained token scoped to this repository with only **Dependabot alerts: Read**, and save it as the `DEPENDABOT_ALERTS_TOKEN` repository secret.
 
 Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. The release re-scans the same image, so a CVE published between the merge and the release blocks it.
 

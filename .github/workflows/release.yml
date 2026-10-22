@@ -173,10 +173,27 @@ jobs:
           DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:sha-${SHORT}")
           echo "Releasing $(git log -1 --format='%h %s' "$FULL_SHA")"
           echo "Source image ${DIGEST}"
+
+          # Previous stable release on this line of history, for the notes and
+          # for the image comparison ("fixed in this release").
+          PREV_TAG=""
+          for t in $(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+            if [ "$t" != "v${VERSION}" ] && git merge-base --is-ancestor "$t" "$FULL_SHA"; then
+              PREV_TAG="$t"
+              break
+            fi
+          done
+          PREV_IMAGE=""
+          if [ -n "$PREV_TAG" ] && docker manifest inspect "${IMAGE}:${PREV_TAG#v}" >/dev/null 2>&1; then
+            PREV_IMAGE="${IMAGE}:${PREV_TAG#v}"
+          fi
+          echo "Previous release: ${PREV_TAG:-none} (image: ${PREV_IMAGE:-not available})"
           {
             echo "full_sha=${FULL_SHA}"
             echo "short_sha=${SHORT}"
             echo "digest=${DIGEST}"
+            echo "prev_tag=${PREV_TAG}"
+            echo "prev_image=${PREV_IMAGE}"
           } >> "$GITHUB_OUTPUT"
 
       # Same settings as image.yml. The image passed this at build time; running
@@ -260,6 +277,23 @@ jobs:
           exit-code: '0'
           output: release-files/sbom.cdx.json
 
+      # Same data, previous release's image: whatever it had that this image
+      # does not is what the release fixed for anyone running the image.
+      # Kept out of release-files; only the notes use it.
+      - name: Scan previous release image for comparison
+        if: ${{ steps.source.outputs.prev_image != '' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.source.outputs.prev_image }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '0'
+          format: json
+          output: prev-trivy-report.json
+
       - name: Push release image
         id: push
         if: ${{ !inputs.dry_run }}
@@ -283,9 +317,14 @@ jobs:
           FULL_SHA: ${{ steps.source.outputs.full_sha }}
           IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
           TRIVY_REPORT: release-files/trivy-report.json
+          PREV_TAG: ${{ steps.source.outputs.prev_tag }}
+          PREV_TRIVY_REPORT: ${{ steps.source.outputs.prev_image != '' && 'prev-trivy-report.json' || '' }}
           REPO: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional. GITHUB_TOKEN cannot read Dependabot alerts; a fine-grained
+          # token with only "Dependabot alerts: read" on this repo adds them.
+          DEPENDABOT_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
           OUT: release-files/RELEASE_NOTES.md
         run: |
           node .github/scripts/release-notes.mjs
