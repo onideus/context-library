@@ -353,28 +353,50 @@ Because routing lives in the dashboard, domain names and tunnel IDs stay out of 
 
 ## Release Workflow
 
-Every push to `main` builds, scans, and publishes a SHA-tagged image. Tagged releases promote a validated image — no rebuild required.
+Every push to `main` builds, scans, and publishes a SHA-tagged image. A release promotes one of those tested images — no version-bump commit, no rebuild, no test re-run.
 
 **Image pipeline (on push to main):**
 ```
 Push → ci (build + tests) → on success: Docker build → Trivy container scan → Push sha-<hash> to GHCR
 ```
 
-**Release pipeline (on tag push):**
+**Release pipeline (one button):**
 ```
-Tag v* → Pull validated sha image → Retag as <version> + latest → Push → GitHub Release
+Pick version + newest sha image → Trivy re-scan (today's CVE data) → Stamp version (no rebuild)
+  → /health must report the new version → SBOM + scan report + release notes
+  → Push <version> + latest → Tag + GitHub Release with the files attached
 ```
 
-Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. By the time a release tag exists, the image it points to has already passed every gate.
+Every GitHub Release carries three files for downstream consumers:
 
-**To cut a release:**
+- **`RELEASE_NOTES.md`**, also the release description. It has:
+  - the image tag and pinnable digest;
+  - what the release fixed: the known vulnerabilities in the previous release's image that this image no longer has (both scanned with the same data), the CodeQL alerts closed, and security-related PRs;
+  - what is new: vulnerabilities in packages added or changed since the previous release;
+  - the release-time scan result;
+  - the merged changes grouped by type (from conventional-commit PR titles), with a compare link.
+- **`sbom.cdx.json`**, a CycloneDX SBOM of every OS and npm package in the image.
+- **`trivy-report.json`**, the release-time vulnerability scan at all severities, including known issues with no upstream fix.
+
+A dry run produces the same files as a workflow artifact without publishing anything.
+
+Optional: the workflow's own token cannot read Dependabot alerts. To also list the Dependabot alerts closed in each release (split into runtime and dev-only), create a fine-grained token scoped to this repository with only **Dependabot alerts: Read**, and save it as the `DEPENDABOT_ALERTS_TOKEN` repository secret.
+
+Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. The release re-scans the same image, so a CVE published between the merge and the release blocks it.
+
+**Versions** live in git tags and the image, not in `package.json` (frozen at `0.0.0-development`). Unreleased images report `0.0.0-sha.<hash>` from `/health`; a released image reports its version, because the release sets `APP_VERSION` on the tested image without touching its code layers.
+
+**To cut a release:** Actions → **release** → **Run workflow**, choose patch / minor / major, run. Or:
 
 ```bash
-git tag v0.10.0
-git push origin v0.10.0
+gh workflow run release.yml -f bump=patch
+gh workflow run release.yml -f version=0.13.0-rc.1      # exact version; prereleases don't move latest
+gh workflow run release.yml -f bump=minor -f dry_run=true  # validate everything, publish nothing
 ```
 
-Old SHA-tagged images are pruned weekly (90-day retention), preserving any image referenced by a release tag.
+If newer commits on `main` have no image yet (ci failed, or `image.yml` is still running), the release uses the newest commit that has one and warns about the ones it skipped. Pass `-f source_sha=<commit>` to choose a commit explicitly.
+
+Old SHA-tagged images are pruned weekly (90-day retention). Released images carry their version tag and are kept.
 
 ## Pulling Without Cloning
 
