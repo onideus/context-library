@@ -234,6 +234,10 @@ jobs:
       # Release files for downstream consumers. Every input is set explicitly
       # so nothing carries over from the gating scan above. Both scan the local
       # stamped image, which has the same layers as the scanned digest.
+      # Trivy does not create the output directory.
+      - name: Create release files directory
+        run: mkdir -p release-files
+
       - name: Scan report for the release (all severities)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
