@@ -357,7 +357,7 @@ Every push to `main` builds, scans, and publishes a SHA-tagged image. Tagged rel
 
 **Image pipeline (on push to main):**
 ```
-Push → CI checks → Snyk dep scan → Docker build → Trivy container scan → Push sha-<hash> to GHCR
+Push → ci (build + tests) → on success: Docker build → Trivy container scan → Push sha-<hash> to GHCR
 ```
 
 **Release pipeline (on tag push):**
@@ -365,7 +365,7 @@ Push → CI checks → Snyk dep scan → Docker build → Trivy container scan �
 Tag v* → Pull validated sha image → Retag as <version> + latest → Push → GitHub Release
 ```
 
-Insecure images never reach the registry — the Snyk dependency scan and the Trivy container scan gate the push. By the time a release tag exists, the image it points to has already passed every gate.
+Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. By the time a release tag exists, the image it points to has already passed every gate.
 
 **To cut a release:**
 
@@ -406,37 +406,77 @@ For Tier 2 (Postgres) or Tier 3 (embeddings), download the additional compose fi
 
 ## Security Scanning Setup (Maintainer)
 
-Two scanners gate the pipeline. Only high and critical severity findings block it; medium and low are reported but do not fail the build.
+Three scans gate code on its way in, and none needs an account or secret. Only high and critical severity findings block; medium and low are reported but do not fail anything.
 
-**Dependency scan (Snyk, `ci-checks.yml`)** runs on pushes to `main` and needs a `SNYK_TOKEN` repository secret:
+**Before merge (on every PR):**
 
-1. Sign up for a free Snyk account at [snyk.io](https://snyk.io).
-2. Generate an API token from **Account Settings → API Token**.
-3. Add it as a repository secret:
-   ```bash
-   gh secret set SNYK_TOKEN --repo onideus/context-library
-   ```
+- **Dependency review (`ci-checks.yml`)** diffs the PR's changes to `package.json` / `package-lock.json` against GitHub's advisory database and fails if the PR adds, or upgrades to, a package with a HIGH or CRITICAL advisory, runtime or dev dependency. It is the first step of the `ci / ci` check, so it takes seconds and fails before install and tests spend any minutes.
+- **CodeQL (GitHub default setup)** analyses JavaScript/TypeScript and the workflows themselves. The `main` ruleset blocks a merge that introduces a HIGH or CRITICAL security alert, or an error-level alert.
 
-The scan passes `--remote-repo-url` pointing at this public repository. That is what tells Snyk the test belongs to a public repo, and Snyk's Free-plan test limits apply to private repositories only. If the counter on the Snyk org's Usage page still moves after a push to `main`, that flag is the first thing to check.
+**After merge (on every push to `main`):**
 
-**Container scan (Trivy, `image.yml`)** runs on the freshly built image before it is pushed to GHCR. It needs no account, token, or secret. It fails on HIGH and CRITICAL CVEs that have a fix available, in OS packages and Node modules alike, and ignores CVEs with no fix (the base image carries dozens of those in Debian packages that nobody downstream can patch). A fixable base-image CVE means rebuilding on a newer `node:22-slim`.
+- **Container scan (Trivy, `image.yml`)** runs on the freshly built image before it is pushed to GHCR. It needs no account, token, or secret. It fails on HIGH and CRITICAL CVEs that have a fix available, in OS packages and Node modules alike, and ignores CVEs with no fix (the base image carries dozens of those in Debian packages that nobody downstream can patch). A fixable base-image CVE means rebuilding on a newer `node:22-slim`.
+
+An advisory published after a package is already on `main` is not something a PR gate can catch. Between pushes, **Dependabot alerts** (repository Settings → Code security) flag vulnerable packages in `package-lock.json`, and Dependabot opens update PRs for them.
 
 ## Maintainer Notes
 
 ### Branch Protection
 
-After the CI workflow is live, enable branch protection for `main` to require the `ci` job to pass before merging:
+`main` is protected by a repository ruleset rather than classic branch protection. It requires a pull request with code-owner review, linear history, no force-pushes or deletion, the CI check to pass (which includes dependency review), and no new HIGH or CRITICAL CodeQL alerts.
 
-```bash
-gh api -X PUT /repos/onideus/context-library/branches/main/protection \
-  -f required_status_checks.strict=true \
-  -F required_status_checks.contexts[]='ci' \
-  -F enforce_admins=false \
-  -F required_pull_request_reviews.required_approving_review_count=0 \
-  -F restrictions=null
+The check to require is **`ci / ci`**, not `ci`: `ci.yml` calls the reusable `ci-checks.yml`, so GitHub reports the check as `<caller job> / <called job>`. Requiring a context that never reports blocks every merge. Pin it to the GitHub Actions app (integration ID `15368`) so no other app can satisfy it.
+
+To create the ruleset on a fresh copy of the repo, save this as `ruleset.json`:
+
+```json
+{
+  "name": "main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "required_linear_history" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "require_code_owner_review": true,
+        "dismiss_stale_reviews_on_push": true,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "required_status_checks": [{ "context": "ci / ci", "integration_id": 15368 }]
+      }
+    },
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          { "tool": "CodeQL", "security_alerts_threshold": "high_or_higher", "alerts_threshold": "errors" }
+        ]
+      }
+    }
+  ]
+}
 ```
 
-This requires the `ci` job (from `.github/workflows/ci.yml`) to pass on all PRs before they can be merged to `main`.
+```bash
+gh api -X POST /repos/onideus/context-library/rulesets --input ruleset.json
+```
+
+The `code_scanning` rule needs CodeQL to be running on PRs: enable **default setup** under Settings → Code security → Code scanning first.
+
+`strict_required_status_checks_policy` is `false` on purpose: `true` makes every open PR re-run CI each time `main` moves, which mostly burns CI minutes on Dependabot PRs. `ci.yml` still runs on every push to `main`, so a bad interaction between merged PRs shows up there right away.
+
+`ci-checks.yml` runs once per push to `main`, from `ci.yml`. `image.yml` does not run it again. It starts from `workflow_run` when `ci` completes, and builds only if that run succeeded, from the exact commit `ci` tested.
 
 ## Troubleshooting
 

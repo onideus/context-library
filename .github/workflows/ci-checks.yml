@@ -3,8 +3,6 @@ name: ci-checks
 on:
   workflow_call:
     secrets:
-      SNYK_TOKEN:
-        required: true
       NTFY_URL:
         required: false
       NTFY_TOKEN:
@@ -36,6 +34,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Merge gate for dependencies: fails the PR (and so the required
+      # "ci / ci" check) if it adds or upgrades to a package with a known
+      # HIGH or CRITICAL advisory, runtime or dev. It only diffs the PR's
+      # dependency changes against GitHub's advisory database, so it takes
+      # seconds and runs before install and tests spend any minutes.
+      # Pushes to main are covered by the Trivy image scan in image.yml.
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development
+          comment-summary-in-pr: never
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
@@ -44,17 +56,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-
-      - name: Snyk dependency scan
-        if: github.event_name == 'push'
-        uses: snyk/actions/node@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: |
-            --severity-threshold=high
-            --all-projects
-            --remote-repo-url=https://github.com/onideus/context-library
 
       - name: Notify on completion
         if: always()

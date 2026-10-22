@@ -1,7 +1,14 @@
 name: image
 
+# Builds the image only after the ci workflow has passed for a push to main,
+# reusing that run instead of running ci-checks a second time. workflow_run
+# always executes this file as it exists on the default branch, and GITHUB_SHA
+# is the default branch head at trigger time, so every step below works from
+# the commit ci actually tested: workflow_run.head_sha.
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
 
 permissions:
@@ -9,25 +16,28 @@ permissions:
   packages: write
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci-checks.yml
-    secrets:
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      NTFY_URL: ${{ secrets.NTFY_URL }}
-      NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
-
   image:
-    needs: ci
+    # The branches filter matches the head branch name only, which a fork PR
+    # can also call "main"; requiring a push event in this repository rules
+    # that out.
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Compute short SHA
         id: sha
-        run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: echo "short_sha=${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Read version from package.json
         id: version
@@ -40,11 +50,12 @@ jobs:
             -t ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
             .
 
-      # Trivy replaces the Snyk container scan; the Snyk dependency scan in
-      # ci-checks.yml stays (it passes --remote-repo-url, which exempts a
-      # public repo from Free-plan test limits). `snyk container test` has no
-      # such flag, so every push to main burned one of the plan's 100
-      # container tests per month. Trivy needs no account or token.
+      # Trivy is the only vulnerability scan in the pipeline. It replaced the
+      # Snyk container scan, which burned one of the Free plan's 100 container
+      # tests per month on every push to main, and then the Snyk dependency
+      # scan too: vuln-type includes "library", so it also checks the npm
+      # packages installed in the image, and Dependabot alerts cover
+      # package-lock.json between pushes. Trivy needs no account or token.
       #
       # ignore-unfixed is the working equivalent of Snyk's
       # --exclude-base-image-vulns: node:22-slim ships dozens of HIGH Debian

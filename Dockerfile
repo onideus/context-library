@@ -22,7 +22,7 @@ COPY --chown=appuser:appgroup package.json package-lock.json ./
 # Install production deps, then strip npm from the image. The runtime starts
 # `node dist/server.js` and never invokes npm, so shipping npm only adds
 # attack surface — every npm release bundles vulnerable transitive deps
-# (brace-expansion, minimatch, tar, picomatch…) that Snyk flags even though
+# (brace-expansion, minimatch, tar, picomatch…) that vulnerability scanners flag even though
 # nothing at runtime imports them.
 RUN npm ci --omit=dev && \
     npm cache clean --force && \
