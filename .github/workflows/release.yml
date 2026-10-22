@@ -11,11 +11,17 @@ name: release
 #   4. Stamps the version onto the tested image without rebuilding it: the new
 #      image adds only APP_VERSION and OCI labels to the config, no code layers.
 #   5. Starts the stamped image and requires /health to report the new version.
-#   6. Pushes <version> (and latest, unless it is a prerelease), tags the commit
-#      v<version> and creates the GitHub Release.
+#   6. Produces the release files: a CycloneDX SBOM and a full Trivy JSON report
+#      of the release image, and RELEASE_NOTES.md (.github/scripts/release-notes.mjs):
+#      changes since the previous release grouped by type, security alerts fixed,
+#      the scan result and the image digest.
+#   7. Pushes <version> (and latest, unless it is a prerelease), tags the commit
+#      v<version> and creates the GitHub Release with those files attached.
 #
 # Tests are not re-run: the code is byte-for-byte what passed ci at merge time.
-# dry_run does steps 1-5 and publishes nothing.
+# dry_run does everything except push, tag and release; the notes, SBOM and scan
+# report are uploaded as a workflow artifact so they can be reviewed. A real
+# release must be run from main; a dry run may use another branch's workflow.
 
 on:
   workflow_dispatch:
@@ -45,6 +51,7 @@ concurrency:
 permissions:
   contents: write
   packages: write
+  security-events: read
 
 env:
   IMAGE: ghcr.io/onideus/context-library
@@ -55,10 +62,19 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # Read Dependabot and code scanning alerts for the notes' security section.
+      security-events: read
     steps:
+      - name: Require main for a real release
+        if: ${{ !inputs.dry_run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::A release must be run from main (this run uses ${GITHUB_REF}). Use dry_run to test another branch's workflow."
+          exit 1
+
+      # The dispatched ref supplies this workflow's scripts; full history and
+      # tags come with fetch-depth 0, and every release decision uses origin/main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
           fetch-depth: 0
           fetch-tags: true
 
@@ -215,7 +231,33 @@ jobs:
           fi
           echo "/health reports ${REPORTED}"
 
+      # Release files for downstream consumers. Every input is set explicitly
+      # so nothing carries over from the gating scan above. Both scan the local
+      # stamped image, which has the same layers as the scanned digest.
+      - name: Scan report for the release (all severities)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '0'
+          format: json
+          output: release-files/trivy-report.json
+
+      - name: SBOM for the release (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          format: cyclonedx
+          exit-code: '0'
+          output: release-files/sbom.cdx.json
+
       - name: Push release image
+        id: push
         if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -229,6 +271,30 @@ jobs:
           else
             echo "Prerelease: latest not moved."
           fi
+          echo "digest=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${VERSION}")" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          FULL_SHA: ${{ steps.source.outputs.full_sha }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          TRIVY_REPORT: release-files/trivy-report.json
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUT: release-files/RELEASE_NOTES.md
+        run: |
+          node .github/scripts/release-notes.mjs
+          cat release-files/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Kept with the run on every release, and the only copy on a dry run.
+      - name: Upload release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files-v${{ steps.version.outputs.version }}
+          path: release-files/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Tag commit and create GitHub Release
         if: ${{ !inputs.dry_run }}
@@ -237,7 +303,6 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
           FULL_SHA: ${{ steps.source.outputs.full_sha }}
-          SHORT_SHA: ${{ steps.source.outputs.short_sha }}
         run: |
           set -euo pipefail
           FLAGS=()
@@ -245,16 +310,18 @@ jobs:
           gh release create "v${VERSION}" \
             --target "${FULL_SHA}" \
             --title "v${VERSION}" \
-            --generate-notes \
-            --notes "Image: \`${IMAGE}:${VERSION}\` (built from \`${SHORT_SHA}\`, re-scanned at release)." \
-            "${FLAGS[@]}"
+            --notes-file release-files/RELEASE_NOTES.md \
+            "${FLAGS[@]}" \
+            release-files/RELEASE_NOTES.md \
+            release-files/sbom.cdx.json \
+            release-files/trivy-report.json
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SHORT_SHA: ${{ steps.source.outputs.short_sha }}
-        run: echo "::notice title=Dry run passed::v${VERSION} from ${SHORT_SHA} would release. Nothing was pushed or tagged."
+        run: echo "::notice title=Dry run passed::v${VERSION} from ${SHORT_SHA} would release. Nothing was pushed or tagged; the release files are in the run's artifacts."
 
       - name: Notify on release
         if: ${{ always() && !inputs.dry_run }}

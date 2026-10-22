@@ -363,8 +363,21 @@ Push → ci (build + tests) → on success: Docker build → Trivy container sca
 **Release pipeline (one button):**
 ```
 Pick version + newest sha image → Trivy re-scan (today's CVE data) → Stamp version (no rebuild)
-  → /health must report the new version → Push <version> + latest → Tag + GitHub Release
+  → /health must report the new version → SBOM + scan report + release notes
+  → Push <version> + latest → Tag + GitHub Release with the files attached
 ```
+
+Every GitHub Release carries three files for downstream consumers:
+
+- **`RELEASE_NOTES.md`**, also the release description. It has:
+  - the image tag and pinnable digest;
+  - the security alerts closed since the previous release, split into those in the released image, those in source code (CodeQL), and dev-only tooling;
+  - the release-time scan result;
+  - the merged changes grouped by type (from conventional-commit PR titles), with a compare link.
+- **`sbom.cdx.json`**, a CycloneDX SBOM of every OS and npm package in the image.
+- **`trivy-report.json`**, the release-time vulnerability scan at all severities, including known issues with no upstream fix.
+
+A dry run produces the same files as a workflow artifact without publishing anything.
 
 Insecure images never reach the registry — the image is built only after `ci` passes, and the Trivy container scan (OS packages and npm packages) gates the push. The release re-scans the same image, so a CVE published between the merge and the release blocks it.
 
