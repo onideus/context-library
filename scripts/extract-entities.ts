@@ -206,6 +206,16 @@ async function extractBatch(
     messages: [{ role: "user", content: buildUserMessage(batch) }],
   });
 
+  // Refused or truncated output would otherwise surface as an opaque JSON
+  // parse error; name the cause so the batch failure is actionable.
+  if (
+    response.stop_reason === "refusal" ||
+    response.stop_reason === "max_tokens" ||
+    response.stop_reason === "model_context_window_exceeded"
+  ) {
+    throw new Error(`Model response stopped early (stop_reason: ${response.stop_reason})`);
+  }
+
   const textBlock = response.content.find((b) => b.type === "text");
   if (!textBlock || textBlock.type !== "text") {
     throw new Error("Model response contained no text block");
