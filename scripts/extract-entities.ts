@@ -15,7 +15,7 @@
  * Environment:
  *   ANTHROPIC_API_KEY  Anthropic API key (required)
  *   DATA_DIR           Root data dir (default: ./data). Handoffs live in DATA_DIR/handoffs.
- *   EXTRACT_MODEL      Override model (default: claude-sonnet-4-20250514).
+ *   EXTRACT_MODEL      Override model (default: claude-sonnet-5-5).
  *
  * Notes:
  *   - This script does NOT run in production. It is a one-shot seeding tool.
@@ -32,7 +32,7 @@ import { mergeEntities, type EntitySeed, type Scope } from "./merge-entities.js"
 
 export { mergeEntities, type EntitySeed, type Scope } from "./merge-entities.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "claude-sonnet-5-5";
 const BATCH_SIZE = 8;
 
 // ── Types ─────────────────────────────────────────────────────────
