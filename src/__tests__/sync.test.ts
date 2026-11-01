@@ -16,7 +16,7 @@ import type { Client as PgClient } from "pg";
  *   - push dedupe on op_uuid
  *   - individual stale-op rejection (never batch-fail)
  *   - conditional-UPDATE status transition race
- *   - patch_handoff expected_source precondition (HANDOFF_CONFLICT)
+ *   - update_handoff expected_source precondition (HANDOFF_CONFLICT)
  *
  * and, for the note-lifecycle work (docs/design/note-lifecycle.md section 8):
  *   - note snapshots carrying the lifecycle/provenance/version fields
@@ -257,7 +257,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
         content: "checking change log",
         scope: "personal",
       });
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Sync atomicity - artifact",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -328,7 +328,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       // Set up: create an artifact, promote to ready. Then a client push
       // includes (a) a stale update on the artifact with expected_status=draft
       // — will conflict — and (b) a fresh note insert — must still apply.
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Batch reject victim",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -509,7 +509,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
 
   describe("conditional-UPDATE status transition race", () => {
     it("two writers with same expected_status: one wins, one loses cleanly", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Race artifact",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -542,23 +542,23 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     });
   });
 
-  describe("patch_handoff expected_source precondition", () => {
+  describe("update_handoff expected_source precondition", () => {
     it("returns HANDOFF_CONFLICT when latest has moved", async () => {
       // Store a first handoff, then store another one to advance the pointer.
-      const first = await callTool("store_handoff", {
+      const first = await callTool("create_handoff", {
         active_context: { arc: "first" },
       });
       expect(first.success).toBe(true);
       const staleFilename = first.filename;
 
-      const second = await callTool("store_handoff", {
+      const second = await callTool("create_handoff", {
         active_context: { arc: "second" },
       });
       expect(second.success).toBe(true);
       expect(second.filename).not.toBe(staleFilename);
 
       // Now try to patch as if we still thought `first` was latest.
-      const patchResult = await callTool("patch_handoff", {
+      const patchResult = await callTool("update_handoff", {
         tone_notes: "should fail",
         expected_source: staleFilename,
       });
@@ -568,12 +568,12 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     });
 
     it("still applies the patch when expected_source matches", async () => {
-      const stored = await callTool("store_handoff", {
+      const stored = await callTool("create_handoff", {
         active_context: { arc: "matching-source" },
       });
       expect(stored.success).toBe(true);
 
-      const patchResult = await callTool("patch_handoff", {
+      const patchResult = await callTool("update_handoff", {
         tone_notes: "applied cleanly",
         expected_source: stored.filename,
       });
@@ -627,7 +627,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
 
     it("returns the inline content for a stored artifact by content_hash", async () => {
       const inline = "the quick brown fox jumps over the lazy dog";
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Content-on-demand happy path",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -649,13 +649,13 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       // artifacts point to the same content. The endpoint returns the content
       // regardless of which row matched first.
       const shared = "artifacts with identical bodies share a hash";
-      const a1 = await callTool("store_artifact", {
+      const a1 = await callTool("create_artifact", {
         title: "Shared-hash artifact one",
         artifact_type: "cc-prompt",
         scope: "personal",
         content: shared,
       });
-      const a2 = await callTool("store_artifact", {
+      const a2 = await callTool("create_artifact", {
         title: "Shared-hash artifact two",
         artifact_type: "research",
         scope: "personal",
@@ -784,7 +784,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       // planner switches to the index automatically — but only if the query
       // shape allows it, which is what this test guards.
       const seedContent = "explain-plan-seed";
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Content-hash EXPLAIN seed",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -863,7 +863,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
     });
 
     it("artifact: title-only update with stale expected_status returns STATUS_CONFLICT", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Title-only expected_status - artifact",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -1473,7 +1473,7 @@ describe.skipIf(!pgAvailable)("Sync foundation", () => {
       });
 
       it("rejects supersede on an artifact per op without applying it as an update", async () => {
-        const a = await callTool("store_artifact", {
+        const a = await callTool("create_artifact", {
           title: "Artifact not supersedable",
           artifact_type: "cc-prompt",
           scope: "personal",

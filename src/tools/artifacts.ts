@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTool } from "./tool-aliases.js";
 import { query } from "../db/client.js";
 import { withTransaction, appendChange } from "../db/changes.js";
 import { indexArtifact } from "../embeddings/indexer.js";
@@ -158,7 +159,7 @@ How artifacts differ from the other primitives:
 - Handoffs are ephemeral session state.
 - Artifacts are the concrete outputs produced by work. They have a status lifecycle (draft → ready → executing → completed) and can be ordered within a batch via execution_order.
 
-Route content to the appropriate primitive — see create_note, create_task, store_handoff, and patch_handoff for guidance on what belongs elsewhere.
+Route content to the appropriate primitive — see create_note, create_task, create_handoff, and update_handoff for guidance on what belongs elsewhere.
 
 Storage modes:
 - Inline 'content' — for small artifacts like CC prompts, snippets, short docs. Stored directly in Postgres, indexed for semantic search.
@@ -222,7 +223,7 @@ Integrity:
 
 Re-embeds when title, content, tags, or artifact_type change.
 
-For small edits to the content of a large artifact, prefer patch_artifact (exact-text replace) — it avoids resending the full content.`;
+For small edits to the content of a large artifact, prefer edit_artifact (exact-text replace) — it avoids resending the full content.`;
 
 const PATCH_ARTIFACT_DESC = `Edit an artifact's content by replacing exact spans of text, without resending the whole body. Prefer this over update_artifact for content changes that touch a small part of a large artifact (fixing a paragraph of a long prompt, updating a value in a spec, rewording a section of a report) — update_artifact requires the complete new content, costs tokens for the entire artifact, and risks silently changing text you didn't mean to touch.
 
@@ -236,7 +237,7 @@ Parameters:
   - old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
   - new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
   - replace_all (optional, default false): when true, replace every occurrence (at least one must exist); when false, old_str must occur exactly once.
-- expected_content_hash (optional): the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous patch_artifact response). Enforced whenever present; omit for last-writer-wins.
+- expected_content_hash (optional): the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous edit_artifact response). Enforced whenever present; omit for last-writer-wins.
 
 Locked artifacts: content of an artifact in 'ready', 'executing', or 'completed' is immutable, exactly as with update_artifact. Move it back to 'draft' with update_artifact first. 'draft' and 'superseded' artifacts can be patched; the status is unchanged.
 
@@ -273,9 +274,10 @@ Filters: artifact_type, status, scope. When scope is omitted, searches across al
 // ── Tool Registration ────────────────────────────────────────────
 
 export function registerArtifactTools(mcpServer: McpServer): void {
-  // ── store_artifact ───────────────────────────────────────────
-  mcpServer.tool(
-    "store_artifact",
+  // ── create_artifact ──────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "create_artifact",
     STORE_ARTIFACT_DESC,
     {
       title: z.string().describe("Short descriptive title for the artifact"),
@@ -383,7 +385,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           scope: row.scope,
           created_at: row.created_at,
         }).catch((err) =>
-          console.warn("[store_artifact] Background indexing failed:", (err as Error).message)
+          console.warn("[create_artifact] Background indexing failed:", (err as Error).message)
         );
         return jsonResponse({
           id: row.id,
@@ -832,9 +834,10 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── patch_artifact ───────────────────────────────────────────
-  mcpServer.tool(
-    "patch_artifact",
+  // ── edit_artifact ────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "edit_artifact",
     PATCH_ARTIFACT_DESC,
     {
       id: z.string().describe("UUID of the artifact to edit"),
@@ -858,7 +861,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         .max(50)
         .describe("Ordered edits (1–50), each applied to the result of the previous one. All apply or none do."),
       expected_content_hash: z.string().optional().describe(
-        "Optimistic-concurrency precondition: the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous patch_artifact). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns current_content_hash. Omit for last-writer-wins."
+        "Optimistic-concurrency precondition: the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous edit_artifact). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns current_content_hash. Omit for last-writer-wins."
       ),
     },
     async (args) => {
@@ -962,7 +965,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
             };
           }
 
-          // Whitespace-only counts as empty, matching store_artifact/update_artifact.
+          // Whitespace-only counts as empty, matching create_artifact/update_artifact.
           if (result.content.trim().length === 0) {
             return {
               kind: "error",
@@ -1010,7 +1013,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
           scope: row.scope,
           created_at: row.created_at,
         }).catch((err) =>
-          console.warn("[patch_artifact] Background indexing failed:", (err as Error).message)
+          console.warn("[edit_artifact] Background indexing failed:", (err as Error).message)
         );
       }
 

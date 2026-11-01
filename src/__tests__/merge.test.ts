@@ -73,7 +73,7 @@ describe("mergeHandoff", () => {
   });
 
   describe("deprecated tasks field (schema 1.3)", () => {
-    // tasks operations are stripped by the patch_handoff handler before
+    // tasks operations are stripped by the update_handoff handler before
     // reaching merge, so mergeHandoff itself no longer processes them.
     // These tests assert that nothing is mutated even if a stray tasks
     // field slips through.

@@ -68,7 +68,7 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
 
 /** Store a handoff and verify it succeeded. Returns the parsed result. */
 async function storeAndVerify(payload: Record<string, unknown>) {
-  const result = await callTool("store_handoff", payload);
+  const result = await callTool("create_handoff", payload);
   expect(result.success).toBe(true);
   return result;
 }
@@ -166,7 +166,7 @@ describe("list_handoffs", () => {
 
     // Extracted metadata values
     expect(entry.session_label).toBe("nav-label-third");
-    // Since schema 1.3, store_handoff drops legacy task arrays on write, so
+    // Since schema 1.3, create_handoff drops legacy task arrays on write, so
     // newly stored handoffs never contain a tasks key — has_tasks is true
     // only for pre-1.3 files already on disk.
     expect(entry.has_tasks).toBe(false);

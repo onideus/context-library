@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTool } from "./tool-aliases.js";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { read, writeHandoff, writeHandoffInPlace, archiveHandoff, ARCHIVE_DIRNAME, getLatestHandoffFilename, getHandoffCount } from "../storage/json-store.js";
@@ -18,10 +19,10 @@ export const SCHEMA_VERSION = "1.3";
 
 /**
  * Log the structured deprecation warning emitted whenever a caller sends
- * legacy handoff task arrays. Centralised so store_handoff and patch_handoff
+ * legacy handoff task arrays. Centralised so create_handoff and update_handoff
  * emit identical signal.
  */
-function logTaskArrayDeprecation(tool: "store_handoff" | "patch_handoff"): void {
+function logTaskArrayDeprecation(tool: "create_handoff" | "update_handoff"): void {
   console.warn(
     JSON.stringify({
       level: "warn",
@@ -188,7 +189,7 @@ const COLD_START_THRESHOLD_SECONDS = 15 * 60;
  * Derive a coarse session-continuity signal for the next caller.
  *
  *  - "cold_start"   : the previous session was explicitly closed via
- *                     store_handoff/patch_handoff with final=true AND a
+ *                     create_handoff/update_handoff with final=true AND a
  *                     significant amount of time has elapsed since the
  *                     closing handoff (see COLD_START_THRESHOLD_SECONDS).
  *                     The next conversation should treat operational_state
@@ -313,7 +314,7 @@ export function filterByScope(
  * a gutted file as though it were the original would be a lie) or that still
  * have pending embeddings (content hasn't been indexed yet).
  *
- * Exported for tests; store_handoff is the only production caller.
+ * Exported for tests; create_handoff is the only production caller.
  */
 export async function compactPreviousHandoff(previousFilename: string | null): Promise<void> {
   if (!previousFilename) return;
@@ -366,9 +367,9 @@ export async function compactPreviousHandoff(previousFilename: string | null): P
 
 // ── Tool Descriptions ──────────────────────────────────────────────
 
-const STORE_HANDOFF_DESCRIPTION = `Store the current operational handoff state as a new timestamped file (append-only — previous handoffs are preserved, not overwritten). Use this for full-state captures at session boundaries. For partial updates mid-session, use patch_handoff instead.
+const STORE_HANDOFF_DESCRIPTION = `Store the current operational handoff state as a new timestamped file (append-only — previous handoffs are preserved, not overwritten). Use this for full-state captures at session boundaries. For partial updates mid-session, use update_handoff instead.
 
-Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and store_artifact for guidance on what belongs elsewhere.
+Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and create_artifact for guidance on what belongs elsewhere.
 
 IMPORTANT: Always call get_latest_handoff first to load existing state before storing. This prevents data loss from overwriting fields you didn't intend to clear.
 
@@ -387,7 +388,7 @@ Content routing — what belongs in active_context (handoff):
 What belongs elsewhere:
 - Durable decisions, architectural patterns, lessons learned → create_note
 - Action items with completion lifecycle → create_task
-- Generated outputs (CC prompts, research, templates) → store_artifact
+- Generated outputs (CC prompts, research, templates) → create_artifact
 
 If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
 
@@ -408,7 +409,7 @@ Response Format:
 
 const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. Returns operational context, active work, task lists, and tone notes from the last session.
 
-WHEN TO CALL: At session start (always), before any store_handoff or patch_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
+WHEN TO CALL: At session start (always), before any create_handoff or update_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
 
 After loading the handoff, check for durable decisions by calling search_context(content_types: ['note']) or search_notes(query) for topic-specific retrieval. Notes are permanent interpretation — they don't expire between sessions. If making an architectural recommendation, career decision, or strategic judgment, check notes before responding. Handoffs show what was happening; notes show what has been decided and why.
 
@@ -421,7 +422,7 @@ Session continuity:
 - session_closed_at (ISO timestamp or null): when the session was closed (matches stored_at on the closing handoff).
 - session_continuity ('cold_start' | 'resume' | 'unknown'): coarse signal for whether this conversation is picking up a still-open session ('resume') or starting after a closed one ('cold_start'). Use this to frame how literally to apply operational_state and active_context — a closed session's working state is historical, not live. A closed session reopened within ~15 minutes still reports 'resume' so brief reopens (e.g., to fix config) don't lose context.
 
-embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context or reindex call.
+embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior store/patch operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context call (or an operator \`npm run reindex\`).
 
 Response shape: operational_state, active_context, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled. Legacy handoff task arrays (tasks.completed/open/blocked) and memory_deltas are NOT returned since schema 1.3 — they are stripped from the response in every scope even when present on the underlying historical file. task_summary is the authoritative replacement for task arrays, computed live from the Postgres tasks table. Call search_tasks or list_tasks for full task detail.
 
@@ -445,9 +446,9 @@ Parameters:
 - scope (optional, default "full"): "full" | "work" | "personal"
 - timezone (optional): IANA timezone for retrieved_at formatting`;
 
-const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of store_handoff when you only need to update mood, append to conversation arc, or revise tone_notes. Scalars overwrite, objects deep-merge. Each call creates a new timestamped file (append-only).
+const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of create_handoff when you only need to update mood, append to conversation arc, or revise tone_notes. Scalars overwrite, objects deep-merge. Each call creates a new timestamped file (append-only).
 
-Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and store_artifact for guidance on what belongs elsewhere.
+Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and create_artifact for guidance on what belongs elsewhere.
 
 IMPORTANT: Always call get_latest_handoff first to confirm current state before patching. This prevents merge conflicts and stale data issues.
 
@@ -475,7 +476,7 @@ Content routing — what belongs in active_context (handoff):
 What belongs elsewhere:
 - Durable decisions, architectural patterns, lessons learned → create_note
 - Action items with completion lifecycle → create_task
-- Generated outputs (CC prompts, research, templates) → store_artifact
+- Generated outputs (CC prompts, research, templates) → create_artifact
 
 If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
 
@@ -485,7 +486,7 @@ Response Format:
 - Reasoning-capable models (extended thinking enabled): Use structured reflection before patching. Evaluate whether the patch is consistent with the loaded state. Note any gaps or conflicts explicitly.
 - Standard inference models: Respond directly. Confirm the patched_fields and updated task_summary. Flag when the patch seems inconsistent with recent context.`;
 
-// ── Zod Schemas for patch_handoff ──────────────────────────────────
+// ── Zod Schemas for update_handoff ──────────────────────────────────
 
 const arrayOpSchema = z
   .object({
@@ -496,7 +497,7 @@ const arrayOpSchema = z
   .optional();
 
 /**
- * Fields treated as user-supplied content on store_handoff / patch_handoff
+ * Fields treated as user-supplied content on create_handoff / update_handoff
  * for the purposes of the empty-payload guard.
  *
  * `tasks` is intentionally still counted as content even though it is
@@ -528,9 +529,10 @@ function hasAnyContent(args: Record<string, unknown>, fields: readonly string[])
 // ── Tool Registration ──────────────────────────────────────────────
 
 export function registerHandoffTools(mcpServer: McpServer): void {
-  // ── store_handoff ──────────────────────────────────────────────
-  mcpServer.tool(
-    "store_handoff",
+  // ── create_handoff ─────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "create_handoff",
     STORE_HANDOFF_DESCRIPTION,
     {
       operational_state: z
@@ -570,7 +572,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
     },
     async (args) => {
       const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
-      console.log(`[store_handoff] args size: ${argsBytes} bytes`);
+      console.log(`[create_handoff] args size: ${argsBytes} bytes`);
 
       if (!hasAnyContent(args as Record<string, unknown>, STORE_CONTENT_FIELDS)) {
         return {
@@ -581,7 +583,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 code: "EMPTY_HANDOFF",
                 message:
-                  "store_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone).",
+                  "create_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone).",
               }),
             },
           ],
@@ -589,7 +591,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       }
 
       try {
-        validatePayloadSize(args, LIMITS.STORE_HANDOFF_BYTES, "store_handoff payload");
+        validatePayloadSize(args, LIMITS.STORE_HANDOFF_BYTES, "create_handoff payload");
       } catch (err) {
         if (err instanceof PayloadTooLargeError) {
           return {
@@ -615,7 +617,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       // Postgres tasks table is authoritative; handoff arrays are never
       // persisted on the new schema (1.3+).
       if (hasTaskArrays(args as Record<string, unknown>)) {
-        logTaskArrayDeprecation("store_handoff");
+        logTaskArrayDeprecation("create_handoff");
       }
       // Strip the deprecated tasks array and the transport-only `final` flag
       // before persistence: `final` lives in args to signal session close, but
@@ -646,26 +648,26 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       // backfillHandoffChanges() on the next boot to reconcile on-disk files
       // with the changes table so pullers eventually see them.
       appendChangeBestEffort("handoff", filename, "insert").catch((err) =>
-        console.warn("[store_handoff] change-log append failed:", (err as Error).message)
+        console.warn("[create_handoff] change-log append failed:", (err as Error).message)
       );
 
       // Fire-and-forget background indexing — MUST NOT block or fail the handoff
       indexHandoff(filename, handoff).catch(err =>
-        console.warn("[store_handoff] Background indexing failed:", (err as Error).message)
+        console.warn("[create_handoff] Background indexing failed:", (err as Error).message)
       );
 
       // Fire-and-forget entity extraction
       if (config.entityExtractionEnabled && config.entityExtractionAsync) {
         const handoffText = extractHandoffText(handoff as Record<string, unknown>);
         extractAndStore("handoff", filename, handoffText).catch(err =>
-          console.warn("[store_handoff] Background entity extraction failed:", (err as Error).message)
+          console.warn("[create_handoff] Background entity extraction failed:", (err as Error).message)
         );
       }
 
       // Fire-and-forget compaction of the prior handoff. Non-fatal.
       if (previousFilename && previousFilename !== filename) {
         compactPreviousHandoff(previousFilename).catch(err =>
-          console.warn("[store_handoff] Compaction failed:", (err as Error).message)
+          console.warn("[create_handoff] Compaction failed:", (err as Error).message)
         );
       }
 
@@ -763,7 +765,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
 
       // Session continuity signal — read straight from the stored markers so
       // the answer is the same whether scope is full/work/personal. Stale
-      // markers are dropped on patch_handoff, so a "cold_start" result here
+      // markers are dropped on update_handoff, so a "cold_start" result here
       // always reflects the most recent write.
       const sessionClosed = handoff.session_closed === true;
       const sessionClosedAt = handoff.session_closed_at ?? null;
@@ -798,9 +800,10 @@ export function registerHandoffTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── patch_handoff ──────────────────────────────────────────────
-  mcpServer.tool(
-    "patch_handoff",
+  // ── update_handoff ─────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "update_handoff",
     PATCH_HANDOFF_DESCRIPTION,
     {
       operational_state: z
@@ -842,7 +845,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
     },
     async (args) => {
       const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
-      console.log(`[patch_handoff] args size: ${argsBytes} bytes`);
+      console.log(`[update_handoff] args size: ${argsBytes} bytes`);
 
       // `final: true` on its own is a valid session-close signal even without
       // other content. Treat it as sufficient content so callers don't have
@@ -860,7 +863,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
                 error: true,
                 code: "EMPTY_PATCH",
                 message:
-                  "patch_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone) or final=true. Null values are treated as no-op.",
+                  "update_handoff requires at least one content field (operational_state, active_context, tone_notes, or timezone) or final=true. Null values are treated as no-op.",
               }),
             },
           ],
@@ -868,7 +871,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       }
 
       try {
-        validatePayloadSize(args, LIMITS.PATCH_HANDOFF_BYTES, "patch_handoff payload");
+        validatePayloadSize(args, LIMITS.PATCH_HANDOFF_BYTES, "update_handoff payload");
       } catch (err) {
         if (err instanceof PayloadTooLargeError) {
           return {
@@ -899,7 +902,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               type: "text" as const,
               text: JSON.stringify({
                 error: true,
-                message: "No handoff exists to patch. Use store_handoff to create one first.",
+                message: "No handoff exists to patch. Use create_handoff to create one first.",
                 code: "NOT_FOUND",
               }),
             },
@@ -939,7 +942,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
               type: "text" as const,
               text: JSON.stringify({
                 error: true,
-                message: "No handoff exists to patch. Use store_handoff to create one first.",
+                message: "No handoff exists to patch. Use create_handoff to create one first.",
                 code: "NOT_FOUND",
               }),
             },
@@ -954,7 +957,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       const patchHasTasks =
         args.tasks !== undefined && args.tasks !== null && Object.keys(args.tasks).length > 0;
       if (patchHasTasks) {
-        logTaskArrayDeprecation("patch_handoff");
+        logTaskArrayDeprecation("update_handoff");
       }
       // Strip the deprecated tasks array, the transport-only `final` flag,
       // and the sync precondition `expected_source` from the patch payload
@@ -1005,23 +1008,23 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       // Append to the sync change log — fire-and-forget so a Postgres outage
       // doesn't break the file-mode handoff path.
       appendChangeBestEffort("handoff", newFilename, "insert").catch((err) =>
-        console.warn("[patch_handoff] change-log append failed:", (err as Error).message)
+        console.warn("[update_handoff] change-log append failed:", (err as Error).message)
       );
 
       // Fire-and-forget background indexing
       indexHandoff(newFilename, merged as Record<string, unknown>).catch(err =>
-        console.warn("[patch_handoff] Background indexing failed:", (err as Error).message)
+        console.warn("[update_handoff] Background indexing failed:", (err as Error).message)
       );
 
       // Fire-and-forget entity extraction
       if (config.entityExtractionEnabled && config.entityExtractionAsync) {
         const handoffText = extractHandoffText(merged as Record<string, unknown>);
         extractAndStore("handoff", newFilename, handoffText).catch(err =>
-          console.warn("[patch_handoff] Background entity extraction failed:", (err as Error).message)
+          console.warn("[update_handoff] Background entity extraction failed:", (err as Error).message)
         );
       }
 
-      // task_summary on patch_handoff response reflects authoritative
+      // task_summary on update_handoff response reflects authoritative
       // Postgres state, not the legacy handoff arrays (now stripped).
       const dynamicSummary = await computeDynamicTaskSummary();
       const taskSummary = dynamicSummary ?? computeTaskSummary(merged);

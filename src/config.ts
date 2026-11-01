@@ -10,7 +10,12 @@ export const config = {
   port: parseInt(process.env.MCP_PORT ?? "3100", 10),
   dataDir: process.env.DATA_DIR ?? "./data",
   retentionCount: parseInt(process.env.RETENTION_COUNT ?? "0", 10),
-  // How store_handoff treats the handoff it supersedes.
+  // Register the pre-rename tool names (create_handoff, edit_artifact, ...) as
+  // deprecated aliases of their new names. The aliases are removed in the next
+  // release; `false` previews that and lowers the advertised tool count. Only
+  // the literal "false" turns them off.
+  legacyToolNames: process.env.LEGACY_TOOL_NAMES?.trim().toLowerCase() !== "false",
+  // How create_handoff treats the handoff it supersedes.
   //   archive  (default) — copy the original byte-exact to handoffs/archive/
   //                        before rewriting it in place. Lossless on disk.
   //   off                — never rewrite. The archival-deployment setting:

@@ -181,7 +181,7 @@ describe("Structured response logging", () => {
     const res = await mcpPost(`http://localhost:${offPort}`, {
       jsonrpc: "2.0",
       method: "tools/call",
-      params: { name: "store_handoff", arguments: { tone_notes: "log test" } },
+      params: { name: "create_handoff", arguments: { tone_notes: "log test" } },
       id: 99,
     });
     expect(res.status).toBe(200);
@@ -196,7 +196,7 @@ describe("Structured response logging", () => {
     expect(entry.level).toBe("info");
     expect(entry.type).toBe("mcp_response");
     expect(typeof entry.correlation_id).toBe("string");
-    expect(entry.tool).toBe("store_handoff");
+    expect(entry.tool).toBe("create_handoff");
     expect(entry.request_id).toBe(99);
     expect(entry.status).toBe("success");
     expect(entry.http_status).toBe(200);
@@ -211,7 +211,7 @@ describe("Structured response logging", () => {
     await mcpPost(`http://localhost:${offPort}`, {
       jsonrpc: "2.0",
       method: "tools/call",
-      params: { name: "store_handoff", arguments: { tone_notes: "no-body-log" } },
+      params: { name: "create_handoff", arguments: { tone_notes: "no-body-log" } },
       id: 100,
     });
     const entries = await waitForLogEntries(
@@ -229,7 +229,7 @@ describe("Structured response logging", () => {
     await mcpPost(`http://localhost:${onPort}`, {
       jsonrpc: "2.0",
       method: "tools/call",
-      params: { name: "store_handoff", arguments: { tone_notes: "with-body-log" } },
+      params: { name: "create_handoff", arguments: { tone_notes: "with-body-log" } },
       id: 101,
     });
     const entries = await waitForLogEntries(

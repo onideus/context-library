@@ -1,11 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTool, strReplaceNoteAdapter } from "./tool-aliases.js";
 import { pool, query } from "../db/client.js";
 import { withTransaction } from "../db/changes.js";
 import { indexNote } from "../embeddings/indexer.js";
 import { config } from "../config.js";
 import { extractAndStore } from "../entities/pipeline.js";
-import { countOccurrences, literalReplace, appendWithNewline } from "./note-edits.js";
+import { appendWithNewline, applyEdits, type ContentEdit } from "./note-edits.js";
 import {
   EFFECTIVE_NOTE_STATUSES,
   PROVENANCE_VALUES,
@@ -192,7 +193,7 @@ Returns { id, title, created_at, version (starts at 1), status, provenance, vali
 
 const GET_NOTE_DESC = `Retrieve a single note by its UUID. Returns the full note object including content.
 
-Lifecycle fields: 'status' is 'active', 'superseded' (replaced by a newer note — see 'successor'), or 'expired' (valid_until has passed; computed at read time). 'successor' is { id, title } for a superseded note, otherwise null. 'supersedes' lists the ids of notes this one replaced. 'provenance' says where the content came from (null = not recorded). 'version' is the note's edit counter — pass it as expected_version to update_note, str_replace_note, append_note, or supersede_note to guard against overwriting a concurrent edit. Use get_note_history to read what earlier versions said.`;
+Lifecycle fields: 'status' is 'active', 'superseded' (replaced by a newer note — see 'successor'), or 'expired' (valid_until has passed; computed at read time). 'successor' is { id, title } for a superseded note, otherwise null. 'supersedes' lists the ids of notes this one replaced. 'provenance' says where the content came from (null = not recorded). 'version' is the note's edit counter — pass it as expected_version to update_note, edit_note, append_note, or supersede_note to guard against overwriting a concurrent edit. Use get_note_history to read what earlier versions said.`;
 
 const LIST_NOTES_DESC = `List knowledge entries with optional filters and pagination. Returns metadata only (id, title, domain, scope, tags, status, valid_until, superseded_by, provenance, version, timestamps) — NOT the full content. Call get_note for the body.
 
@@ -226,7 +227,7 @@ Returns: { notes[], total_count, redirected, lifecycle_notices[], next_step }. t
 
 Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
 
-const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified, and at least one must be given. Tags and related_task_ids are full-replacement (provide complete arrays). Pass null to clear domain, source_url, provenance, or valid_until. Re-embeds on title/content/domain/tags change. For small edits to an existing note's content, prefer str_replace_note (exact-text replace) or append_note (add to the end) — they avoid resending the full content.
+const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified, and at least one must be given. Tags and related_task_ids are full-replacement (provide complete arrays). Pass null to clear domain, source_url, provenance, or valid_until. Re-embeds on title/content/domain/tags change. For small edits to an existing note's content, prefer edit_note (exact-text replace) or append_note (add to the end) — they avoid resending the full content.
 
 Version history: every note has a 'version' counter. Every edit that actually changes something records the prior version (readable later with get_note_history) and bumps the counter. An edit that changes nothing is a true no-op: the response has changed: false and the version does not move.
 
@@ -240,27 +241,29 @@ ${PROVENANCE_STEERING} Pass provenance: null to clear it.
 
 Returns the full updated note plus 'changed' (false when the call was a no-op).`;
 
-const STR_REPLACE_NOTE_DESC = `Replace an exact span of text inside an existing note's content without resending the whole note. Prefer this over update_note for small edits to long notes (changing a status line, fixing a sentence, updating a value) — update_note requires the complete new content, costs tokens for the entire note, and risks silently dropping lines you didn't mean to touch.
+const EDIT_NOTE_DESC = `Edit a note's content by replacing exact spans of text, without resending the whole note. Prefer this over update_note for small edits to long notes (changing a status line, fixing a sentence, updating a value) — update_note requires the complete new content, costs tokens for the entire note, and risks silently dropping lines you didn't mean to touch.
 
-Workflow: call get_note first so old_str is copied exactly from the current content, and pass the 'version' it returned as expected_version.
+Workflow: call get_note first so every old_str is copied exactly from the current content, and pass the 'version' it returned as expected_version.
 
 Parameters:
 - id (required): UUID of the note to edit.
-- old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
-- new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
-- replace_all (optional, default false): when true, replace every occurrence; when false, old_str must occur exactly once.
+- edits (required, 1–50 items): ordered list of {old_str, new_str, replace_all?}. Edits apply in order, each against the result of the previous one, so a later edit can match text an earlier edit inserted. All edits apply or none do.
+  - old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
+  - new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
+  - replace_all (optional, default false): when true, replace every occurrence (at least one must exist); when false, old_str must occur exactly once.
 - expected_version (optional): the note's 'version' as you last saw it (from get_note or a previous response). Enforced whenever present; omit for last-writer-wins.
 
 Errors (returned as {error: true, message, code, ...}):
-- VALIDATION_ERROR — old_str is empty.
 - NOT_FOUND — no note with that id.
 - VERSION_CONFLICT — expected_version is stale: the note changed since you read it, so nothing is written. The note as it is now is under 'current' — copy old_str from it and retry with its version. Checked before matching, so it takes precedence over NO_MATCH / AMBIGUOUS_MATCH.
-- NO_MATCH — old_str does not occur in the content (match_count: 0). Re-read the note with get_note and copy the text exactly.
-- AMBIGUOUS_MATCH — old_str occurs more than once and replace_all is false (match_count gives the number of occurrences). Widen old_str with surrounding text until it is unique, or pass replace_all: true if every occurrence should change.
+- NO_MATCH — the edit at edit_index (zero-based) does not occur in the content as it stands after the earlier edits (match_count: 0). Nothing is written. Re-read the note with get_note and copy the text exactly.
+- AMBIGUOUS_MATCH — the edit at edit_index occurs match_count times and replace_all is false. Nothing is written. Widen old_str with surrounding text until it is unique, or pass replace_all: true if every occurrence should change.
 
-Version history: like update_note, an edit that changes the content records the prior version (readable with get_note_history, changed_via 'str_replace_note') and bumps 'version'. If the replacement leaves the content identical (new_str equal to old_str), the call is a true no-op: changed is false and the version does not move. Editing a superseded or expired note is allowed and versioned; its status is unaffected.
+The edits may leave the note's content empty; that is allowed.
 
-Returns a compact confirmation WITHOUT the note content: {id, title, version, changed, updated_at, replacements, content_length}. replacements is the number of occurrences replaced; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Title, tags, and other fields are unchanged — use update_note for those. Re-embeds the note for search when the content changed.`;
+Version history: like update_note, an edit that changes the content records the prior version (readable with get_note_history, changed_via 'edit_note') and bumps 'version'. If the edits leave the content identical (every new_str equal to its old_str), the call is a true no-op: changed is false and the version does not move. Editing a superseded or expired note is allowed and versioned; its status is unaffected.
+
+Returns a compact confirmation WITHOUT the note content: {id, title, version, changed, updated_at, replacements, content_length}. replacements lists the number of occurrences replaced by each edit, in order; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Title, tags, and other fields are unchanged — use update_note for those. Re-embeds the note for search when the content changed.`;
 
 const APPEND_NOTE_DESC = `Append text to the end of an existing note's content without resending the whole note. Prefer this over update_note for logs, running journals, and dated entries (e.g. "2026-01-15: Acme Corp rollout finished") — it costs tokens only for the new text and cannot accidentally drop existing lines.
 
@@ -294,11 +297,11 @@ Returns { superseded: { id, title, version, superseded_by, superseded_at }, succ
 
 const GET_NOTE_HISTORY_DESC = `Read the version history of a note: what it said before each edit, which fields changed, and which tool made the change. Entries are newest-first; entry 0 is the current version (is_current: true), followed by earlier versions. Each entry carries the full prior content: version, title, content, domain, tags, scope, source_url, related_task_ids, provenance, valid_until, status (the stored lifecycle status, 'active' or 'superseded'; expiry is not stored, so compare valid_until), superseded_by, superseded_at, changed_fields, changed_via, changed_at, is_current.
 
-For an earlier version, changed_fields / changed_via / changed_at describe the edit that REPLACED that version (for example changed_fields ["content"], changed_via "update_note"). The current entry has changed_fields [] and changed_via null, and its changed_at is the note's last-modified time. changed_via is the tool that wrote the change; "sql" means a writer outside the tools.
+For an earlier version, changed_fields / changed_via / changed_at describe the edit that REPLACED that version (for example changed_fields ["content"], changed_via "update_note"). The current entry has changed_fields [] and changed_via null, and its changed_at is the note's last-modified time. changed_via is the tool that wrote the change; "sql" means a writer outside the tools. "edit_note" and "str_replace_note" can both appear and mean the same kind of edit (an exact-text replacement inside the content); "str_replace_note" is the older name, found on history written before the rename.
 
 CALL THIS WHEN:
 - A note reads differently than you expected, or its content seems to have changed since you last saw it
-- You received VERSION_CONFLICT from update_note, str_replace_note, append_note, or supersede_note and need to see what the other writer changed
+- You received VERSION_CONFLICT from update_note, edit_note, append_note, or supersede_note and need to see what the other writer changed
 - The user asks what a note used to say, when it changed, or what changed
 - You are about to revert or rewrite a note and want to see the prior wording first
 
@@ -318,26 +321,23 @@ Returns { id, current_version, deleted (history rows removed), remaining (histor
 
 // ── Partial content edits ────────────────────────────────────────
 
-type ContentEdit =
-  | { ok: true; content: string; replacements?: number }
-  | { ok: false; message: string; code: string; match_count: number };
-
 type ContentEditOutcome =
   | { kind: "conflict"; conflict: NoteWriteConflict }
   | { kind: "rejected"; result: Extract<ContentEdit, { ok: false }> }
-  | { kind: "updated"; row: NoteRow; changed: boolean; replacements?: number };
+  | { kind: "updated"; row: NoteRow; changed: boolean; replacements?: number | number[] };
 
 /**
- * Shared body for str_replace_note / append_note: lock the row FOR UPDATE,
- * compute the new content from it, and write it through updateNoteInTx in the
- * same transaction — so these tools get update_note's version history
+ * Shared body for edit_note / append_note (and the deprecated str_replace_note
+ * alias, which writes as edit_note): lock the row FOR UPDATE, compute the new
+ * content from it, and write it through updateNoteInTx in the same
+ * transaction — so these tools get update_note's version history
  * (changed_via = the tool name), true-no-op semantics, change-log row, and
  * history retention. Post-commit re-index + entity extraction mirror
  * update_note. The response is compact — no `content` echo.
  */
 async function editNoteContent(
   id: string,
-  via: "str_replace_note" | "append_note",
+  via: "edit_note" | "append_note",
   expectedVersion: number | undefined,
   edit: (content: string) => ContentEdit
 ) {
@@ -380,8 +380,14 @@ async function editNoteContent(
     return conflictResponse(outcome.conflict, id);
   }
   if (outcome.kind === "rejected") {
-    const { message, code, match_count } = outcome.result;
-    return jsonResponse({ error: true, message, code, match_count });
+    const { message, code, match_count, edit_index } = outcome.result;
+    return jsonResponse({
+      error: true,
+      message,
+      code,
+      ...(edit_index !== undefined ? { edit_index } : {}),
+      match_count,
+    });
   }
 
   const { row, changed, replacements } = outcome;
@@ -889,59 +895,63 @@ export function registerNoteTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── str_replace_note ─────────────────────────────────────────
-  mcpServer.tool(
-    "str_replace_note",
-    STR_REPLACE_NOTE_DESC,
+  // ── edit_note ────────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "edit_note",
+    EDIT_NOTE_DESC,
     {
       id: z.string().describe("UUID of the note to edit"),
-      old_str: z
-        .string()
-        .describe("Exact text to find (literal, case- and whitespace-sensitive, not a regex)"),
-      new_str: z
-        .string()
-        .describe("Replacement text, inserted verbatim. Empty string deletes old_str"),
-      replace_all: z
-        .boolean()
-        .optional()
-        .describe("Replace every occurrence instead of requiring exactly one (default false)"),
+      edits: z
+        .array(
+          z.object({
+            old_str: z
+              .string()
+              .min(1)
+              .describe("Exact text to find (literal, case- and whitespace-sensitive, not a regex)"),
+            new_str: z
+              .string()
+              .describe("Replacement text, inserted verbatim. Empty string deletes old_str"),
+            replace_all: z
+              .boolean()
+              .optional()
+              .describe("Replace every occurrence instead of requiring exactly one (default false)"),
+          })
+        )
+        .min(1)
+        .max(50)
+        .describe("Ordered edits (1–50), each applied to the result of the previous one. All apply or none do."),
       expected_version: z.number().int().min(1).optional().describe(
         "Optimistic-concurrency precondition: the note's 'version' as you last saw it (from get_note or a previous response). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns the current note. Omit for last-writer-wins."
       ),
     },
     async (args) => {
-      if (!args.old_str) {
-        return errorResponse("old_str must be a non-empty string", "VALIDATION_ERROR");
-      }
       try {
-        return await editNoteContent(args.id, "str_replace_note", args.expected_version, (content) => {
-          const matchCount = countOccurrences(content, args.old_str);
-          if (matchCount === 0) {
+        return await editNoteContent(args.id, "edit_note", args.expected_version, (content) => {
+          const result = applyEdits(content, args.edits);
+          if (!result.ok) {
+            const message =
+              result.code === "NO_MATCH"
+                ? `edits[${result.edit_index}].old_str was not found in the note content (after applying earlier edits). Call get_note and copy the text exactly.`
+                : `edits[${result.edit_index}].old_str matches ${result.match_count} times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.`;
             return {
               ok: false,
-              message: "old_str was not found in the note content. Call get_note and copy the text exactly.",
-              code: "NO_MATCH",
-              match_count: 0,
+              message,
+              code: result.code,
+              edit_index: result.edit_index,
+              match_count: result.match_count,
             };
           }
-          if (matchCount > 1 && !args.replace_all) {
-            return {
-              ok: false,
-              message: `old_str matches ${matchCount} times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.`,
-              code: "AMBIGUOUS_MATCH",
-              match_count: matchCount,
-            };
-          }
-          const replaceAll = args.replace_all === true;
-          return {
-            ok: true,
-            content: literalReplace(content, args.old_str, args.new_str, replaceAll),
-            replacements: replaceAll ? matchCount : 1,
-          };
+          return { ok: true, content: result.content, replacements: result.replacements };
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
       }
+    },
+    {
+      str_replace_note: strReplaceNoteAdapter((id, expectedVersion, edit) =>
+        editNoteContent(id, "edit_note", expectedVersion, edit)
+      ),
     }
   );
 

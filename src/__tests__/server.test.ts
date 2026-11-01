@@ -62,7 +62,7 @@ async function mcpPost(body: unknown, extraHeaders?: Record<string, string>) {
 /** Store a handoff and verify it succeeded. Returns the parsed result. */
 async function storeAndVerify(payload: Record<string, unknown>) {
   const res = await mcpPost(
-    jsonrpc("tools/call", { name: "store_handoff", arguments: payload })
+    jsonrpc("tools/call", { name: "create_handoff", arguments: payload })
   );
   expect(res.status).toBe(200);
   const data = (await parseSseResponse(res)) as any;
@@ -215,7 +215,7 @@ describe("MCP Transport — Content Negotiation", () => {
 
 describe("MCP Tools", () => {
   describe("tools/list", () => {
-    it("returns both store_handoff and get_latest_handoff tools", async () => {
+    it("returns both create_handoff and get_latest_handoff tools", async () => {
       const res = await mcpPost(jsonrpc("tools/list"));
       expect(res.status).toBe(200);
       const data = (await parseSseResponse(res)) as any;
@@ -223,12 +223,12 @@ describe("MCP Tools", () => {
       const toolNames: string[] = data.result.tools.map(
         (t: any) => t.name
       );
-      expect(toolNames).toContain("store_handoff");
+      expect(toolNames).toContain("create_handoff");
       expect(toolNames).toContain("get_latest_handoff");
     });
   });
 
-  describe("store_handoff", () => {
+  describe("create_handoff", () => {
     it("stores a handoff and returns success with stored_at timestamp", async () => {
       const payload = {
         operational_state: {
@@ -246,7 +246,7 @@ describe("MCP Tools", () => {
 
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: payload,
         })
       );
@@ -285,7 +285,7 @@ describe("MCP Tools", () => {
       // Store
       const storeRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: payload,
         })
       );
@@ -339,7 +339,7 @@ describe("MCP Tools", () => {
         active_context: { session_meta: { label: "first-handoff-alpha" } },
       };
       const res1 = await mcpPost(
-        jsonrpc("tools/call", { name: "store_handoff", arguments: payload1 })
+        jsonrpc("tools/call", { name: "create_handoff", arguments: payload1 })
       );
       expect(res1.status).toBe(200);
       const data1 = (await parseSseResponse(res1)) as any;
@@ -356,7 +356,7 @@ describe("MCP Tools", () => {
         active_context: { session_meta: { label: "second-handoff-beta" } },
       };
       const res2 = await mcpPost(
-        jsonrpc("tools/call", { name: "store_handoff", arguments: payload2 })
+        jsonrpc("tools/call", { name: "create_handoff", arguments: payload2 })
       );
       expect(res2.status).toBe(200);
       const data2 = (await parseSseResponse(res2)) as any;
@@ -384,10 +384,10 @@ describe("MCP Tools", () => {
   });
 
   // ────────────────────────────────────────────────
-  // patch_handoff tests
+  // update_handoff tests
   // ────────────────────────────────────────────────
 
-  describe("patch_handoff", () => {
+  describe("update_handoff", () => {
     // Store a baseline handoff that patch tests will operate on
     let baseStoredAt: string;
 
@@ -398,7 +398,7 @@ describe("MCP Tools", () => {
       const listRes = await mcpPost(jsonrpc("tools/list"));
       const listData = (await parseSseResponse(listRes)) as any;
       const toolNames: string[] = listData.result.tools.map((t: any) => t.name);
-      expect(toolNames).toContain("patch_handoff");
+      expect(toolNames).toContain("update_handoff");
     });
 
     it("patches tone_notes only, preserving other fields", async () => {
@@ -409,7 +409,7 @@ describe("MCP Tools", () => {
         timezone: "America/New_York",
       };
       const storeRes = await mcpPost(
-        jsonrpc("tools/call", { name: "store_handoff", arguments: baseline })
+        jsonrpc("tools/call", { name: "create_handoff", arguments: baseline })
       );
       const storeData = (await parseSseResponse(storeRes)) as any;
       baseStoredAt = JSON.parse(storeData.result.content[0].text).stored_at;
@@ -417,7 +417,7 @@ describe("MCP Tools", () => {
       // Patch tone_notes only
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { tone_notes: "Updated tone" },
         })
       );
@@ -441,7 +441,7 @@ describe("MCP Tools", () => {
     it("deep merges operational_state, preserving unpatched keys", async () => {
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { operational_state: { mood: "relaxed" } },
         })
       );
@@ -469,7 +469,7 @@ describe("MCP Tools", () => {
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { active_context: { conversation_arc: "deploying" } },
         })
       );
@@ -487,7 +487,7 @@ describe("MCP Tools", () => {
     });
 
     it("legacy task array operations are accepted but become no-ops (deprecation)", async () => {
-      // Schema 1.3 deprecation: patch_handoff still accepts a tasks
+      // Schema 1.3 deprecation: update_handoff still accepts a tasks
       // argument (so existing clients don't break) but task array operations
       // (append/remove/replace) do not apply — the legacy arrays are not
       // surfaced, and task_summary reflects the authoritative Postgres state.
@@ -495,7 +495,7 @@ describe("MCP Tools", () => {
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: {
             tone_notes: "patched",
             tasks: { open: { op: "append", items: ["legacy-1", "legacy-2"] } },
@@ -528,7 +528,7 @@ describe("MCP Tools", () => {
       // Patch with null tone_notes — should preserve
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { tone_notes: null, operational_state: { mood: "patched" } },
         })
       );
@@ -554,7 +554,7 @@ describe("MCP Tools", () => {
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: {
             operational_state: { mood: "energized" },
             active_context: { phase: "beta" },
@@ -583,7 +583,7 @@ describe("MCP Tools", () => {
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { tone_notes: "patched version" },
         })
       );
@@ -604,7 +604,7 @@ describe("MCP Tools", () => {
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { tone_notes: "task_summary shape patched" },
         })
       );
@@ -748,7 +748,7 @@ describe("MCP Tools", () => {
 
       const patchRes = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: { tone_notes: "schema post-patch" },
         })
       );
@@ -767,14 +767,14 @@ describe("MCP Tools", () => {
   });
 
   // ────────────────────────────────────────────────
-  // store_handoff enrichment tests
+  // create_handoff enrichment tests
   // ────────────────────────────────────────────────
 
-  describe("store_handoff — enriched response", () => {
+  describe("create_handoff — enriched response", () => {
     it("response includes filename, task_summary, and schema_version", async () => {
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: { tone_notes: "enrichment test" },
         })
       );
@@ -799,16 +799,16 @@ describe("MCP Tools", () => {
       const listRes = await mcpPost(jsonrpc("tools/list"));
       const listData = (await parseSseResponse(listRes)) as any;
       const storeTool = listData.result.tools.find(
-        (t: any) => t.name === "store_handoff"
+        (t: any) => t.name === "create_handoff"
       );
       expect(storeTool).toBeDefined();
       expect(storeTool.description).not.toMatch(/[Oo]verwrites?/);
     });
 
-    it("store_handoff response includes next_step string", async () => {
+    it("create_handoff response includes next_step string", async () => {
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: { tone_notes: "next_step test" },
         })
       );
@@ -819,7 +819,7 @@ describe("MCP Tools", () => {
       expect(result.next_step.length).toBeGreaterThan(0);
     });
 
-    it("store_handoff next_step does not mention legacy task arrays (schema 1.3)", async () => {
+    it("create_handoff next_step does not mention legacy task arrays (schema 1.3)", async () => {
       // Legacy task arrays are stripped server-side since schema 1.3, so
       // even if a caller still sends tasks.open, the response's next_step
       // open-task hint reflects authoritative Postgres counts (zero when
@@ -827,7 +827,7 @@ describe("MCP Tools", () => {
       // against accidentally regressing to handoff-array-derived counts.
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: {
             tone_notes: "legacy-tasks deprecation test",
             tasks: { open: ["task-a", "task-b"], completed: [], blocked: [] },
@@ -871,7 +871,7 @@ describe("MCP Tools", () => {
   // ────────────────────────────────────────────────
 
   describe("Schema 1.3 deprecations (memory_deltas + task arrays)", () => {
-    it("store_handoff with task arrays succeeds but arrays are not in the stored file", async () => {
+    it("create_handoff with task arrays succeeds but arrays are not in the stored file", async () => {
       const result = await storeAndVerify({
         tone_notes: "deprecation-store-tasks-test",
         tasks: { open: ["x", "y"], completed: ["z"], blocked: ["b"] },
@@ -886,7 +886,7 @@ describe("MCP Tools", () => {
       expect(parsed.schema_version).toBe("1.3");
     });
 
-    it("store_handoff without task arrays continues to work normally", async () => {
+    it("create_handoff without task arrays continues to work normally", async () => {
       const result = await storeAndVerify({
         tone_notes: "no-tasks-baseline",
         active_context: { phase: "alpha" },
@@ -974,9 +974,9 @@ describe("MCP Tools", () => {
   });
 
   describe("Defensive hardening", () => {
-    it("store_handoff with no content fields returns EMPTY_HANDOFF", async () => {
+    it("create_handoff with no content fields returns EMPTY_HANDOFF", async () => {
       const res = await mcpPost(
-        jsonrpc("tools/call", { name: "store_handoff", arguments: {} })
+        jsonrpc("tools/call", { name: "create_handoff", arguments: {} })
       );
       const data = (await parseSseResponse(res)) as any;
       const result = JSON.parse(data.result.content[0].text);
@@ -984,7 +984,7 @@ describe("MCP Tools", () => {
       expect(result.code).toBe("EMPTY_HANDOFF");
     });
 
-    it("store_handoff with only a deprecated tasks field succeeds (backwards-compatible)", async () => {
+    it("create_handoff with only a deprecated tasks field succeeds (backwards-compatible)", async () => {
       // Pre-schema-1.3 callers that send tasks-only payloads must still
       // receive a success response — silently turning these into
       // EMPTY_HANDOFF would be a breaking change. The legacy task arrays
@@ -992,7 +992,7 @@ describe("MCP Tools", () => {
       // the empty-content guard treats `tasks` as content for compatibility.
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: {
             tasks: { open: ["legacy-task"], completed: [], blocked: [] },
           },
@@ -1005,10 +1005,10 @@ describe("MCP Tools", () => {
       expect(typeof result.filename).toBe("string");
     });
 
-    it("store_handoff with a single content field (timezone) succeeds", async () => {
+    it("create_handoff with a single content field (timezone) succeeds", async () => {
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "store_handoff",
+          name: "create_handoff",
           arguments: { timezone: "America/Los_Angeles" },
         })
       );
@@ -1018,12 +1018,12 @@ describe("MCP Tools", () => {
       expect(result.error).toBeUndefined();
     });
 
-    it("patch_handoff with no content fields returns EMPTY_PATCH", async () => {
+    it("update_handoff with no content fields returns EMPTY_PATCH", async () => {
       // Ensure a handoff exists so the empty-guard runs before the NOT_FOUND check.
       await storeAndVerify({ tone_notes: "empty-patch baseline" });
 
       const res = await mcpPost(
-        jsonrpc("tools/call", { name: "patch_handoff", arguments: {} })
+        jsonrpc("tools/call", { name: "update_handoff", arguments: {} })
       );
       const data = (await parseSseResponse(res)) as any;
       const result = JSON.parse(data.result.content[0].text);
@@ -1031,12 +1031,12 @@ describe("MCP Tools", () => {
       expect(result.code).toBe("EMPTY_PATCH");
     });
 
-    it("patch_handoff with all null fields returns EMPTY_PATCH", async () => {
+    it("update_handoff with all null fields returns EMPTY_PATCH", async () => {
       await storeAndVerify({ tone_notes: "all-null baseline" });
 
       const res = await mcpPost(
         jsonrpc("tools/call", {
-          name: "patch_handoff",
+          name: "update_handoff",
           arguments: {
             operational_state: null,
             active_context: null,
@@ -1052,7 +1052,7 @@ describe("MCP Tools", () => {
       expect(result.code).toBe("EMPTY_PATCH");
     });
 
-    it("store_handoff does not write the deprecated handoff-latest.json pointer file", async () => {
+    it("create_handoff does not write the deprecated handoff-latest.json pointer file", async () => {
       await storeAndVerify({ tone_notes: "pointer cleanup test" });
 
       const pointerPath = join(TEST_DATA_DIR, "handoff-latest.json");
@@ -1303,7 +1303,7 @@ describe("Handoff Navigation", () => {
 // Embedding unavailability tests
 // ────────────────────────────────────────────────
 
-describe("Compaction — previous handoff is compacted after store_handoff", () => {
+describe("Compaction — previous handoff is compacted after create_handoff", () => {
   // Read a handoff file from disk and parse. Returns null on ENOENT.
   async function readHandoffFile(filename: string): Promise<any | null> {
     try {
@@ -1473,30 +1473,16 @@ describe("search_context — graceful degradation", () => {
     expect(result.error).toBe(true);
     expect(result.code).toBe("EMBEDDING_UNAVAILABLE");
   });
-
-  it("reindex returns EMBEDDING_UNAVAILABLE when embedding server is not running", async () => {
-    const res = await mcpPost(
-      jsonrpc("tools/call", {
-        name: "reindex",
-        arguments: {},
-      })
-    );
-    expect(res.status).toBe(200);
-    const data = (await parseSseResponse(res)) as any;
-    const result = JSON.parse(data.result.content[0].text);
-    expect(result.error).toBe(true);
-    expect(result.code).toBe("EMBEDDING_UNAVAILABLE");
-  });
 });
 
 // ────────────────────────────────────────────────
 // Session close — final flag, session_closed, session_continuity
 // ────────────────────────────────────────────────
 describe("Session close — final flag", () => {
-  it("store_handoff with final=true marks the response session_closed=true", async () => {
+  it("create_handoff with final=true marks the response session_closed=true", async () => {
     const res = await mcpPost(
       jsonrpc("tools/call", {
-        name: "store_handoff",
+        name: "create_handoff",
         arguments: { tone_notes: "close-test", final: true },
       })
     );
@@ -1509,10 +1495,10 @@ describe("Session close — final flag", () => {
     expect(result.session_closed_at).toBe(result.stored_at);
   });
 
-  it("store_handoff without final returns session_closed=false (default)", async () => {
+  it("create_handoff without final returns session_closed=false (default)", async () => {
     const res = await mcpPost(
       jsonrpc("tools/call", {
-        name: "store_handoff",
+        name: "create_handoff",
         arguments: { tone_notes: "open-session-default" },
       })
     );
@@ -1526,7 +1512,7 @@ describe("Session close — final flag", () => {
   it("stored handoff file persists session_closed and session_closed_at", async () => {
     const res = await mcpPost(
       jsonrpc("tools/call", {
-        name: "store_handoff",
+        name: "create_handoff",
         arguments: { tone_notes: "persisted-close", final: true },
       })
     );
@@ -1575,12 +1561,12 @@ describe("Session close — final flag", () => {
     expect(result.session_continuity).toBe("resume");
   });
 
-  it("patch_handoff with final=true alone is a valid session-close patch", async () => {
+  it("update_handoff with final=true alone is a valid session-close patch", async () => {
     await storeAndVerify({ tone_notes: "open-before-close-patch" });
 
     const res = await mcpPost(
       jsonrpc("tools/call", {
-        name: "patch_handoff",
+        name: "update_handoff",
         arguments: { final: true },
       })
     );
@@ -1603,12 +1589,12 @@ describe("Session close — final flag", () => {
     expect(retrieved.session_continuity).toBe("resume");
   });
 
-  it("patch_handoff WITHOUT final or content fails with EMPTY_PATCH", async () => {
+  it("update_handoff WITHOUT final or content fails with EMPTY_PATCH", async () => {
     await storeAndVerify({ tone_notes: "baseline-for-empty-patch" });
 
     const res = await mcpPost(
       jsonrpc("tools/call", {
-        name: "patch_handoff",
+        name: "update_handoff",
         arguments: {},
       })
     );
@@ -1630,7 +1616,7 @@ describe("Session close — final flag", () => {
     // 2. Open patch — should drop the stale close marker.
     const patchRes = await mcpPost(
       jsonrpc("tools/call", {
-        name: "patch_handoff",
+        name: "update_handoff",
         arguments: { tone_notes: "resumed" },
       })
     );

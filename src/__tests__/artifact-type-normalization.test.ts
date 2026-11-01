@@ -5,7 +5,7 @@ vi.mock("../db/client.js", () => ({
   query: vi.fn(),
 }));
 
-// Mock the sync change-log helpers. store_artifact / update_artifact now run
+// Mock the sync change-log helpers. create_artifact / update_artifact now run
 // their INSERT/UPDATE inside `withTransaction(...)` so the mutation shares a
 // pg client with the changes-log INSERT. To keep this unit test focused on
 // artifact_type normalization (which is the SUT), the mocked withTransaction
@@ -74,10 +74,10 @@ describe("artifact_type normalization", () => {
     handlers = buildMockServer();
   });
 
-  it("store_artifact normalizes uppercase artifact_type to lowercase", async () => {
+  it("create_artifact normalizes uppercase artifact_type to lowercase", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [fakeRow()], rowCount: 1 } as never);
 
-    await handlers["store_artifact"]({
+    await handlers["create_artifact"]({
       title: "My prompt",
       artifact_type: "CC-Prompt",
       scope: "work",
@@ -90,10 +90,10 @@ describe("artifact_type normalization", () => {
     expect(params[1]).toBe("cc-prompt");
   });
 
-  it("store_artifact trims whitespace from artifact_type", async () => {
+  it("create_artifact trims whitespace from artifact_type", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [fakeRow()], rowCount: 1 } as never);
 
-    await handlers["store_artifact"]({
+    await handlers["create_artifact"]({
       title: "My prompt",
       artifact_type: " cc-prompt ",
       scope: "work",

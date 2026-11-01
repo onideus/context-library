@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { config } from "../config.js";
 import { pool, query } from "../db/client.js";
 import { generateEmbedding, isEmbeddingAvailable, rerankResults } from "../embeddings/client.js";
-import { indexAllHandoffs, indexAllTasks, indexAllNotes, indexAllArtifacts, drainPendingEmbeddings } from "../embeddings/indexer.js";
+import { drainPendingEmbeddings } from "../embeddings/indexer.js";
 import { lookupEntities, computeEnvelope, emptyEnvelope, generateBoundaryNotice } from "./entities.js";
 import { expandQuery } from "./search-aliases.js";
 import { recognizeEntities, type RecognizedEntity } from "../entities/recognizer.js";
@@ -396,15 +396,6 @@ If results reference events indirectly, reformulate with specific terms, lower t
 Response Format:
 - Reasoning-capable models (extended thinking enabled): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
 - Standard inference models: Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
-
-const REINDEX_DESCRIPTION = `Rebuild the semantic search index by re-embedding all handoffs, tasks, notes, and artifacts. Use after bulk data changes, bulk imports, or when search_context results seem stale or incomplete.
-
-WARNING: Can take several minutes for large datasets (1000+ handoffs). Re-embeds all content, not just changed items. Inform the user of expected duration before running.
-
-Parameters:
-  - content_types (optional): Which to reindex. Default: all. Options: 'handoff', 'task', 'note', 'artifact'
-
-Returns: {handoffs: {indexed, skipped, errors}, tasks: {indexed}, notes: {indexed}, artifacts: {indexed}}`;
 
 export function registerSearchTools(mcpServer: McpServer): void {
   // \u2500\u2500 search_context \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -872,66 +863,6 @@ export function registerSearchTools(mcpServer: McpServer): void {
           }],
         };
       }
-    }
-  );
-
-  // \u2500\u2500 reindex \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  mcpServer.tool(
-    "reindex",
-    REINDEX_DESCRIPTION,
-    {
-      content_types: z
-        .array(z.enum(["handoff", "task", "note", "artifact"]))
-        .optional()
-        .describe("Which types to reindex. Default: all."),
-    },
-    async (args) => {
-      const available = await isEmbeddingAvailable();
-      if (!available) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({
-              error: true,
-              message: "Embedding server is not available. Cannot reindex.",
-              code: "EMBEDDING_UNAVAILABLE",
-            }),
-          }],
-        };
-      }
-
-      const types = args.content_types ?? ["handoff", "task", "note", "artifact"];
-      const results: Record<string, unknown> = {};
-
-      // Drain pending queue first so recovered items aren't re-processed by the full reindex below.
-      const drained = await drainPendingEmbeddings();
-      results.pending_drain = drained;
-
-      if (types.includes("handoff")) {
-        results.handoffs = await indexAllHandoffs();
-      }
-
-      if (types.includes("task")) {
-        const count = await indexAllTasks();
-        results.tasks = { indexed: count };
-      }
-
-      if (types.includes("note")) {
-        const count = await indexAllNotes();
-        results.notes = { indexed: count };
-      }
-
-      if (types.includes("artifact")) {
-        const count = await indexAllArtifacts();
-        results.artifacts = { indexed: count };
-      }
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({ success: true, reindexed: results }),
-        }],
-      };
     }
   );
 }

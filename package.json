@@ -17,7 +17,8 @@
     "audit-compaction": "tsx scripts/audit-compaction.ts",
     "rehydrate-handoffs": "tsx scripts/rehydrate-handoffs.ts",
     "export": "tsx scripts/export.ts",
-    "import": "tsx scripts/import.ts"
+    "import": "tsx scripts/import.ts",
+    "reindex": "tsx scripts/reindex.ts"
   },
   "dependencies": {
     "@hono/mcp": "^0.3.2",

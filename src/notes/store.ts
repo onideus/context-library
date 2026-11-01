@@ -113,6 +113,9 @@ export type ChangedVia =
   | "supersede_note"
   | "delete_note"
   | "sync_push"
+  | "edit_note"
+  // Pre-rename name of edit_note. No longer written, but existing
+  // note_versions rows carry it, so it stays a known value.
   | "str_replace_note"
   | "append_note"
   | (string & {});

@@ -30,7 +30,7 @@ export const HandoffSchema = z
     stored_at: z.string().optional(),
     schema_version: z.string().optional(),
     /**
-     * Session-close marker. Set by store_handoff / patch_handoff when the
+     * Session-close marker. Set by create_handoff / update_handoff when the
      * caller passes `final: true` on the last write of a session. Future
      * get_latest_handoff calls read this to derive the session_continuity
      * signal (cold start vs. resume). Absence is interpreted as an open
