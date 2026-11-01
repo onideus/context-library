@@ -345,8 +345,9 @@ Open WebUI's backend makes the connection, not your browser. When Open WebUI run
 | Open WebUI running directly on the host (not in Docker) | `http://localhost:3100/mcp` |
 | Open WebUI in Docker Desktop (macOS / Windows) | `http://host.docker.internal:3100/mcp` |
 | Open WebUI in Docker on Linux, Context Library on the default compose file | `http://context-library:3100/mcp` (after joining the network, below) |
+| Open WebUI in Docker on Linux, Context Library run from source (`npm run dev` / `npm start`) | `http://host.docker.internal:3100/mcp`, with `extra_hosts: ["host.docker.internal:host-gateway"]` on the Open WebUI container |
 
-On Linux, the base compose file publishes the port on `127.0.0.1` only, so `host.docker.internal` / `host-gateway` gets connection refused. Attach Open WebUI to Context Library's compose network instead; inside that network the service is named `context-library` and listens on port `3100`. The network is named `<project>_default`, where the project name defaults to the directory holding the compose files (`context-library_default` for a default clone; check with `docker network ls`). Either connect a running container:
+When Context Library runs from source it listens on `0.0.0.0`, so `host-gateway` reaches it (a host firewall that blocks the Docker bridge will still refuse the connection). On Linux, the base compose file publishes the port on `127.0.0.1` only, so `host.docker.internal` / `host-gateway` gets connection refused. Attach Open WebUI to Context Library's compose network instead; inside that network the service is named `context-library` and listens on port `3100`. The network is named `<project>_default`, where the project name defaults to the directory holding the compose files (`context-library_default` for a default clone; check with `docker network ls`). Either connect a running container:
 
 ```bash
 docker network connect context-library_default <open-webui-container>

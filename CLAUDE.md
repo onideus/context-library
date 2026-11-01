@@ -386,7 +386,7 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
   "status": "ok",       // string — always "ok" when the server is up
   "version": "0.13.0", // string — APP_VERSION env var (release or 0.0.0-sha.<short>); 0.0.0-development from source
   "uptime": 42,         // integer — seconds since process start
-  "embedding_status": { "available": true } // boolean | null — TEI health (false = unreachable, null = check failed); cached ~10s
+  "embedding_status": { "available": true } // boolean | null — TEI health (false = unreachable or EMBEDDING_URL empty, null = check threw); cached ~10s
 }
 ```
 
