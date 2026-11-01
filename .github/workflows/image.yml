@@ -39,14 +39,13 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: echo "short_sha=${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
-      - name: Read version from package.json
-        id: version
-        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
-
+      # Unreleased builds report 0.0.0-sha.<short> from /health. release.yml
+      # stamps the real version onto this same image when it is released;
+      # package.json's version (0.0.0-development) is not used for either.
       - name: Build Docker image
         run: |
           docker build \
-            --build-arg APP_VERSION=${{ steps.version.outputs.version }} \
+            --build-arg APP_VERSION=0.0.0-sha.${{ steps.sha.outputs.short_sha }} \
             -t ghcr.io/onideus/context-library:sha-${{ steps.sha.outputs.short_sha }} \
             .
 
