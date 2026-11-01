@@ -233,8 +233,8 @@ drill:
    - `psql $PG* -c 'select count(*) from tasks; select count(*) from notes; select count(*) from note_versions; select count(*) from artifacts;'`
      match the manifest.
    - Start the server against the drill database and call
-     `get_latest_handoff` — the response should carry the same filename
-     as the newest file in `./drill/data-fresh/handoffs/`.
+     `get_latest_handoff` — its `stored_at` should match the `stored_at`
+     inside the newest file in `./drill/data-fresh/handoffs/`.
    - Wait for the pending-embeddings queue to drain (or force a
      `reindex`) and run an FTS query against `search_context` for a term
      you know is in a known-restored note or artifact.

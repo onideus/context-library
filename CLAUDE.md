@@ -6,7 +6,7 @@
 
 Context Library is a personal MCP (Model Context Protocol) server that gives AI assistants persistent memory across conversations. It stores operational state, tracks tasks, and provides semantic search over accumulated history. Single-user, model-agnostic, Docker-ready.
 
-The problem it solves: AI assistants lose all context between sessions. Context Library provides MCP tools that any compatible client (Claude Code, Roo Code, Claude Desktop, etc.) can call to store and retrieve state, so the next conversation picks up where the last one left off.
+The problem it solves: AI assistants lose all context between sessions. Context Library provides MCP tools that any compatible client (Claude Code, Claude Desktop, Claude.ai, local-model clients, etc.) can call to store and retrieve state, so the next conversation picks up where the last one left off.
 
 ## Open Source Project
 
@@ -307,7 +307,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 ## Testing
 
-**Framework:** Vitest 4.x. Run with `npm test` (single run) or `npm run test:watch`.
+**Framework:** Vitest 5.x. Run with `npm test` (single run) or `npm run test:watch`.
 
 **Test types:**
 - **Unit tests** (`merge.test.ts`, `indexer.test.ts`, `search-dedup.test.ts`): Import pure functions directly. No server or database needed. Fast.
@@ -351,7 +351,7 @@ CI does NOT validate Docker Compose configuration or startup. Run `scripts/test-
 
 ## Environment Variables
 
-All env var reads are centralized in `src/config.ts`. See `.env.example` for the full list.
+Env var reads are centralized in `src/config.ts`, except `APP_VERSION` and `LOG_RESPONSE_BODIES` (read in `src/server.ts`) and the standard `PG*` variables (read by `pg` via `src/db/client.ts`). See `.env.example` and the README env tables for the full list.
 
 Key variables:
 - `SERVER_NAME` (default: `context-library`) — MCP server name visible to clients.
@@ -376,7 +376,7 @@ npm run build        # tsc + copy migrations to dist/
 npm start            # node dist/server.js (production)
 npx tsx src/db/seed.ts  # seed dev database with example tasks
 npm run extract-entities  # populate entities.seed.json from existing handoffs (requires ANTHROPIC_API_KEY)
-npm run compact-history   # compact older handoff files in place
+npm run compact-history   # compact older handoff files (archives originals first under the default COMPACTION_MODE)
 ```
 
 Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/health`:
@@ -385,7 +385,8 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 {
   "status": "ok",       // string — always "ok" when the server is up
   "version": "0.13.0", // string — APP_VERSION env var (release or 0.0.0-sha.<short>); 0.0.0-development from source
-  "uptime": 42          // integer — seconds since process start
+  "uptime": 42,         // integer — seconds since process start
+  "embedding_status": { "available": true } // boolean | null — TEI health (false = unreachable, null = check failed); cached ~10s
 }
 ```
 

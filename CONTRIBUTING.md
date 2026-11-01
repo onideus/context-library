@@ -32,7 +32,7 @@ Tests use Vitest. The `dist/` directory is excluded from test discovery to preve
 
 ### PostgreSQL Tests
 
-Database-backed tests (~130 tests covering tasks, notes, artifacts, and entity tools) require a running PostgreSQL instance. Without Postgres, these tests are automatically skipped. To run the full suite:
+Database-backed tests (tasks, notes, artifacts, sync, export/import, and entity tools) require a running PostgreSQL instance. Without Postgres, these tests are automatically skipped. To run the full suite:
 
 ```bash
 docker run --rm -p 5432:5432 -e POSTGRES_DB=cl_test -e POSTGRES_USER=cl -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16
@@ -56,7 +56,7 @@ Each Postgres-gated test file auto-creates and resets its own dedicated database
 Context Library is built around a few core principles:
 
 - **Tiered deployment.** Every feature degrades gracefully. Core handoffs work without Postgres. Task search works without embeddings. Never add a hard dependency on an upper tier.
-- **Append-only handoffs.** Handoff files are immutable once written. Edits create new files via `patch_handoff`, which merges with the latest state. Never mutate a stored handoff.
+- **Append-only handoffs.** Edits create new files via `patch_handoff`, which merges with the latest state. The only rewrite of a stored handoff is compaction of a superseded one, governed by `COMPACTION_MODE` (the default `archive` mode keeps a byte-exact copy first). Never add another path that mutates a stored handoff.
 - **Auth at the boundary.** The server itself is unauthenticated. Auth is handled by an external proxy. Never add authentication logic to the server.
 - **Single-user by design.** This is personal infrastructure. Multi-tenancy, user management, and access control are out of scope.
 

@@ -25,22 +25,23 @@ loop:
     order_dir: "asc"
   })
 
-  for artifact in artifacts:
+  for item in artifacts:                 # list items are summaries only
+    artifact = get_artifact(item.id)     # dependencies, metadata, content
     if not all_dependencies_completed(artifact.dependencies):
       continue  # try again next poll
 
-    claimed = try_claim(artifact.id)
+    claimed = try_claim(artifact.id)     # claimed row, or nothing (see below)
     if not claimed:
       continue  # another interceptor beat us to it
 
-    run_pipeline_stages(artifact)
+    run_pipeline_stages(claimed)
 
   sleep(poll_interval)
 ```
 
 Two contracts matter here.
 
-**Claiming is a status transition, not a lock table.** `update_artifact(id, status: "executing")` is the claim. The tool layer runs the write as a conditional UPDATE: it lands only if the row is still in the caller's expected status (defaulting to the status read at the top of the `update_artifact` call, overridable via `expected_status`). If two interceptors both read the artifact while it is `ready` and race to claim, the first UPDATE lands and returns the row; the second gets `STATUS_CONFLICT` with the current server state and re-polls. Optionally include a `metadata.claimed_by` identifier on the claim update as an audit-trail record of which interceptor holds the claim — it is a supplement to `STATUS_CONFLICT`, not the primary race signal. Existing interceptors that detect races by reading back `metadata.claimed_by` remain correct; the server-side conditional UPDATE is a strict superset of that check, so no migration is required. This matches the executing-state description in [artifact-lifecycle.md](artifact-lifecycle.md).
+**Claiming is a status transition, not a lock table.** `update_artifact(id, status: "executing")` is the claim. When the call changes the row's status, the tool layer runs the write as a conditional UPDATE: it lands only if the row is still in the caller's expected status (defaulting to the status read at the top of the `update_artifact` call, overridable via `expected_status`). If two `update_artifact` calls both read the artifact while it is `ready` and race to claim, the first UPDATE lands and returns the row; the second gets `STATUS_CONFLICT` with the current server state. The guard does not cover every race, though: if the second call starts after the first has committed, it reads `executing`, the requested status is unchanged, no conditional UPDATE runs, and `expected_status` is not checked, so the write lands and overwrites the first claim's `metadata`. Both callers then get back a row showing their own `claimed_by`. Include a `metadata.claimed_by` identifier on the claim and re-read the artifact with `get_artifact` just before executing; if `claimed_by` is no longer yours, back off. This narrows the window but does not close it, so run one interceptor per artifact type unless you add your own coordination. This matches the executing-state description in [artifact-lifecycle.md](artifact-lifecycle.md).
 
 **Dependencies are your responsibility to honor.** `list_artifacts` does not filter by dependency status. Read the artifact, look up each dependency's status, skip if any are not `completed`, `superseded`, or explicitly waived. Re-poll — an artifact that isn't ready this cycle might be ready next cycle.
 
@@ -135,7 +136,7 @@ Any reject, or split verdicts — see the merge decision table. Hold for human. 
 
 ### Embedding server outage
 
-Irrelevant to the interceptor. Artifacts are stored in Postgres; `list_artifacts` is a plain SQL query with FTS available as a fallback for `search_artifacts`. Semantic search degrades on the planning side, not the execution side.
+Irrelevant to the interceptor. Artifacts are stored in Postgres; `list_artifacts` is a plain SQL query and `search_artifacts` is full-text only, so neither depends on the embedding server. Semantic search degrades on the planning side, not the execution side.
 
 ### PR host outage
 
@@ -143,7 +144,7 @@ Retry with backoff on the API calls that talk to the git host. If the outage exc
 
 ### Two interceptors racing
 
-Detected via the claim step. Loser backs off. If you find yourself hitting races often, you have too many interceptors — one is usually enough.
+Usually detected via the claim step (`STATUS_CONFLICT`, or the `claimed_by` re-read), and the loser backs off; section 2 describes the case the claim step can miss. If you find yourself hitting races often, you have too many interceptors — one is usually enough.
 
 ## 8. Pseudocode
 
@@ -152,23 +153,26 @@ Language-neutral, TypeScript-flavored. This is illustrative, not a copy of the r
 ```typescript
 // Outer loop
 while (running) {
-  const artifacts = await mcp.callTool("list_artifacts", {
+  // list_artifacts returns {artifacts, total_count, ...}; each item carries
+  // only id, title, type, status, scope, tags, execution_order and timestamps.
+  const { artifacts } = await mcp.callTool("list_artifacts", {
     artifact_type: "cc-prompt",
     status: "ready",
     order_by: "execution_order",
     order_dir: "asc",
   });
 
-  for (const artifact of artifacts) {
-    if (!(await dependenciesSatisfied(artifact.dependencies))) continue;
+  for (const item of artifacts) {
+    // Dependencies, metadata and content are not in the list item:
+    // fetch the full artifact first.
+    const candidate = await mcp.callTool("get_artifact", { id: item.id });
+    if (!(await dependenciesSatisfied(candidate.dependencies))) continue;
 
-    const claimed = await claim(artifact.id);
-    if (!claimed) continue;
+    const artifact = await claim(item.id);
+    if (!artifact) continue;
 
     try {
-      // artifact carries the fields we need for execution (metadata, content,
-      // etc.) — it was read at the top of the loop from list_artifacts and
-      // the claim above did not need to hand it back.
+      // The claim returns the full, current row (metadata, content, etc.).
       await runPipeline(artifact);
     } catch (err) {
       await handleFailure(artifact, err);
@@ -178,21 +182,24 @@ while (running) {
   await sleep(pollInterval);
 }
 
-async function claim(id: string): Promise<boolean> {
-  // The conditional-UPDATE guard in update_artifact does the mutex work:
-  // pass expected_status: "ready" and the write only lands if the row is
-  // still ready. A racing interceptor gets STATUS_CONFLICT and re-polls.
+async function claim(id: string): Promise<Artifact | null> {
+  // The conditional-UPDATE guard in update_artifact catches two claims that
+  // both read "ready": the loser gets STATUS_CONFLICT. It does not catch a
+  // claim that starts after another has committed (the row already reads
+  // "executing", so no status change and no guard) — see section 2. The
+  // re-read below narrows that window; it does not close it.
   //
-  // We treat "the row is now executing" as the claim signal — checking
-  // only for `code !== "STATUS_CONFLICT"` would silently classify unrelated
-  // errors (validation, transport, unknown codes) as a successful claim.
+  // Checking only for `code !== "STATUS_CONFLICT"` would silently classify
+  // unrelated errors (validation, transport, unknown codes) as a claim.
   const result = await mcp.callTool("update_artifact", {
     id,
     status: "executing",
     expected_status: "ready",
     metadata: { claimed_by: interceptorId, claimed_at: nowIso() },
   });
-  return result.status === "executing";
+  if (result.status !== "executing") return null;
+  const current = await mcp.callTool("get_artifact", { id });
+  return current.metadata?.claimed_by === interceptorId ? current : null;
 }
 
 async function runPipeline(artifact: Artifact) {

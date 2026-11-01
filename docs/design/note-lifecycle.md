@@ -524,9 +524,9 @@ the ROADMAP "graph-aware retrieval" item, not part of this change.
 6. After commit: best-effort `DELETE FROM embeddings` for the note (MCP does
    this today; the sync path gains it for parity).
 
-Both the MCP response and the sync push result list `relinked: [{id,
-status, superseded_by}]` (sync also returns their snapshots) so the caller
-sees the side effect; `delete_note`'s description states it.
+Both results list the relinked predecessors so the caller sees the side
+effect: the MCP response as `relinked: [{id, status, superseded_by}]`, the
+sync push result as `relinked: [{entity_id, snapshot}]`; `delete_note`'s description states it.
 
 Why not the alternatives: *leave predecessors superseded with a null
 successor* — silent knowledge loss and, under the new CHECK, impossible;

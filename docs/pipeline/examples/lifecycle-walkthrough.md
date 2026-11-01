@@ -25,7 +25,7 @@ store_artifact({
 })
 ```
 
-The server stores the artifact, returns `{id, title, artifact_type, status: "draft", created_at}`, and fires background indexing. `content_hash` is not yet locked — the artifact is still `draft`.
+The server stores the artifact, returns `{id, title, artifact_type, status: "draft", created_at}`, and fires background indexing. `content_hash` is already computed from the stored content, but the content is not locked yet — the artifact is still `draft`.
 
 Two sibling artifacts (execution_order 2 and 3) are stored the same way. A fourth artifact — the DB-backed session cache — is left `draft` because the operator hasn't resolved a schema question yet.
 
@@ -45,7 +45,7 @@ store_handoff({
     environment_context: {target_repo: "project-alpha", ...}
   },
   tone_notes: "Session was productive — operator prefers terse confirmations...",
-  timezone: "America/Denver",
+  timezone: "UTC",
   final: true
 })
 ```
@@ -63,7 +63,7 @@ update_artifact({
 })
 ```
 
-The server enforces the `draft → ready` transition and computes `content_hash` (SHA-256 over the artifact's `content`) as part of the promotion. The hash is stored in `metadata` and cannot be overridden by future callers on locked statuses. Promotion to `ready` is the authorization act — from this point on, the interceptor's polling query will return the artifact.
+The server enforces the `draft → ready` transition and recomputes `content_hash` (SHA-256 over the artifact's `content`) on promotion. The hash is stored in `metadata` and cannot be overridden by future callers on locked statuses. Promotion to `ready` is the authorization act — from this point on, the interceptor's polling query will return the artifact.
 
 ## Step 4 — Interceptor claims the first artifact
 
@@ -78,17 +78,18 @@ list_artifacts({
 })
 ```
 
-Three artifacts come back in order (execution_order 1, 2, 3). The interceptor takes the first, checks its dependencies (empty — nothing to wait on), and claims it:
+Three artifacts come back in order (execution_order 1, 2, 3). List items carry only summary fields, so the interceptor fetches the first with `get_artifact`, checks its dependencies (empty — nothing to wait on), and claims it:
 
 ```
 update_artifact({
   id: <artifact-1-id>,
   status: "executing",
+  expected_status: "ready",
   metadata: {claimed_by: "interceptor-a", claimed_at: "2026-03-15T14:22:07Z"}
 })
 ```
 
-A quick re-read confirms the claim. Status is now `executing`; no other interceptor will pick this artifact up.
+The call returns the row with status `executing`, and a `get_artifact` re-read still shows `claimed_by: "interceptor-a"`. No other interceptor will pick this artifact up from its `ready` poll.
 
 ## Step 5 — Executor runs the prompt
 
@@ -209,6 +210,7 @@ This walkthrough uses exactly these MCP tool calls:
 - `store_handoff` (session close)
 - `update_artifact` (three promotions to `ready`, then per-artifact `executing` and `completed` transitions)
 - `list_artifacts` (interceptor poll)
+- `get_artifact` (full artifact — dependencies, metadata, content — before the claim, and the re-read after it)
 - `create_note` (digest per completed artifact)
 - `get_latest_handoff` (next session start)
 
