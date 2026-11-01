@@ -213,7 +213,7 @@ Concurrent status transitions are gated by a conditional UPDATE. When status is 
 Pipeline metadata contract (cc-prompt artifacts):
 - 'target_repo' — REQUIRED for pipeline-consumed artifacts. An interceptor watching for ready cc-prompts will demote any artifact missing this key back to draft. If you promote to ready without target_repo set, expect the artifact to be demoted; add it via metadata: {target_repo: "..."} in the same update or an earlier one.
 - 'target_org' — optional, defaults per interceptor config.
-- 'content_hash' — SHA-256 of 'content', auto-computed server-side. Callers must NOT supply it — any supplied value is stripped from metadata updates before merge. On promotion to a locked status ('ready'/'executing'/'completed'), the hash is recomputed from the effective content. Reverting to 'draft' clears the hash. The interceptor verifies this hash at execution time.
+- 'content_hash' — SHA-256 of 'content', auto-computed server-side. Callers must NOT supply it — any supplied value is stripped from metadata updates before merge. On promotion to a locked status ('ready'/'executing'/'completed'), the hash is recomputed from the effective content. Reverting to 'draft' keeps the hash (the artifact still has content). The interceptor verifies this hash at execution time.
 - 'branch_target' (DEPRECATED) — kept one release for reader compatibility; prefer 'target_repo'.
 
 Integrity:
