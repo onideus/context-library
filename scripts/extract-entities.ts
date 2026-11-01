@@ -194,7 +194,7 @@ function parseModelOutput(raw: string): EntitySeed[] {
 
 // ── Orchestration ─────────────────────────────────────────────────
 
-async function extractBatch(
+export async function extractBatch(
   client: Anthropic,
   model: string,
   batch: Array<{ filename: string; body: unknown }>
