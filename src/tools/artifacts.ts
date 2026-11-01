@@ -952,6 +952,17 @@ export function registerArtifactTools(mcpServer: McpServer): void {
             };
           }
 
+          if (result.content === current.content) {
+            return {
+              kind: "ok",
+              row: current,
+              changed: false,
+              previousHash: currentHash,
+              replacements: result.replacements,
+            };
+          }
+
+          // Whitespace-only counts as empty, matching store_artifact/update_artifact.
           if (result.content.trim().length === 0) {
             return {
               kind: "error",
@@ -960,16 +971,6 @@ export function registerArtifactTools(mcpServer: McpServer): void {
                 message: "Edits would leave the artifact content empty; an artifact must keep content or a pointer. Use update_artifact to replace content with a pointer.",
                 code: "VALIDATION_ERROR",
               },
-            };
-          }
-
-          if (result.content === current.content) {
-            return {
-              kind: "ok",
-              row: current,
-              changed: false,
-              previousHash: currentHash,
-              replacements: result.replacements,
             };
           }
 

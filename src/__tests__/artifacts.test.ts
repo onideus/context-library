@@ -73,6 +73,24 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
   return JSON.parse(data.result.content[0].text);
 }
 
+// Direct DB access for states the tools cannot produce (legacy rows, etc.).
+async function withDb<T>(fn: (client: import("pg").Client) => Promise<T>): Promise<T> {
+  const pg = await import("pg");
+  const client = new pg.default.Client({
+    host: PG_HOST,
+    port: parseInt(PG_PORT),
+    user: PG_USER,
+    password: PG_PASSWORD,
+    database: PG_DATABASE,
+  });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
 async function checkPostgres(): Promise<boolean> {
   try {
     const pg = await import("pg");
@@ -1289,6 +1307,81 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const after = await callTool("get_artifact", { id: created.id });
       expect(after.metadata.content_hash).toBe(sha256("server hash"));
     });
+
+    it("bumps updated_at on a successful patch", async () => {
+      const created = await storeDraft("timestamp body");
+      const before = await callTool("get_artifact", { id: created.id });
+      await new Promise((r) => setTimeout(r, 10));
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "timestamp", new_str: "bumped" }],
+      });
+      expect(result.changed).toBe(true);
+      expect(new Date(result.updated_at).getTime()).toBeGreaterThan(
+        new Date(before.updated_at).getTime()
+      );
+    });
+
+    it("no-op on a whitespace-only artifact returns changed: false, not VALIDATION_ERROR", async () => {
+      const created = await storeDraft("placeholder");
+      await withDb((c) =>
+        c.query("UPDATE artifacts SET content = '   ' WHERE id = $1", [created.id])
+      );
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: " ", new_str: " ", replace_all: true }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(false);
+    });
+
+    it("falls back to hashing the content when no content_hash is stored", async () => {
+      const created = await storeDraft("legacy body");
+      await withDb((c) =>
+        c.query("UPDATE artifacts SET metadata = metadata - 'content_hash' WHERE id = $1", [
+          created.id,
+        ])
+      );
+
+      const conflict = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "legacy", new_str: "x" }],
+        expected_content_hash: FAKE_HASH,
+      });
+      expect(conflict.code).toBe("VERSION_CONFLICT");
+      expect(conflict.current_content_hash).toBe(sha256("legacy body"));
+
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "legacy", new_str: "current" }],
+        expected_content_hash: sha256("legacy body"),
+      });
+      expect(result.changed).toBe(true);
+      expect(result.previous_content_hash).toBe(sha256("legacy body"));
+      expect(result.content_hash).toBe(sha256("current body"));
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.metadata.content_hash).toBe(sha256("current body"));
+    });
+
+    for (const [label, edits] of [
+      ["an empty old_str", [{ old_str: "", new_str: "x" }]],
+      ["zero edits", []],
+      ["51 edits", Array.from({ length: 51 }, () => ({ old_str: "a", new_str: "a" }))],
+    ] as const) {
+      it(`rejects ${label} at schema validation and writes nothing`, async () => {
+        const created = await storeDraft("schema guard a");
+        const before = await callTool("get_artifact", { id: created.id });
+        const res = await mcpPost(
+          jsonrpc("tools/call", { name: "patch_artifact", arguments: { id: created.id, edits } })
+        );
+        const data = (await parseSseResponse(res)) as any;
+        expect(data.error !== undefined || data.result?.isError === true).toBe(true);
+
+        const after = await callTool("get_artifact", { id: created.id });
+        expect(after.content).toBe("schema guard a");
+        expect(after.updated_at).toBe(before.updated_at);
+      });
+    }
 
     it("leaves update_artifact usable after a patch (re-reads current content)", async () => {
       const created = await storeDraft("first");
