@@ -66,7 +66,7 @@ All four primitives share a unified semantic search index (pgvector + FTS with R
 
 ### v0.7.0 — Artifact Layer & Embedding Resilience Fix
 
-- **Artifact layer (fourth primitive):** `artifacts` table in PostgreSQL with MCP tools (`store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`); lifecycle state (draft → ready → executing → completed → superseded) with enforced transitions; `execution_order` for sequenced prompt chains; inline content or external pointer (git/local/url); `'artifact'` added to `search_context` and `reindex` `content_types`
+- **Artifact layer (fourth primitive):** `artifacts` table in PostgreSQL with MCP tools (`create_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`); lifecycle state (draft → ready → executing → completed → superseded) with enforced transitions; `execution_order` for sequenced prompt chains; inline content or external pointer (git/local/url); `'artifact'` added to `search_context` and `reindex` `content_types`
 - **Embedding resilience (bug fix #37):** `indexNote` and `indexArtifact` now use the same TEI-connectivity → pending-queue fallback as `indexHandoff`/`indexTask`; `drainPendingEmbeddings` handles all four content types; `pending_embeddings` CHECK constraint expanded in migration `007`
 - **Tooling hygiene:** `mergeEntities` split out of `scripts/extract-entities.ts` into `scripts/merge-entities.ts` so its tests no longer require the `@anthropic-ai/sdk` devDependency to load
 
@@ -74,8 +74,8 @@ All four primitives share a unified semantic search index (pgvector + FTS with R
 
 Follow-up fixes surfaced during PR #39 review.
 
-- **execution_order uniqueness (closes #40):** Partial unique index on `(artifact_type, execution_order)` where `execution_order IS NOT NULL`. `store_artifact` and `update_artifact` surface the conflict as `EXECUTION_ORDER_CONFLICT` instead of a raw `DB_ERROR`. Null slots remain unconstrained so existing v0.7.0 rows keep working.
-- **dependencies validation (closes #44):** Write-time existence check on `dependencies` UUIDs in both `store_artifact` and `update_artifact`. Non-existent references return `VALIDATION_ERROR`; malformed UUIDs are caught before the database cast. Adds a GIN index on `dependencies` for efficient reverse-lookup queries. Full referential integrity (junction table with FKs) deferred to v0.8.
+- **execution_order uniqueness (closes #40):** Partial unique index on `(artifact_type, execution_order)` where `execution_order IS NOT NULL`. `create_artifact` and `update_artifact` surface the conflict as `EXECUTION_ORDER_CONFLICT` instead of a raw `DB_ERROR`. Null slots remain unconstrained so existing v0.7.0 rows keep working.
+- **dependencies validation (closes #44):** Write-time existence check on `dependencies` UUIDs in both `create_artifact` and `update_artifact`. Non-existent references return `VALIDATION_ERROR`; malformed UUIDs are caught before the database cast. Adds a GIN index on `dependencies` for efficient reverse-lookup queries. Full referential integrity (junction table with FKs) deferred to v0.8.
 - Migration `008_artifact_integrity.sql` combines both index additions; idempotent and safe on top of v0.7.0 data.
 
 ### v0.8.0 — Lockable Artifacts & Pipeline Hardening
@@ -92,7 +92,7 @@ Follow-up fixes surfaced during PR #39 review.
 
 ### v0.11.0 — Entity Graph
 
-- **Entity graph extraction (PRs #129, #138, #148):** Migration `009_entity_graph.sql` adds `entity_nodes`, `entity_relations`, and `extraction_runs` tables; provider abstraction (`src/entities/`) with Ollama, Anthropic/OpenAI-compatible API, and MCP-sampling providers; fire-and-forget extraction on handoff/note writes behind `ENTITY_EXTRACTION_ENABLED`; MCP tools `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`; `docker-compose.entities.yml` Tier 4 overlay
+- **Entity graph extraction (PRs #129, #138, #148):** Migration `009_entity_graph.sql` adds `entity_nodes`, `entity_relations`, and `extraction_runs` tables; provider abstraction (`src/entities/`) with Ollama, Anthropic/OpenAI-compatible API, and MCP-sampling providers; fire-and-forget extraction on handoff/note writes behind `ENTITY_EXTRACTION_ENABLED`; MCP tools `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations`; `docker-compose.entities.yml` Tier 4 overlay
 - **Graph-aware retrieval (PR #180):** behind `ENTITY_GRAPH_ENABLED`, `search_context` recognizes entities in the query, walks `entity_relations`, and folds the content it reaches into RRF as a third signal
 - content_hash lifecycle fixes (PRs #161, #164); the **Hono security bump (PR #127)** shipped earlier, in v0.10.0
 - **`/health/ready` readiness endpoint:** verifies the data directory is writable; returns `ok`/`degraded`
@@ -110,7 +110,7 @@ The note-side half of the v0.12 "Memory Lifecycle" item, built as two stacked PR
 - **Version history + edit precondition:** trigger-owned `version` counter and `note_versions` table written on every effective update by every writer (MCP, `/sync/push`, raw SQL); `get_note_history` reads it; `prune_note_history` and `NOTE_HISTORY_MAX_VERSIONS` bound it. `update_note` / `supersede_note` and the sync note ops take `expected_version` → `VERSION_CONFLICT`. One shared write path (`src/notes/store.ts`) serves MCP and sync.
 - **Sync + export:** `supersede` push op (notes only), strict preconditions, `expected_status` enforced for notes, the note `base_updated_at` comparison fixed; export runs in one `REPEATABLE READ` snapshot; import defers the self-FK and restores pre-013 tarballs with defaults.
 - **Search awareness** (second PR): `search_notes` / `search_context` redirect a superseded hit to its chain head and say so; expired notes hidden by default; `include_superseded` / `include_expired` opt back in.
-- **Partial edits (PRs #280, #316):** `str_replace_note` and `append_note` edit a note without resending its content; `patch_artifact` applies ordered, all-or-nothing exact-match edits to a draft or superseded artifact.
+- **Partial edits (PRs #280, #316):** `edit_note` and `append_note` edit a note without resending its content; `edit_artifact` applies ordered, all-or-nothing exact-match edits to a draft or superseded artifact.
 
 ## Planned
 
@@ -118,7 +118,7 @@ Ordered by expected leverage, not strict sequence. Version targets are tentative
 
 ### v0.11 — Guaranteed Capture & Recall (Hooks Integration)
 
-The whole system currently depends on the model *choosing* to call `store_handoff` and `search_context`. The steering language in tool descriptions (CALL-THIS-WHEN / CONSEQUENCE-OF-SKIPPING) fights for that choice — which is itself evidence that voluntary tool-calling is the weak link. The fix is moving capture out of the model's judgment entirely: guaranteed capture plus best-effort recall beats best-effort both.
+The whole system currently depends on the model *choosing* to call `create_handoff` and `search_context`. The steering language in tool descriptions (CALL-THIS-WHEN / CONSEQUENCE-OF-SKIPPING) fights for that choice — which is itself evidence that voluntary tool-calling is the weak link. The fix is moving capture out of the model's judgment entirely: guaranteed capture plus best-effort recall beats best-effort both.
 
 **Rough design:**
 
@@ -175,8 +175,9 @@ Today there is no way to tell whether the dead-letter queue is silently growing,
 
 ### Smaller, scoped items
 
+- **Remove the deprecated tool-name aliases (next release):** the nine pre-rename names (`store_handoff`, `patch_handoff`, `store_artifact`, `patch_artifact`, `str_replace_note`, `browse_entities`, `entity_relations`, `run_extraction`, `compare_extractions`) are registered for one release only. Next release: delete the `TOOL_ALIASES` entries and the `str_replace_note` adapter in `src/tools/tool-aliases.ts`, and the `LEGACY_TOOL_NAMES` flag (`src/config.ts`, `.env.example`, README, CLAUDE.md). Keep `"str_replace_note"` in the `ChangedVia` union: existing `note_versions` rows hold it.
 - **Graph-aware retrieval:** *partly shipped in v0.11.0* — graph traversal now feeds `search_context` as a third RRF signal (`ENTITY_GRAPH_ENABLED`). Remaining from the original idea: append related canonical names to the embedded query, and surface the matched relations in the context envelope. (Absorbs the former "search alias expansion via entity graph" Horizon item; extraction shipped in v0.11.0.)
-- **Optimistic concurrency on `patch_handoff`:** *shipped in v0.11.1* as the optional `expected_source` parameter — the filename the caller read; `patch_handoff` returns `HANDOFF_CONFLICT` if the latest handoff has moved since.
+- **Optimistic concurrency on `update_handoff`:** *shipped in v0.11.1* as the optional `expected_source` parameter — the filename the caller read; `update_handoff` returns `HANDOFF_CONFLICT` if the latest handoff has moved since.
 - **Distribution polish:** per-release GHCR images already ship via `release.yml`; remaining work is a one-line bootstrap script that scaffolds the compose files and `.env` from a fresh machine, and listing the server in MCP registries/directories.
 
 ## Future — Primitive Evolution

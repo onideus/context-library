@@ -2,7 +2,7 @@
  * Tests for entity MCP tools — parameter validation and response shape.
  * Storage layer is mocked; no real DB or provider calls.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 // ── Module mocks ──────────────────────────────────────────────────────────────
@@ -169,9 +169,9 @@ describe("extract_entities tool", () => {
   });
 });
 
-// ── run_extraction ────────────────────────────────────────────────────────────
+// ── create_extraction_run ────────────────────────────────────────────────────────────
 
-describe("run_extraction tool", () => {
+describe("create_extraction_run tool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     queryMock.mockResolvedValue({ rows: [] }); // notes query returns nothing
@@ -182,7 +182,7 @@ describe("run_extraction tool", () => {
     getActiveProviderMock.mockReturnValue(undefined);
     const server = makeServer();
 
-    const result = parseResult(await callTool(server, "run_extraction", { provider: "nonexistent" }));
+    const result = parseResult(await callTool(server, "create_extraction_run", { provider: "nonexistent" }));
     expect(result.error).toBe(true);
     expect(result.code).toBe("NO_PROVIDER");
   });
@@ -192,7 +192,7 @@ describe("run_extraction tool", () => {
     getProviderMock.mockReturnValue(provider);
     const server = makeServer();
 
-    const result = parseResult(await callTool(server, "run_extraction", { provider: "ollama" }));
+    const result = parseResult(await callTool(server, "create_extraction_run", { provider: "ollama" }));
     expect(result.error).toBe(true);
     expect(result.code).toBe("PROVIDER_UNAVAILABLE");
   });
@@ -202,7 +202,7 @@ describe("run_extraction tool", () => {
     getProviderMock.mockReturnValue(provider);
     const server = makeServer();
 
-    const result = parseResult(await callTool(server, "run_extraction", {
+    const result = parseResult(await callTool(server, "create_extraction_run", {
       provider: "ollama",
       scope: "handoffs",
     }));
@@ -216,7 +216,7 @@ describe("run_extraction tool", () => {
     getProviderMock.mockReturnValue(provider);
     const server = makeServer();
 
-    const result = parseResult(await callTool(server, "run_extraction", {
+    const result = parseResult(await callTool(server, "create_extraction_run", {
       provider: "ollama",
       scope: "handoffs",
     }));
@@ -226,9 +226,9 @@ describe("run_extraction tool", () => {
   });
 });
 
-// ── compare_extractions ───────────────────────────────────────────────────────
+// ── compare_extraction_runs ───────────────────────────────────────────────────────
 
-describe("compare_extractions tool", () => {
+describe("compare_extraction_runs tool", () => {
   const runA = {
     id: "aaa-run",
     provider: "ollama",
@@ -256,7 +256,7 @@ describe("compare_extractions tool", () => {
     queryMock.mockResolvedValueOnce({ rows: [] }); // runs query
     const server = makeServer();
 
-    const result = parseResult(await callTool(server, "compare_extractions", {
+    const result = parseResult(await callTool(server, "compare_extraction_runs", {
       run_id_a: "aaa-run",
       run_id_b: "bbb-run",
     }));
@@ -276,7 +276,7 @@ describe("compare_extractions tool", () => {
       .mockResolvedValueOnce({ rows: [] });                 // top triples
 
     const server = makeServer();
-    const result = parseResult(await callTool(server, "compare_extractions", {
+    const result = parseResult(await callTool(server, "compare_extraction_runs", {
       run_id_a: "aaa-run",
       run_id_b: "bbb-run",
     }));
@@ -338,9 +338,9 @@ describe("list_extraction_runs tool", () => {
   });
 });
 
-// ── browse_entities ───────────────────────────────────────────────────────────
+// ── list_entities ───────────────────────────────────────────────────────────
 
-describe("browse_entities tool", () => {
+describe("list_entities tool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -362,7 +362,7 @@ describe("browse_entities tool", () => {
     });
 
     const server = makeServer();
-    const result = parseResult(await callTool(server, "browse_entities", {}));
+    const result = parseResult(await callTool(server, "list_entities", {}));
 
     expect(result.entities).toHaveLength(1);
     expect(result.entities[0].id).toBe("ent-1");
@@ -376,16 +376,16 @@ describe("browse_entities tool", () => {
   it("returns empty result with helpful next_step when no entities", async () => {
     queryMock.mockResolvedValueOnce({ rows: [] });
     const server = makeServer();
-    const result = parseResult(await callTool(server, "browse_entities", {}));
+    const result = parseResult(await callTool(server, "list_entities", {}));
 
     expect(result.entities).toEqual([]);
     expect(result.next_step).toContain("extract_entities");
   });
 });
 
-// ── entity_relations ──────────────────────────────────────────────────────────
+// ── get_entity_relations ──────────────────────────────────────────────────────────
 
-describe("entity_relations tool", () => {
+describe("get_entity_relations tool", () => {
   const rootEntity = {
     id: "ent-root",
     name: "PostgreSQL",
@@ -404,7 +404,7 @@ describe("entity_relations tool", () => {
     queryMock.mockResolvedValueOnce({ rows: [] }); // root entity fetch
     const server = makeServer();
 
-    const result = parseResult(await callTool(server, "entity_relations", { entity_id: "ent-root" }));
+    const result = parseResult(await callTool(server, "get_entity_relations", { entity_id: "ent-root" }));
     expect(result.error).toBe(true);
     expect(result.code).toBe("NOT_FOUND");
   });
@@ -414,7 +414,7 @@ describe("entity_relations tool", () => {
     // getRelationsForEntity mock returns [] by default
 
     const server = makeServer();
-    const result = parseResult(await callTool(server, "entity_relations", { entity_id: "ent-root" }));
+    const result = parseResult(await callTool(server, "get_entity_relations", { entity_id: "ent-root" }));
 
     expect(result.entity.id).toBe("ent-root");
     expect(result.entity.name).toBe("PostgreSQL");
@@ -447,12 +447,98 @@ describe("entity_relations tool", () => {
       });
 
     const server = makeServer();
-    const result = parseResult(await callTool(server, "entity_relations", { entity_id: "ent-root" }));
+    const result = parseResult(await callTool(server, "get_entity_relations", { entity_id: "ent-root" }));
 
     expect(result.relations).toHaveLength(1);
     expect(result.relations[0].source.name).toBe("PostgreSQL");
     expect(result.relations[0].target.name).toBe("Backend Service");
     expect(result.relations[0].relation_type).toBe("used_by");
     expect(result.relations[0].confidence).toBe(0.9);
+  });
+});
+
+// ── Deprecated aliases (LEGACY_TOOL_NAMES, on by default) ───────────────────
+
+describe("deprecated entity-graph aliases", () => {
+  const ALIASES: Array<[string, string]> = [
+    ["run_extraction", "create_extraction_run"],
+    ["compare_extractions", "compare_extraction_runs"],
+    ["browse_entities", "list_entities"],
+    ["entity_relations", "get_entity_relations"],
+  ];
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  function registered(server: McpServer) {
+    return server["_registeredTools"] as Record<
+      string,
+      { description?: string; inputSchema?: unknown }
+    >;
+  }
+
+  it("registers each alias with a deprecation description and the new tool's schema", () => {
+    const tools = registered(makeServer());
+    for (const [oldName, newName] of ALIASES) {
+      expect(tools[oldName], oldName).toBeDefined();
+      expect(tools[oldName].description).toMatch(new RegExp(`^Deprecated alias of ${newName}\\b`));
+      expect(tools[oldName].inputSchema).toEqual(tools[newName].inputSchema);
+    }
+  });
+
+  it("run_extraction returns the same NO_PROVIDER error as create_extraction_run", async () => {
+    getProviderMock.mockReturnValue(undefined);
+    getActiveProviderMock.mockReturnValue(undefined);
+    const server = makeServer();
+    const viaNew = parseResult(await callTool(server, "create_extraction_run", { provider: "nonexistent" }));
+    const viaOld = parseResult(await callTool(server, "run_extraction", { provider: "nonexistent" }));
+    expect(viaNew.code).toBe("NO_PROVIDER");
+    expect(viaOld).toEqual(viaNew);
+  });
+
+  it("compare_extractions returns the same NOT_FOUND error as compare_extraction_runs", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    const server = makeServer();
+    const args = { run_id_a: "aaa-run", run_id_b: "bbb-run" };
+    const viaNew = parseResult(await callTool(server, "compare_extraction_runs", args));
+    const viaOld = parseResult(await callTool(server, "compare_extractions", args));
+    expect(viaNew.code).toBe("NOT_FOUND");
+    expect(viaOld).toEqual(viaNew);
+  });
+
+  it("browse_entities returns the same shape as list_entities", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    const server = makeServer();
+    const viaNew = parseResult(await callTool(server, "list_entities", {}));
+    const viaOld = parseResult(await callTool(server, "browse_entities", {}));
+    expect(Object.keys(viaOld).sort()).toEqual(Object.keys(viaNew).sort());
+    expect(viaOld).toEqual(viaNew);
+  });
+
+  it("entity_relations returns the same NOT_FOUND error as get_entity_relations", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    const server = makeServer();
+    const viaNew = parseResult(await callTool(server, "get_entity_relations", { entity_id: "ent-root" }));
+    const viaOld = parseResult(await callTool(server, "entity_relations", { entity_id: "ent-root" }));
+    expect(viaNew.code).toBe("NOT_FOUND");
+    expect(viaOld).toEqual(viaNew);
+  });
+
+  it("logs one deprecation line per alias call", async () => {
+    getProviderMock.mockReturnValue(undefined);
+    getActiveProviderMock.mockReturnValue(undefined);
+    const server = makeServer();
+    await callTool(server, "run_extraction", { provider: "nonexistent" });
+    expect(logSpy).toHaveBeenCalledWith(
+      "[deprecated-tool] run_extraction called; use create_extraction_run"
+    );
   });
 });

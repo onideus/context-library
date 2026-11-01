@@ -187,6 +187,7 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
     expect(toolNames).toContain("search_notes");
     expect(toolNames).toContain("update_note");
     expect(toolNames).toContain("delete_note");
+    expect(toolNames).toContain("edit_note");
     expect(toolNames).toContain("str_replace_note");
     expect(toolNames).toContain("append_note");
   });
@@ -445,7 +446,213 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
     });
   });
 
-  describe("str_replace_note", () => {
+  describe("edit_note", () => {
+    async function makeNote(content: string) {
+      return callTool("create_note", {
+        title: "Acme Corp rollout status",
+        content,
+        scope: "work",
+      });
+    }
+
+    it("replaces text and returns a compact response with per-edit replacements", async () => {
+      const created = await makeNote("Owner: Jane Developer\nStatus: in progress\nNext: review");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "Status: in progress", new_str: "Status: done" }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(Object.keys(result).sort()).toEqual(
+        ["changed", "content_length", "id", "replacements", "title", "updated_at", "version"].sort()
+      );
+      expect(result.id).toBe(created.id);
+      expect(result.changed).toBe(true);
+      expect(result.version).toBe(2);
+      expect(result.replacements).toEqual([1]);
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("Owner: Jane Developer\nStatus: done\nNext: review");
+      expect(result.content_length).toBe(fetched.content.length);
+    });
+
+    it("applies multiple edits in order", async () => {
+      const created = await makeNote("alpha beta gamma");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [
+          { old_str: "alpha", new_str: "ALPHA" },
+          { old_str: "ALPHA beta", new_str: "first second" },
+          { old_str: "a", new_str: "4", replace_all: true },
+        ],
+      });
+      expect(result.replacements).toEqual([1, 1, 2]);
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("first second g4mm4");
+      // One write for the whole batch.
+      expect(fetched.version).toBe(2);
+    });
+
+    it("is atomic: a failing later edit writes nothing", async () => {
+      const created = await makeNote("one two three");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [
+          { old_str: "one", new_str: "1" },
+          { old_str: "four", new_str: "4" },
+        ],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NO_MATCH");
+      expect(result.edit_index).toBe(1);
+      expect(result.match_count).toBe(0);
+      expect(JSON.stringify(result)).not.toContain("one two three");
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("one two three");
+      expect(fetched.version).toBe(1);
+      expect(await noteUpdateChangeCount(created.id)).toBe(0);
+    });
+
+    it("returns AMBIGUOUS_MATCH with edit_index and match_count", async () => {
+      const created = await makeNote("x and x");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "x", new_str: "y" }],
+      });
+      expect(result.code).toBe("AMBIGUOUS_MATCH");
+      expect(result.edit_index).toBe(0);
+      expect(result.match_count).toBe(2);
+    });
+
+    it("returns NOT_FOUND for a non-existent note", async () => {
+      const result = await callTool("edit_note", {
+        id: "00000000-0000-0000-0000-000000000000",
+        edits: [{ old_str: "a", new_str: "b" }],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NOT_FOUND");
+    });
+
+    it("returns VERSION_CONFLICT for a stale expected_version, ahead of NO_MATCH", async () => {
+      const created = await makeNote("Status: in progress");
+      await callTool("update_note", { id: created.id, content: "Status: blocked" });
+
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "in progress", new_str: "done" }],
+        expected_version: 1,
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VERSION_CONFLICT");
+      expect(result.current.version).toBe(2);
+      expect(result.current.content).toBe("Status: blocked");
+    });
+
+    it("applies the edits when expected_version matches", async () => {
+      const created = await makeNote("Owner: Jane Developer");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "Jane Developer", new_str: "John Developer" }],
+        expected_version: 1,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.version).toBe(2);
+    });
+
+    it("treats edits that leave content identical as a true no-op", async () => {
+      const created = await makeNote("Status: done");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "done", new_str: "done" }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(false);
+      expect(result.version).toBe(1);
+      expect(result.replacements).toEqual([1]);
+      expect(await noteUpdateChangeCount(created.id)).toBe(0);
+    });
+
+    it("may leave the content empty", async () => {
+      const created = await makeNote("delete all of this");
+      const result = await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "delete all of this", new_str: "" }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(true);
+      expect(result.content_length).toBe(0);
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.content).toBe("");
+    });
+
+    it("rejects an empty old_str and an empty edits list at the schema", async () => {
+      const created = await makeNote("anything");
+      const emptyOld = await mcpPost(
+        jsonrpc("tools/call", {
+          name: "edit_note",
+          arguments: { id: created.id, edits: [{ old_str: "", new_str: "x" }] },
+        })
+      );
+      const emptyOldData = (await parseSseResponse(emptyOld)) as any;
+      expect(emptyOldData.error ?? emptyOldData.result?.isError).toBeTruthy();
+
+      const noEdits = await mcpPost(
+        jsonrpc("tools/call", { name: "edit_note", arguments: { id: created.id, edits: [] } })
+      );
+      const noEditsData = (await parseSseResponse(noEdits)) as any;
+      expect(noEditsData.error ?? noEditsData.result?.isError).toBeTruthy();
+
+      const fetched = await callTool("get_note", { id: created.id });
+      expect(fetched.version).toBe(1);
+    });
+
+    it("versions the edit and records changed_via edit_note in history", async () => {
+      const created = await makeNote("Status: in progress");
+      await callTool("edit_note", {
+        id: created.id,
+        edits: [{ old_str: "in progress", new_str: "done" }],
+      });
+      const history = await callTool("get_note_history", { id: created.id });
+      expect(history.current_version).toBe(2);
+      expect(history.entries[1].content).toBe("Status: in progress");
+      expect(history.entries[1].changed_fields).toEqual(["content"]);
+      expect(history.entries[1].changed_via).toBe("edit_note");
+    });
+
+    it("still reads history rows written as str_replace_note before the rename", async () => {
+      const created = await makeNote("Status: old wording");
+      // How pre-rename rows came to exist: a writer naming itself through the
+      // transaction-local GUC the versioning trigger records.
+      const pg = await import("pg");
+      const client = new pg.default.Client({
+        host: PG_HOST,
+        port: parseInt(PG_PORT),
+        user: PG_USER,
+        password: PG_PASSWORD,
+        database: PG_DATABASE,
+      });
+      await client.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT set_config('app.changed_via', 'str_replace_note', true)");
+        await client.query("UPDATE notes SET content = $2 WHERE id = $1", [
+          created.id,
+          "Status: new wording",
+        ]);
+        await client.query("COMMIT");
+      } finally {
+        await client.end();
+      }
+
+      const history = await callTool("get_note_history", { id: created.id });
+      expect(history.error).toBeUndefined();
+      expect(history.current_version).toBe(2);
+      expect(history.entries[1].content).toBe("Status: old wording");
+      expect(history.entries[1].changed_via).toBe("str_replace_note");
+    });
+  });
+
+  describe("str_replace_note (deprecated alias of edit_note, old contract)", () => {
     async function makeNote(content: string) {
       return callTool("create_note", {
         title: "Acme Corp rollout status",
@@ -484,6 +691,13 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       expect(result.code).toBe("NO_MATCH");
       expect(result.match_count).toBe(0);
       expect(JSON.stringify(result)).not.toContain("project-alpha notes");
+      // The old error body, exactly: no edit_index, the old message.
+      expect(result).toEqual({
+        error: true,
+        message: "old_str was not found in the note content. Call get_note and copy the text exactly.",
+        code: "NO_MATCH",
+        match_count: 0,
+      });
     });
 
     it("returns AMBIGUOUS_MATCH with match_count when old_str repeats", async () => {
@@ -496,6 +710,13 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       expect(result.error).toBe(true);
       expect(result.code).toBe("AMBIGUOUS_MATCH");
       expect(result.match_count).toBe(3);
+      expect(result).toEqual({
+        error: true,
+        message:
+          "old_str matches 3 times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.",
+        code: "AMBIGUOUS_MATCH",
+        match_count: 3,
+      });
 
       const fetched = await callTool("get_note", { id: created.id });
       expect(fetched.content).toBe("TODO one\nTODO two\nTODO three");
@@ -565,8 +786,39 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
         old_str: "",
         new_str: "x",
       });
-      expect(result.error).toBe(true);
-      expect(result.code).toBe("VALIDATION_ERROR");
+      expect(result).toEqual({
+        error: true,
+        message: "old_str must be a non-empty string",
+        code: "VALIDATION_ERROR",
+      });
+    });
+
+    it("returns the same top-level keys as edit_note", async () => {
+      const a = await makeNote("Status: one");
+      const b = await makeNote("Status: one");
+      const viaAlias = await callTool("str_replace_note", { id: a.id, old_str: "one", new_str: "two" });
+      const viaNew = await callTool("edit_note", {
+        id: b.id,
+        edits: [{ old_str: "one", new_str: "two" }],
+      });
+      expect(Object.keys(viaAlias).sort()).toEqual(Object.keys(viaNew).sort());
+      expect(viaAlias.replacements).toBe(1);
+      expect(viaNew.replacements).toEqual([1]);
+
+      const aliasErr = await callTool("str_replace_note", { id: a.id, old_str: "absent", new_str: "x" });
+      const newErr = await callTool("edit_note", { id: b.id, edits: [{ old_str: "absent", new_str: "x" }] });
+      expect(aliasErr.code).toBe(newErr.code);
+    });
+
+    it("may empty the content, as before", async () => {
+      const created = await makeNote("only line");
+      const result = await callTool("str_replace_note", {
+        id: created.id,
+        old_str: "only line",
+        new_str: "",
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.content_length).toBe(0);
     });
 
     it("returns NOT_FOUND for non-existent note", async () => {
@@ -590,7 +842,7 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       expect(await noteUpdateChangeCount(created.id)).toBe(1);
     });
 
-    it("versions the edit and records changed_via str_replace_note in history", async () => {
+    it("versions the edit and records changed_via edit_note in history", async () => {
       const created = await makeNote("Status: in progress");
       const result = await callTool("str_replace_note", {
         id: created.id,
@@ -606,7 +858,7 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       expect(prior.version).toBe(1);
       expect(prior.content).toBe("Status: in progress");
       expect(prior.changed_fields).toEqual(["content"]);
-      expect(prior.changed_via).toBe("str_replace_note");
+      expect(prior.changed_via).toBe("edit_note");
     });
 
     it("treats a replacement that leaves content identical as a true no-op", async () => {
@@ -875,7 +1127,7 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
   });
 });
 
-// Pure helpers behind str_replace_note / append_note — no Postgres needed.
+// Pure helpers behind edit_note / append_note — no Postgres needed.
 describe("note partial-edit helpers", () => {
   it("countOccurrences counts literal, non-overlapping matches", () => {
     expect(countOccurrences("a.b a.b axb", "a.b")).toBe(2);
@@ -897,7 +1149,7 @@ describe("note partial-edit helpers", () => {
   });
 });
 
-// Pure helper behind patch_artifact — no Postgres needed.
+// Pure helper behind edit_artifact — no Postgres needed.
 describe("applyEdits", () => {
   it("applies a single edit", () => {
     expect(applyEdits("Acme Corp ships v1", [{ old_str: "v1", new_str: "v2" }])).toEqual({

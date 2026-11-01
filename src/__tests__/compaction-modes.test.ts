@@ -195,7 +195,7 @@ describe("archiveHandoff", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// Mode behaviour through the store_handoff compaction path
+// Mode behaviour through the create_handoff compaction path
 // ─────────────────────────────────────────────────────────────────
 
 describe("compactPreviousHandoff — off", () => {

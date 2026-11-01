@@ -25,11 +25,11 @@ The simplest deployment. Stores and retrieves operational context as append-only
 docker compose up -d
 ```
 
-**Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`, `list_handoffs`, `get_handoff`
+**Available tools:** `create_handoff`, `get_latest_handoff`, `update_handoff`, `list_handoffs`, `get_handoff`
 
 > **Retention.** Handoff files are retained indefinitely by default (`RETENTION_COUNT=0`). For long-lived deployments, set `RETENTION_COUNT` to a positive number (e.g., `5000`) to cap disk growth — older handoffs are pruned along with their search-index entries. The tradeoff: higher retention keeps more history searchable; lower retention keeps the disk footprint tight.
 >
-> **Compaction.** After each `store_handoff`, the handoff it supersedes may be rewritten to keep the working set small. This rewrite is **lossy**: `active_context` is collapsed to a single `compacted_summary` line, and the original prose survives only as chunks in the embeddings index (and is destroyed there too if `reindex` re-reads the already-compacted file). `COMPACTION_MODE` decides what happens:
+> **Compaction.** After each `create_handoff`, the handoff it supersedes may be rewritten to keep the working set small. This rewrite is **lossy**: `active_context` is collapsed to a single `compacted_summary` line, and the original prose survives only as chunks in the embeddings index (and is destroyed there too if a handoff reindex — `npm run reindex -- --types handoff --include-handoffs` — re-reads the already-compacted file). `COMPACTION_MODE` decides what happens:
 >
 > | Mode | Behaviour |
 > |---|---|
@@ -47,7 +47,7 @@ Adds structured task management, permanent knowledge capture, generated-output t
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`, `patch_artifact`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `edit_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `create_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`, `edit_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -65,7 +65,9 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 
 With no `--profile` flag, neither TEI service starts — the application degrades gracefully (semantic search falls back to FTS).
 
-**Additional tools:** `search_context`, `reindex`
+**Additional tools:** `search_context`
+
+**Rebuilding the index.** `npm run reindex` re-embeds tasks, notes and artifacts (it is an operator script, not an MCP tool). Run it from a source checkout with `EMBEDDING_URL`, the `PG*` variables and `DATA_DIR` pointed at the deployment — for example `localhost` with the host ports your compose file publishes for the embedding server and Postgres. `--types task,note` narrows it. Handoffs are skipped unless you pass both `--types handoff` and `--include-handoffs`: reindexing a compacted handoff overwrites the only copy of its pre-compaction text in the index, so run `npm run audit-compaction` first.
 
 The TEI server can run on a separate machine — just point `EMBEDDING_URL` to its address. This is the recommended setup if your main server doesn't have a GPU.
 
@@ -115,7 +117,7 @@ Extraction is disabled by default (`ENTITY_EXTRACTION_ENABLED=false`) and is ful
 
 Here Context Library is the caller: it sends your content to a model to extract triples. Chatting with a local model that calls Context Library's tools is the reverse direction, covered in [Local LLM](#local-llm).
 
-**Additional tools:** `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`
+**Additional tools:** `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations`
 
 ## Architecture
 
@@ -139,9 +141,9 @@ The reference implementation is private. What is documented here is the pattern 
 
 | Tool | Tier | Description |
 |---|---|---|
-| `store_handoff` | Core | Full-state capture at session boundaries (append-only) |
+| `create_handoff` | Core | Full-state capture at session boundaries (append-only) |
 | `get_latest_handoff` | Core | Retrieve most recent handoff with pre-computed fields |
-| `patch_handoff` | Core | Partial update with merge semantics |
+| `update_handoff` | Core | Partial update with merge semantics |
 | `list_handoffs` | Core | Browse historical handoffs by date with metadata |
 | `get_handoff` | Core | Retrieve a specific historical handoff by filename |
 | `create_task` | Postgres | Create task with scope, priority, tags, dates |
@@ -154,26 +156,43 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_notes` | Postgres | Browse notes with scope, domain, tag, and lifecycle-status filters |
 | `search_notes` | Postgres | Full-text search across note titles and content; a superseded hit is redirected to its current successor (`include_superseded` / `include_expired` opt out) |
 | `update_note` | Postgres | Update note fields with optional `expected_version` precondition; every effective edit is versioned; re-embeds on content change |
-| `str_replace_note` | Postgres | Replace an exact text span in a note's content (literal match; optional `expected_version`; versioned; compact response, no content echo) |
+| `edit_note` | Postgres | Exact-match edits to a note's content (ordered, all-or-nothing; optional `expected_version`; versioned; compact response, no content echo) |
 | `append_note` | Postgres | Append text to a note on a new line (logs, dated entries; optional `expected_version`; versioned; compact response) |
 | `delete_note` | Postgres | Permanently delete a note, its history, and its embedding; splices any supersession chain through it |
 | `supersede_note` | Postgres | Mark a note as replaced by another (both must be active); the old note keeps its content with `status='superseded'` |
 | `get_note_history` | Postgres | Read a note's prior versions (title, content, what changed, who changed it) |
 | `prune_note_history` | Postgres | Drop all but the newest N history rows of a note — the only way to remove content edited out of it |
-| `store_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
+| `create_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
 | `get_artifact` | Postgres | Retrieve artifact by UUID (full content + pointer + metadata) |
 | `list_artifacts` | Postgres | Browse artifacts with type, status, scope, and tag filters; execution_order-aware sort |
 | `search_artifacts` | Postgres | Full-text search across artifact titles and content |
 | `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
-| `patch_artifact` | Postgres | Exact-match edits to an artifact's content (ordered, all-or-nothing) without resending the whole body; draft/superseded only; recomputes `content_hash` |
+| `edit_artifact` | Postgres | Exact-match edits to an artifact's content (ordered, all-or-nothing) without resending the whole body; draft/superseded only; recomputes `content_hash` |
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types; superseded notes redirect to their successor, expired notes are hidden (`include_superseded` / `include_expired` opt out) |
-| `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, notes, and artifacts |
 | `extract_entities` | Entities | Trigger entity extraction on a single content item |
-| `run_extraction` | Entities | Batch-extract entities from multiple content items |
-| `compare_extractions` | Entities | Compare two extraction runs (e.g., different providers or models) |
+| `create_extraction_run` | Entities | Batch-extract entities from multiple content items |
+| `compare_extraction_runs` | Entities | Compare two extraction runs (e.g., different providers or models) |
 | `list_extraction_runs` | Entities | List recent entity extraction runs with stats |
-| `browse_entities` | Entities | Browse the extracted entity graph with type and name filters |
-| `entity_relations` | Entities | Retrieve the relation graph for a specific entity |
+| `list_entities` | Entities | Browse the extracted entity graph with type and name filters |
+| `get_entity_relations` | Entities | Retrieve the relation graph for a specific entity |
+
+Tool names follow one convention: `verb_noun` in snake_case (`create_`, `get_`, `list_`, `search_`, `update_`, `edit_`, `append_`, `delete_`, plus a few domain verbs such as `supersede_` and `prune_`).
+
+### Renamed tools
+
+Nine tools were renamed. The old names still work as deprecated aliases for **one release** and are removed in the next one; each alias call logs `[deprecated-tool] <old> called; use <new>`. Set `LEGACY_TOOL_NAMES=false` to preview the removal — it also brings the tool count down from 43 to 34, which matters for clients that warn when a server offers around 40 tools. `reindex` is no longer an MCP tool (no alias): use `npm run reindex`.
+
+| Old name | New name |
+|---|---|
+| `store_handoff` | `create_handoff` |
+| `patch_handoff` | `update_handoff` |
+| `store_artifact` | `create_artifact` |
+| `patch_artifact` | `edit_artifact` |
+| `str_replace_note` | `edit_note` (takes an `edits` array like `edit_artifact`; the alias keeps the old `old_str`/`new_str` input) |
+| `browse_entities` | `list_entities` |
+| `entity_relations` | `get_entity_relations` (the `entity_relations` table keeps its name) |
+| `run_extraction` | `create_extraction_run` |
+| `compare_extractions` | `compare_extraction_runs` |
 
 The server also registers three MCP prompts as workflow entry points: `session_start` (load handoff state at conversation start), `architect` (load prior design decisions before architecture discussions), and `plan` (load task and artifact state before planning).
 
@@ -635,6 +654,7 @@ See `.env.example` for all configuration options.
 | `DATA_DIR` | `./data` | Handoff file storage path |
 | `RETENTION_COUNT` | `0` | Max handoff files to retain (`0` = unlimited) |
 | `COMPACTION_MODE` | `archive` | How the superseded handoff is treated after a store: `archive` (keep a byte-exact original in `handoffs/archive/`), `off` (never rewrite), `in-place` (legacy, lossy) |
+| `LEGACY_TOOL_NAMES` | `true` | Also register the nine pre-rename tool names as deprecated aliases (see [Renamed tools](#renamed-tools)); removed in the next release. `false` previews that and lowers the tool count from 43 to 34 |
 | `NOTE_HISTORY_MAX_VERSIONS` | `0` | Max prior versions kept per note in `note_versions` (`0` = unlimited); `prune_note_history` is the per-note manual control |
 | `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
 | `LOG_RESPONSE_BODIES` | `false` | Include response bodies in the per-request `/mcp` response logs (debugging only; bodies contain user content) |

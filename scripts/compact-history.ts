@@ -6,7 +6,7 @@
  *
  * Skips handoffs whose embedding is still queued in pending_embeddings —
  * compacting those before they're indexed would make their content
- * unsearchable. They'll be compacted naturally on the next store_handoff
+ * unsearchable. They'll be compacted naturally on the next create_handoff
  * after the queue drains.
  *
  * Honours COMPACTION_MODE:

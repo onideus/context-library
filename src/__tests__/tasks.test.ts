@@ -612,7 +612,7 @@ describe.skipIf(!pgAvailable)("Task Tools", () => {
       });
 
       // Store a handoff so get_latest_handoff has something to return
-      await callTool("store_handoff", {
+      await callTool("create_handoff", {
         tone_notes: "dynamic summary test",
       });
 
@@ -659,7 +659,7 @@ describe.skipIf(!pgAvailable)("Task Tools", () => {
         due_date: farOut,
       });
 
-      await callTool("store_handoff", {});
+      await callTool("create_handoff", {});
       const result = await callTool("get_latest_handoff", {});
       const ts = result.task_summary;
 
@@ -681,7 +681,7 @@ describe.skipIf(!pgAvailable)("Task Tools", () => {
       });
       await callTool("update_task", { id: second.id, action: "complete" });
 
-      await callTool("store_handoff", {});
+      await callTool("create_handoff", {});
       const result = await callTool("get_latest_handoff", {});
       const rc = result.task_summary.recently_completed;
 

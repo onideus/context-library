@@ -7,7 +7,7 @@ This is a narrative end-to-end trace of one artifact through the pipeline loop, 
 Session `2026-03-15-v02` runs. The operator is designing a small API expansion for Project Alpha. Toward the end of the session, the assistant drafts a CC-prompt artifact:
 
 ```
-store_artifact({
+create_artifact({
   title: "Add /health/verbose endpoint to Project Alpha API",
   artifact_type: "cc-prompt",
   scope: "shared",
@@ -34,7 +34,7 @@ Two sibling artifacts (execution_order 2 and 3) are stored the same way. A fourt
 The assistant calls:
 
 ```
-store_handoff({
+create_handoff({
   operational_state: {...},
   active_context: {
     session_meta: {label: "2026-03-15-v02", surface: "ide", model: "opus"},
@@ -206,8 +206,8 @@ The digest notes are indexable — a follow-up `search_notes({query: "health ver
 
 This walkthrough uses exactly these MCP tool calls:
 
-- `store_artifact` (three drafts, plus the deferred fourth)
-- `store_handoff` (session close)
+- `create_artifact` (three drafts, plus the deferred fourth)
+- `create_handoff` (session close)
 - `update_artifact` (three promotions to `ready`, then per-artifact `executing` and `completed` transitions)
 - `list_artifacts` (interceptor poll)
 - `get_artifact` (full artifact — dependencies, metadata, content — before the claim, and the re-read after it)

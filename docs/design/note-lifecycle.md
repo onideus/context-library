@@ -63,7 +63,8 @@ Verified against `main` at the time of writing:
   binds `row[col] ?? null`, so an old tarball lacking a new NOT NULL column
   fails to import; `tables.ts` drives both SELECT and INSERT from an
   explicit column list, so an unregistered column is silently dropped.
-- PR #280 (`str_replace_note` / `append_note`) is open against `main`; its
+- PR #280 (`str_replace_note`, since renamed `edit_note`, / `append_note`) is
+  open against `main`; its
   `editNoteContent` runs a direct `UPDATE notes SET content = …`.
 
 ## 3. Schema — migration `013_note_lifecycle.sql`
@@ -180,8 +181,9 @@ Consequences:
   the row's `changed_at` is when it ended.
 - `changed_via` is whatever the write path put in the transaction-local GUC
   via `SET LOCAL app.changed_via = …` (`update_note`, `supersede_note`,
-  `delete_note` for a splice, `sync_push`, `str_replace_note`,
-  `append_note`); unknown writers record `'sql'`.
+  `delete_note` for a splice, `sync_push`, `edit_note`, `append_note`;
+  history written before the rename may hold `str_replace_note`, the same
+  kind of edit); unknown writers record `'sql'`.
 - No surrogate id: the composite PK round-trips through export/import and
   gives a deterministic `ORDER BY note_id, version`.
 - `note_versions` is **not a sync entity** — never in `/sync/changes`, no
@@ -476,7 +478,7 @@ AND (content_type <> 'note'
   across distinct `content_id`s** — two notes are two facts. Handoff chunk
   dedup is unchanged.
 - `embeddings.metadata` is **not** extended with `status` (a copy the sync
-  path can never refresh). `reindex` and `drainPendingEmbeddings` are
+  path can never refresh). `npm run reindex` and `drainPendingEmbeddings` are
   unchanged and correctly include superseded notes.
 - SQL-shape guard: an `EXPLAIN` test (modelled on the content_hash index
   test in `sync.test.ts`, with `enable_seqscan = off`) pins the hashed
@@ -495,7 +497,7 @@ added; status visible on every item.
 
 Triples extracted from a note stay in `entity_nodes` / `entity_relations`
 after the note is superseded and keep contributing to graph-walk scores and
-`browse_entities`. Filtering or down-weighting them is a follow-up under
+`list_entities`. Filtering or down-weighting them is a follow-up under
 the ROADMAP "graph-aware retrieval" item, not part of this change.
 
 ## 7. Delete semantics
@@ -575,7 +577,7 @@ snapshots. `note_versions` never appears.
 - Note `insert` and `update` **enqueue `pending_embeddings`** inside the
   push transaction (`INSERT … ON CONFLICT DO NOTHING`). No TEI call on the
   push path and nothing the client can observe; the existing drain (server
-  startup, next `search_context`/`reindex`) embeds the note. Today a note
+  startup, next `search_context`, or an operator `npm run reindex`) embeds the note. Today a note
   inserted from mobile is never embedded, and after supersession that
   would make the current fact unreachable by semantic search.
 - `delete` and `update` route through the shared helpers, so pushed edits
@@ -705,7 +707,7 @@ Recommendation first in each.
    `registerNoteTools`, README line 50 + table rows, CLAUDE.md line 52,
    `notes.test.ts` appended blocks. Because the trigger versions #280's
    direct `UPDATE`, the only follow-up after #280 merges is exposing
-   `expected_version` on `str_replace_note` / `append_note` via
+   `expected_version` on `edit_note` (then `str_replace_note`) / `append_note` via
    `updateNoteInTx` (folded in if #280 lands first).
 7. **Sync `supersede` push op now vs later.** Recommend now (MCP/sync
    parity rule; small over the shared helper; additive).
