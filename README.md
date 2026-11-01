@@ -51,7 +51,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 
 ### Tier 3: + Embeddings (Semantic Search)
 
-Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Use the `--profile` flag to select GPU or CPU runtime.
+Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Use the `--profile` flag to select the GPU, CPU, or ARM64 runtime (see [Embedding Server Platform Options](#embedding-server-platform-options)).
 
 **GPU (desktop with NVIDIA GPU):**
 ```bash
@@ -75,7 +75,7 @@ For improved retrieval precision, an optional cross-encoder reranker rescores ca
 
 ```bash
 # Add to your compose command:
---profile reranker-gpu   # or reranker-cpu
+--profile reranker-gpu   # or reranker-cpu, reranker-arm64
 ```
 
 When the reranker is not configured or unreachable, `search_context` falls back to RRF-only ordering. Set `RERANKER_URL` in your `.env` to enable it.
@@ -112,6 +112,8 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 ```
 
 Extraction is disabled by default (`ENTITY_EXTRACTION_ENABLED=false`) and is fully fire-and-forget: if the provider is unreachable, handoff and note writes still succeed and a warning is logged. Ollama itself is not managed by Compose — point `OLLAMA_BASE_URL` at wherever it runs.
+
+Here Context Library is the caller: it sends your content to a model to extract triples. Chatting with a local model that calls Context Library's tools is the reverse direction, covered in [Local LLM](#local-llm).
 
 **Additional tools:** `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`
 
@@ -179,18 +181,20 @@ The server also registers three MCP prompts as workflow entry points: `session_s
 
 The server exposes two health endpoints:
 
-- **`GET /health`** — Basic liveness check. Returns server status, version, and uptime.
+- **`GET /health`** — Basic liveness check. Returns server status, version, uptime, and whether the embedding server is reachable.
 - **`GET /health/ready`** — Readiness check. Verifies the data directory is writable. Returns `"ok"` (HTTP 200) or `"degraded"` (HTTP 503) accordingly.
 
 Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after deployment to confirm the server can write data.
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.10.0","uptime":42}
+# {"status":"ok","version":"<version>","uptime":42,"embedding_status":{"available":true}}
 
 curl http://localhost:3100/health/ready
 # {"status":"ok","writable":true,"uptime":42}
 ```
+
+`version` depends on the build: a released image reports its release version (`X.Y.Z`), an image built from `main` reports `0.0.0-sha.<hash>`, and a source checkout reports `0.0.0-development`. `embedding_status.available` is `true` when the TEI server answers its health check, `false` when it does not (including deployments without Tier 3), and `null` if the check itself failed; the result is cached for about 10 seconds.
 
 ## Quick Start
 
@@ -235,65 +239,148 @@ curl http://localhost:3100/health
 
 ## Connecting MCP Clients
 
-Once Context Library is running (either via `npm run dev` or Docker), you can connect any MCP-compatible client. The server uses **Streamable HTTP** transport on a single endpoint: `http://localhost:3100/mcp`.
+The server speaks **Streamable HTTP** on a single endpoint, `http://localhost:3100/mcp`, and has no authentication of its own. Who can reach that endpoint depends on how you run it:
 
-### Roo Code (VS Code)
+- **Docker Compose (base `docker-compose.yml`):** the port is published on `127.0.0.1:3100` only, so only clients on the same machine can connect.
+- **From source (`npm run dev` / `npm start`):** the process listens on all interfaces (`0.0.0.0`), so the unauthenticated endpoint is reachable from the network. On a shared network, block port 3100 with a host firewall or run via Compose instead.
 
-Roo Code is the most common local setup. Open your MCP settings (click the MCP icon in the Roo Code panel, then **Edit Global MCP** or **Edit Project MCP**) and add:
+Anything that has to reach the server from another machine, including every cloud-hosted client, goes through the auth proxy: see [External Access with Auth Proxy](#external-access-with-auth-proxy). Do not publish the port on `0.0.0.0` without it.
 
-```json
-{
-  "mcpServers": {
-    "context-library": {
-      "type": "streamable-http",
-      "url": "http://localhost:3100/mcp"
-    }
-  }
-}
-```
+### Claude
 
-For project-level configuration, create `.roo/mcp.json` in your project root with the same content. Project-level configs override global settings and can be committed to version control so your whole team shares the same MCP setup.
-
-Save the file and Context Library should appear in the MCP servers list with a connected status. Roo Code will discover all available tools automatically.
-
-### Claude Code (Terminal)
+#### Claude Code
 
 ```bash
-claude mcp add context-library --transport http http://localhost:3100/mcp
+claude mcp add --transport http context-library http://localhost:3100/mcp
 ```
 
-This registers the server globally. Claude Code will connect on next launch.
+This uses the default **local** scope: the server is available in the current project only, and the entry is stored in `~/.claude.json`. Other scopes:
 
-### Claude Desktop
+- `--scope user` makes the server available in every project.
+- `--scope project` writes a shared `.mcp.json` at the project root, which can be committed:
 
-Add to your Claude Desktop config file:
+  ```json
+  {
+    "mcpServers": {
+      "context-library": {
+        "type": "http",
+        "url": "http://localhost:3100/mcp"
+      }
+    }
+  }
+  ```
+
+  The `"type": "http"` field is required: an entry with a `url` but no `type` is reported as a configuration error and skipped. Claude Code asks you to approve project-scoped servers the first time it sees them.
+
+Reference: [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+#### Claude Desktop
+
+Which setup applies depends on where the server runs.
+
+**Local server (the default deployment).** Claude Desktop's config file takes stdio servers only, so bridge to the HTTP endpoint with [mcp-remote](https://github.com/geelen/mcp-remote). Edit the config file:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 **Windows (Store):** `%LOCALAPPDATA%\Packages\Claude_<hash>\LocalCache\Roaming\Claude\claude_desktop_config.json`
-
-Claude Desktop does not natively support remote HTTP MCP servers. Use [mcp-remote](https://github.com/geelen/mcp-remote) as a stdio bridge:
 
 ```json
 {
   "mcpServers": {
     "context-library": {
       "command": "npx",
-      "args": ["mcp-remote", "http://localhost:3100/mcp"]
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:3100/mcp"]
     }
   }
 }
 ```
 
-Restart Claude Desktop after saving.
+`-y` skips the npx install prompt, and `127.0.0.1` avoids problems when `localhost` resolves to IPv6 first. Fully quit Claude Desktop and relaunch it after saving.
 
-### Claude.ai (Hosted)
+**Public deployment behind the auth proxy.** Add the server as a custom connector instead. The connection is opened from Anthropic's cloud, not from your machine, so the URL must be reachable from the public internet over valid TLS; a `localhost` URL never works as a custom connector. See [External Access with Auth Proxy](#external-access-with-auth-proxy).
 
-Claude.ai requires the server to be publicly accessible with OAuth authentication. See [External Access with Auth Proxy](#external-access-with-auth-proxy) below.
+Reference: [Get started with custom connectors using remote MCP](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+
+#### Claude.ai
+
+Claude.ai uses the same custom-connector model: a public URL, with OAuth handled by the auth proxy. See [External Access with Auth Proxy](#external-access-with-auth-proxy).
+
+### Local LLM
+
+Two different pieces are involved when you use a local model:
+
+- The **model runtime** (Ollama, LM Studio's server, llama.cpp) loads and runs the model.
+- The **MCP client** is the chat application that shows the conversation and calls tools.
+
+Context Library connects to the MCP client, not to the runtime. Some applications are both.
+
+> This is unrelated to using Ollama as an [entity extraction provider](#tier-4--entity-extraction-knowledge-graph) (Tier 4). There, Context Library calls a model; here, a model's chat client calls Context Library.
+
+#### LM Studio (0.3.17 or later)
+
+LM Studio is both runtime and MCP client. In the app, open the **Program** tab in the right sidebar, then **Install > Edit mcp.json**, and add:
+
+```json
+{
+  "mcpServers": {
+    "context-library": {
+      "url": "http://localhost:3100/mcp"
+    }
+  }
+}
+```
+
+LM Studio's documentation warns that servers designed for cloud models can use enough tokens to overflow a local model's context. Read [Model and context requirements](#model-and-context-requirements) before using it.
+
+Reference: [LM Studio MCP documentation](https://lmstudio.ai/docs/app/mcp).
+
+#### Open WebUI (0.6.31 or later) with Ollama or another local runtime
+
+Open WebUI works with Ollama or any OpenAI-compatible local runtime. Its native MCP support is Streamable HTTP only, which is what this server speaks. Go to **Admin Settings > External Tools > Add Server**, choose the type **MCP (Streamable HTTP)**, and enter the URL for your setup.
+
+Open WebUI's backend makes the connection, not your browser. When Open WebUI runs in Docker, `localhost` means the Open WebUI container, not the host:
+
+| Setup | URL |
+|---|---|
+| Open WebUI running directly on the host (not in Docker) | `http://localhost:3100/mcp` |
+| Open WebUI in Docker Desktop (macOS / Windows) | `http://host.docker.internal:3100/mcp` |
+| Open WebUI in Docker on Linux, Context Library on the default compose file | `http://context-library:3100/mcp` (after joining the network, below) |
+| Open WebUI in Docker on Linux, Context Library run from source (`npm run dev` / `npm start`) | `http://host.docker.internal:3100/mcp`, with `extra_hosts: ["host.docker.internal:host-gateway"]` on the Open WebUI container |
+
+When Context Library runs from source it listens on `0.0.0.0`, so `host-gateway` reaches it (a host firewall that blocks the Docker bridge will still refuse the connection). On Linux, the base compose file publishes the port on `127.0.0.1` only, so `host.docker.internal` / `host-gateway` gets connection refused. Attach Open WebUI to Context Library's compose network instead; inside that network the service is named `context-library` and listens on port `3100`. The network is named `<project>_default`, where the project name defaults to the directory holding the compose files (`context-library_default` for a default clone; check with `docker network ls`). Either connect a running container:
+
+```bash
+docker network connect context-library_default <open-webui-container>
+```
+
+or declare the network in Open WebUI's compose file:
+
+```yaml
+services:
+  open-webui:
+    # ...existing configuration...
+    networks:
+      - default
+      - context-library
+
+networks:
+  context-library:
+    external: true
+    name: context-library_default
+```
+
+Reference: [Open WebUI MCP documentation](https://docs.openwebui.com/features/mcp).
+
+#### Model and context requirements
+
+Every tool is registered on every server, whatever tier you deploy, so the tool list a client loads is always the same size. Measured at v0.13.0, the `tools/list` response for all 35 tools is about 93,000 characters, roughly **23K tokens**. Tool descriptions change between releases, so treat this as approximate.
+
+- **Context window.** A model needs a context window of at least about 23K tokens just to hold the tool list, before any conversation. Your messages and the tool results come on top of that, so configure well above it; 32K tokens is a practical floor and more is better. LM Studio and Ollama both default to context windows smaller than many models support. The context length is a setting in each: set it explicitly when you load the model.
+- **Tool calling.** The model must support tool calling. Small models often call tools poorly: wrong tool, malformed arguments, or no call at all. The tool descriptions in this server are long by design (each is a self-contained briefing for a model with no prior context), which favors larger models.
 
 ### Other MCP Clients
 
-Any client that supports Streamable HTTP transport can connect to `http://localhost:3100/mcp`. This includes VS Code with GitHub Copilot, Cursor, Windsurf, Continue, and others. Consult your client's documentation for the MCP server configuration format — typically you need to specify the URL and transport type (`streamable-http` or `streamableHttp` depending on the client).
+Any client that supports the Streamable HTTP transport can connect to `http://localhost:3100/mcp` (or to the public URL behind the auth proxy). Consult the client's documentation for its configuration format; typically you specify the URL and the transport type.
 
 ### Verifying the Connection
 
@@ -301,8 +388,10 @@ After connecting, ask your AI assistant to call `get_latest_handoff`. If it retu
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.10.0","uptime":42}
+# {"status":"ok","version":"<version>","uptime":42,"embedding_status":{"available":true}}
 ```
+
+See [Health Checks](#health-checks) for what each field means.
 
 ## External Access with Auth Proxy
 
@@ -513,7 +602,7 @@ Common causes:
 - Callback URL mismatch — must be `https://YOUR_DOMAIN/.auth/oidc/callback`
 - Missing or expired TLS certificates in `proxy-certs/`
 
-**Health check returns `"degraded"`**
+**`/health/ready` returns `"degraded"`**
 The data directory is not writable. Check ownership (UID 999) and that the volume mount exists.
 
 **Embeddings return errors but tasks still work**
@@ -548,6 +637,8 @@ See `.env.example` for all configuration options.
 | `COMPACTION_MODE` | `archive` | How the superseded handoff is treated after a store: `archive` (keep a byte-exact original in `handoffs/archive/`), `off` (never rewrite), `in-place` (legacy, lossy) |
 | `NOTE_HISTORY_MAX_VERSIONS` | `0` | Max prior versions kept per note in `note_versions` (`0` = unlimited); `prune_note_history` is the per-note manual control |
 | `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
+| `LOG_RESPONSE_BODIES` | `false` | Include response bodies in the per-request `/mcp` response logs (debugging only; bodies contain user content) |
+| `APP_VERSION` | — | Version reported by `/health`, MCP server info, and export manifests. Set by the image build; when unset it falls back to `package.json` (`0.0.0-development`) |
 
 ### PostgreSQL (Tier 2)
 
@@ -558,7 +649,9 @@ See `.env.example` for all configuration options.
 | `PGUSER` | — | PostgreSQL user |
 | `PGPASSWORD` | — | PostgreSQL password |
 | `PGDATABASE` | — | PostgreSQL database name |
-| `POSTGRES_PASSWORD` | — | Root Postgres password (used by compose) |
+| `POSTGRES_DB` | `context_library` | Database created by the Postgres container (used by compose) |
+| `POSTGRES_USER` | `cl` | Superuser created by the Postgres container (used by compose) |
+| `POSTGRES_PASSWORD` | — | Password for that user (used by compose; required for Tier 2) |
 
 ### Embeddings (Tier 3)
 
@@ -569,6 +662,7 @@ See `.env.example` for all configuration options.
 | `EMBEDDING_DIMENSIONS` | `768` | Embedding vector dimensions |
 | `RERANKER_URL` | — | Cross-encoder reranker endpoint (optional; leave unset to disable) |
 | `RERANKER_TIMEOUT_MS` | `3000` | Abort budget per `/rerank` call; on timeout the search falls back to RRF ordering |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Model loaded by the reranker service (used by `docker-compose.embeddings.yml`) |
 | `SEARCH_ALIAS_PATH` | `./data/search-aliases.json` | Deployment-local search alias expansion file (optional) |
 | `ENTITY_SEED_PATH` | `./data/entities.seed.json` | Entity seed file for context envelopes (optional) |
 
@@ -587,6 +681,31 @@ See `.env.example` for all configuration options.
 | `ENTITY_API_BASE_URL` | `https://api.anthropic.com` | Base URL for the `api` provider |
 | `ENTITY_API_MODEL` | `claude-sonnet-4-20250514` | Model used by the `api` provider |
 | `ENTITY_API_FORMAT` | `anthropic` | API wire format: `anthropic` or `openai` |
+
+### Entity Graph Retrieval (optional)
+
+When enabled, `search_context` matches entity names in the query, walks `entity_relations`, and adds the content it reaches as a third ranking signal in RRF fusion. Turn it on once an extraction run has populated the graph.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENTITY_GRAPH_ENABLED` | `false` | Enable the graph signal in `search_context` |
+| `ENTITY_GRAPH_HOPS` | `1` | Traversal depth (clamped to 1–3) |
+| `ENTITY_GRAPH_RRF_WEIGHT` | `0.3` | Weight of the graph signal in fusion (0–1) |
+| `ENTITY_GRAPH_FTS_WEIGHT` | `1.0` | Weight of the full-text signal in hybrid fusion (0–1) |
+| `ENTITY_GRAPH_VECTOR_WEIGHT` | `1.0` | Weight of the vector signal in hybrid fusion (0–1) |
+| `ENTITY_GRAPH_MAX_CANDIDATES` | `50` | Maximum content rows returned by the traversal |
+
+### Sync Endpoints (optional)
+
+Plain-HTTP `/sync/*` endpoints for clients that cannot use the MCP OAuth flow. Every request is rejected until a token is set.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SYNC_BEARER_TOKEN` | — | Bearer token for `/sync/*` (unset or empty = every request rejected) |
+| `SYNC_CHANGES_DEFAULT_LIMIT` | `100` | Rows per `GET /sync/changes` when `limit` is omitted |
+| `SYNC_CHANGES_MAX_LIMIT` | `500` | Upper bound on the `limit` query parameter |
+| `SYNC_PUSH_MAX_BYTES` | `5242880` | Whole-request body cap for `POST /sync/push` (5 MiB) |
+| `SYNC_PUSH_MAX_OP_BYTES` | `131072` | Per-op cap for `POST /sync/push` (128 KiB) |
 
 ### Auth Proxy (External Access)
 

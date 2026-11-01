@@ -11,17 +11,17 @@ Three tools cover the whole lifecycle. Their descriptions are the contract of re
 | Tool | Purpose | When |
 |---|---|---|
 | `store_handoff` | Full-state capture | At session boundaries (start/end), before heavy context operations that risk compression, or when significant context has accumulated |
-| `patch_handoff` | Partial update, merged onto the latest handoff | Mid-session updates (mood, tone_notes, appending to active_context) — cheaper than a full re-store |
+| `patch_handoff` | Partial update, merged onto the latest handoff | Mid-session updates (mood, tone_notes, updating keys of active_context) — cheaper than a full re-store |
 | `get_latest_handoff` | Read most recent handoff | At session start, before any store/patch (to load current state), before evaluative or judgment-class responses |
 
-Both `store_handoff` and `patch_handoff` are **append-only**: they always create a new timestamped file. `patch_handoff` merges the patch onto the previous file and writes the result; the previous file is not mutated. This is a deliberate design choice — see below.
+Both `store_handoff` and `patch_handoff` are **append-only**: they always create a new timestamped file. `patch_handoff` merges the patch onto the previous file and writes the result; the previous file is not mutated. This is a deliberate design choice — see below. The one exception is compaction: after a `store_handoff`, the handoff it supersedes may be rewritten to a smaller form. `COMPACTION_MODE` controls this; under the default `archive` mode a byte-exact copy of the original is kept in `handoffs/archive/` first, and `off` disables the rewrite.
 
 ## Merge semantics
 
 `patch_handoff` combines a partial payload with the latest stored handoff:
 
 - **Scalars** (`tone_notes`, `timezone`) — direct overwrite when provided, preserved when null or absent.
-- **Objects** (`operational_state`, `active_context`) — deep merge at the top level. Provided keys overwrite, omitted keys are preserved.
+- **Objects** (`operational_state`, `active_context`) — shallow merge at the top level. Provided keys overwrite, omitted keys are preserved. A provided key replaces its whole value: to add to `active_context.conversation_arc`, resend the full value with the addition.
 - **Task arrays** — deprecated since schema 1.3, stripped server-side, logged as a structured warning. Tasks live in the tasks table; handoff array operations are no-ops.
 
 The `final: true` flag on either tool closes the session: the stored handoff carries `session_closed=true` and a `session_closed_at` timestamp, and the next `get_latest_handoff` returns `session_continuity: "cold_start"` (after a threshold — reopening within ~15 minutes still reports `resume`).
@@ -33,7 +33,7 @@ The pipeline pattern assumes the operator can tell, from a single `get_latest_ha
 Recommended cadence:
 
 - **Session start** — call `get_latest_handoff` first. Read `session_continuity`, `elapsed_seconds`, and `same_calendar_day` before doing anything else. `same_calendar_day=false` means operational state is stale and should be confirmed with the user.
-- **Mid-session** — use `patch_handoff` for small updates (mood shift, tone note revision, appending a decision to `active_context.conversation_arc`). Avoid re-stating the entire handoff every few turns.
+- **Mid-session** — use `patch_handoff` for small updates (mood shift, tone note revision, adding a decision to `active_context.conversation_arc` by resending its full value). Avoid re-stating the entire handoff every few turns.
 - **Session end** — `store_handoff` with `final: true`. Include the session label in `active_context.session_meta.label`.
 - **Never on an empty payload** — the server rejects `EMPTY_HANDOFF` / `EMPTY_PATCH`. That is the correct behavior; don't work around it.
 
@@ -52,7 +52,7 @@ Example: `2026-03-15-v02` is the second session on March 15, 2026. Reset the cou
 
 The store is append-only for three reasons that matter to the pipeline:
 
-1. **Audit trail.** Every handoff file is a checkpoint. If a session goes wrong and a bad handoff gets written, the previous good one is still on disk. Recovery is `get_handoff` on the older filename, not a database restore.
+1. **Audit trail.** Every handoff file is a checkpoint. If a session goes wrong and a bad handoff gets written, the previous good one is still on disk (compacted after a `store_handoff`, with the full original under `handoffs/archive/` in the default `COMPACTION_MODE=archive`). Recovery is `get_handoff` on the older filename, not a database restore.
 2. **Recoverability from bad writes.** A model that hallucinates a handoff, or a client that sends a truncated payload, cannot destroy prior state. It can only append a new file that the operator can then reject or overwrite with a corrected `store_handoff`.
 3. **Embedding lineage.** Each handoff file is indexed separately. The semantic search index can be replayed against the history without reconstructing a mutation log.
 

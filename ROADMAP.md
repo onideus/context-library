@@ -90,17 +90,18 @@ Follow-up fixes surfaced during PR #39 review.
 - **Response steering (PR #103):** `next_step` hints added to tool responses
 - **Hash auto-compute hardening (PR #115):** `content_hash` recomputed on promotion to a locked status when missing; caller-supplied hashes stripped
 
-### Current: v0.10.0 — Entity Graph
+### v0.11.0 — Entity Graph
 
 - **Entity graph extraction (PRs #129, #138, #148):** Migration `009_entity_graph.sql` adds `entity_nodes`, `entity_relations`, and `extraction_runs` tables; provider abstraction (`src/entities/`) with Ollama, Anthropic/OpenAI-compatible API, and MCP-sampling providers; fire-and-forget extraction on handoff/note writes behind `ENTITY_EXTRACTION_ENABLED`; MCP tools `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`; `docker-compose.entities.yml` Tier 4 overlay
-- **Hono security bump (PR #127)** and content_hash lifecycle fixes (PRs #161, #164)
+- **Graph-aware retrieval (PR #180):** behind `ENTITY_GRAPH_ENABLED`, `search_context` recognizes entities in the query, walks `entity_relations`, and folds the content it reaches into RRF as a third signal
+- content_hash lifecycle fixes (PRs #161, #164); the **Hono security bump (PR #127)** shipped earlier, in v0.10.0
 - **`/health/ready` readiness endpoint:** verifies the data directory is writable; returns `ok`/`degraded`
 
-### v0.11 (in-flight) — Backup, Export & Portability (pulled forward from v0.15)
+### v0.13.0 — Backup, Export & Portability (pulled forward from v0.15)
 
 - **`npm run export`** and **`npm run import`** ship the four primitives + entity graph + sync tables + handoff file tree as a single portable tarball with a `manifest.json` (app version, applied migrations, embedding model + dimensions, row counts, handoff schema versions). Deterministic JSONL ordering so consecutive exports diff cleanly. Embeddings excluded by default and re-embedded through the existing `pending_embeddings` queue on import; `--include-embeddings` opts back in for exact restores. Import guards a non-empty destination behind `--force`; `--dry-run` is pure. Restore drill lives in `docs/backup-restore.md`. Table registry shared between the two scripts (`scripts/portability/tables.ts`). This lands earlier than its ROADMAP v0.15 slot because backup / DR rehearsal + embedding-model migration + adopter-restore are hard-blocked without it.
 
-### v0.12 (in-flight) — Notes lifecycle, provenance, version history
+### v0.13.0 — Notes lifecycle, provenance, version history
 
 The note-side half of the v0.12 "Memory Lifecycle" item, built as two stacked PRs (design: `docs/design/note-lifecycle.md`).
 
@@ -109,10 +110,11 @@ The note-side half of the v0.12 "Memory Lifecycle" item, built as two stacked PR
 - **Version history + edit precondition:** trigger-owned `version` counter and `note_versions` table written on every effective update by every writer (MCP, `/sync/push`, raw SQL); `get_note_history` reads it; `prune_note_history` and `NOTE_HISTORY_MAX_VERSIONS` bound it. `update_note` / `supersede_note` and the sync note ops take `expected_version` → `VERSION_CONFLICT`. One shared write path (`src/notes/store.ts`) serves MCP and sync.
 - **Sync + export:** `supersede` push op (notes only), strict preconditions, `expected_status` enforced for notes, the note `base_updated_at` comparison fixed; export runs in one `REPEATABLE READ` snapshot; import defers the self-FK and restores pre-013 tarballs with defaults.
 - **Search awareness** (second PR): `search_notes` / `search_context` redirect a superseded hit to its chain head and say so; expired notes hidden by default; `include_superseded` / `include_expired` opt back in.
+- **Partial edits (PRs #280, #316):** `str_replace_note` and `append_note` edit a note without resending its content; `patch_artifact` applies ordered, all-or-nothing exact-match edits to a draft or superseded artifact.
 
 ## Planned
 
-Ordered by expected leverage, not strict sequence. Version targets are tentative — entries may merge, split, or reorder as design work surfaces dependencies.
+Ordered by expected leverage, not strict sequence. Version targets are tentative — entries may merge, split, or reorder as design work surfaces dependencies. The version labels below were assigned before the v0.11–v0.13 releases shipped and name planning slots, not release numbers: the items still listed here have not shipped unless marked.
 
 ### v0.11 — Guaranteed Capture & Recall (Hooks Integration)
 
@@ -132,8 +134,8 @@ Handoffs and notes accumulate forever (`RETENTION_COUNT` defaults to unlimited) 
 
 **Rough design:**
 
-- **Notes lifecycle, provenance, version history** — *in flight; see the v0.12 (in-flight) entry under Completed.* Shipped as a separate `supersede_note` tool rather than an `update_note` action (CLAUDE.md rule #1), with `expired` computed from `valid_until` rather than stored.
-- **Search awareness** — *in flight (second stacked PR).* `search_notes` and `search_context` redirect a superseded hit to the head of its chain and annotate it ("note X matched but was superseded by Y on <date> — showing the successor"); expired notes are hidden by default; `include_superseded` / `include_expired` opt back in. Redirect rather than hide, so a query that matches the old wording still reaches the current fact.
+- **Notes lifecycle, provenance, version history** — *shipped in v0.13.0; see Completed.* Shipped as a separate `supersede_note` tool rather than an `update_note` action (CLAUDE.md rule #1), with `expired` computed from `valid_until` rather than stored.
+- **Search awareness** — *shipped in v0.13.0.* `search_notes` and `search_context` redirect a superseded hit to the head of its chain and annotate it ("note X matched but was superseded by Y on <date> — showing the successor"); expired notes are hidden by default; `include_superseded` / `include_expired` opt back in. Redirect rather than hide, so a query that matches the old wording still reaches the current fact.
 - **Recency weighting:** optional exponential decay on RRF scores with a configurable half-life env var (default off until the eval harness can prove the right setting).
 - **Consolidation pipeline (`npm run consolidate`):** distill handoffs older than N days into durable notes ("what's still true") using the existing entity-extraction provider abstraction (Ollama or API), then archive the raw files to `data/handoffs/archive/`. Grows out of `compact-history`. Idempotent, dry-run mode, and human-review output before any write — same review-first pattern as `extract-entities`.
 
@@ -160,7 +162,7 @@ Everything lives in one global namespace today, so use across multiple projects 
 
 ### v0.15 — Backup, Export & Portability
 
-**Shipped early in v0.11 (see the "in-flight" section above).** The mechanism was hard-blocking DR rehearsal, embedding-model migrations, and the adopter-restore story — pulling it forward turned a blocker into a supported flow. See `docs/backup-restore.md` for the restore drill.
+**Shipped early, in v0.13.0 (see Completed).** The mechanism was hard-blocking DR rehearsal, embedding-model migrations, and the adopter-restore story — pulling it forward turned a blocker into a supported flow. See `docs/backup-restore.md` for the restore drill.
 
 ### v0.16 — Observability & Read-Only UI
 
@@ -173,8 +175,8 @@ Today there is no way to tell whether the dead-letter queue is silently growing,
 
 ### Smaller, scoped items
 
-- **Graph-aware retrieval:** use the entity graph at query time, not just at write time — match query terms against `entity_nodes`, pull 1-hop `entity_relations`, append related canonical names to the embedded query, and surface the matched relations in the context envelope. (Absorbs the former "search alias expansion via entity graph" Horizon item; extraction shipped in v0.10.0.)
-- **Optimistic concurrency on `patch_handoff`:** carry a `version`/etag in the handoff; `patch_handoff` takes an expected version and returns `CONFLICT` on mismatch. Becomes necessary once hooks (v0.11) and interactive sessions can write concurrently.
+- **Graph-aware retrieval:** *partly shipped in v0.11.0* — graph traversal now feeds `search_context` as a third RRF signal (`ENTITY_GRAPH_ENABLED`). Remaining from the original idea: append related canonical names to the embedded query, and surface the matched relations in the context envelope. (Absorbs the former "search alias expansion via entity graph" Horizon item; extraction shipped in v0.11.0.)
+- **Optimistic concurrency on `patch_handoff`:** *shipped in v0.11.1* as the optional `expected_source` parameter — the filename the caller read; `patch_handoff` returns `HANDOFF_CONFLICT` if the latest handoff has moved since.
 - **Distribution polish:** per-release GHCR images already ship via `release.yml`; remaining work is a one-line bootstrap script that scaffolds the compose files and `.env` from a fresh machine, and listing the server in MCP registries/directories.
 
 ## Future — Primitive Evolution

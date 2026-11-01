@@ -31,7 +31,7 @@ flowchart TD
 
     J --> L[update_artifact status=completed]
     K -->|operator merges| L
-    L -->|create_note| M[Digest back into CB]
+    L -->|create_note| M[Digest back into Context Library]
     M --> A
 ```
 
