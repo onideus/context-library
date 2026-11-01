@@ -325,7 +325,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 **Multi-stage build** (`Dockerfile`):
 1. Builder stage: `node:22-slim`, `npm ci`, `tsc`, extract version to `/tmp/version.txt`.
-2. Production stage: `node:22-slim`, non-root `appuser` (UID 999), `npm ci --omit=dev`, copy `dist/` and migration SQL files. Injects `APP_VERSION` env var so the server reads version without filesystem access to package.json.
+2. Production stage: `node:22-slim`, non-root `appuser` (UID 999), `npm ci --omit=dev`, copy `dist/` and migration SQL files. Bakes the `APP_VERSION` build arg into the image env (see Environment Variables for who sets it).
 
 **Compose stacking** (additive overlays):
 - `docker-compose.yml` — Base: context-library container, binds `127.0.0.1:3100`, mounts `./data`.
@@ -342,9 +342,8 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned. Every workflo
 
 - **`ci.yml`** — Trigger for pull_request and push to main. Calls `ci-checks.yml`. Its check reports as `ci / ci`, which the `main` ruleset requires before merging. This is the only place `ci-checks.yml` runs: do not call it again from another workflow, chain on `ci` with `workflow_run` instead.
 - **`ci-checks.yml`** — Reusable workflow. On PRs it first runs `actions/dependency-review-action`, which fails on any added or upgraded package with a HIGH/CRITICAL advisory (runtime or dev) before install spends minutes; then `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16). Notifies via ntfy. Merge gates on `main`: the `ci / ci` check (so dependency review) and a ruleset `code_scanning` rule blocking new HIGH+ CodeQL alerts (CodeQL is GitHub default setup, not a workflow file). After merge, Trivy in `image.yml` scans the image's OS and npm packages, and Dependabot alerts cover `package-lock.json`.
-- **`image.yml`** — Triggered by `workflow_run` when `ci` completes on main; runs only if that run succeeded and was a push in this repo. Checks out `workflow_run.head_sha` (the commit ci tested; `GITHUB_SHA` would be the branch head at trigger time), builds Docker image, Trivy container scan (HIGH/CRITICAL, fixed CVEs only, no account needed), pushes `sha-<short>` tagged image to GHCR. Because it is `workflow_run`, changes to this file take effect only once they are on main.
-- **`release.yml`** — On `v*` tag push or workflow_dispatch: promotes a SHA-tagged image to version tag + `latest` (skips latest for prereleases), creates GitHub Release with auto-generated notes, notifies via ntfy.
-- **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `ci` normally, and `image.yml` after it (GITHUB_TOKEN pushes do not trigger downstream workflows).
+- **`image.yml`** — Triggered by `workflow_run` when `ci` completes on main; runs only if that run succeeded and was a push in this repo. Checks out `workflow_run.head_sha` (the commit ci tested; `GITHUB_SHA` would be the branch head at trigger time), builds Docker image with `APP_VERSION=0.0.0-sha.<short>` (unreleased), Trivy container scan (HIGH/CRITICAL, fixed CVEs only, no account needed), pushes `sha-<short>` tagged image to GHCR. Because it is `workflow_run`, changes to this file take effect only once they are on main.
+- **`release.yml`** — The one-button release, workflow_dispatch only (there is no tag-push trigger; the workflow creates the tag). Inputs: `bump` (patch/minor/major from the latest `vX.Y.Z` tag), optional exact `version` (prereleases contain `-` and do not move `latest`), optional `source_sha`, and `dry_run`. It picks the newest main commit with a `sha-<short>` image (warning about newer commits it skipped), re-scans that exact digest with Trivy using current vulnerability data, stamps the version onto it with a `FROM <digest>` + `ENV APP_VERSION` + OCI labels build (no code layers change), starts it and requires `/health` to report the new version, writes the release files (Trivy JSON report at all severities, CycloneDX SBOM, and `RELEASE_NOTES.md` from `.github/scripts/release-notes.mjs`: changes grouped by conventional-commit prefix since the previous stable tag; "fixed in this release" from a Trivy scan of the previous release's image diffed against this one with the same data, plus code scanning alerts closed in the window; vulnerabilities new since the previous image; scan summary; image digest), then pushes `<version>` (+ `latest`), creates the tag and GitHub Release with the notes as its body and the three files attached, and notifies via ntfy. `security-events: read` covers code scanning alerts; `GITHUB_TOKEN` cannot read Dependabot alerts, so that list appears only when the optional `DEPENDABOT_ALERTS_TOKEN` secret (fine-grained, Dependabot alerts read) is set. A real release must be dispatched from main; dry runs may use another branch's workflow and upload the files as a run artifact. Tests are not re-run: the code is what passed ci at merge. It refuses to overwrite a published version unless the existing image was stamped from the same commit (finishing a half-done release). `dry_run` stops before pushing.
 - **`cleanup.yml`** — Cleans up old container images and stale resources.
 
 CI does NOT validate Docker Compose configuration or startup. Run `scripts/test-compose.sh` locally before merging changes to any `docker-compose*.yml` file.
@@ -364,7 +363,7 @@ Key variables:
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.
 - `ENTITY_EXTRACTION_ENABLED` (default: `false`) — Enable background entity graph extraction on handoff/note writes. Related: `ENTITY_EXTRACTION_PROVIDER` (`ollama`/`api`/`none`), `ENTITY_EXTRACTION_ASYNC`, `ENTITY_MIN_CONFIDENCE`, `ENTITY_EXTRACTION_TIMEOUT_MS`, `OLLAMA_BASE_URL`, `OLLAMA_EXTRACTION_MODEL`, `ENTITY_API_KEY`, `ENTITY_API_BASE_URL`, `ENTITY_API_MODEL`, `ENTITY_API_FORMAT`. See the README env var tables for defaults.
-- `APP_VERSION` — Injected by Docker build; falls back to reading package.json at runtime.
+- `APP_VERSION` — The version `/health`, MCP server info and export manifests report. `image.yml` bakes `0.0.0-sha.<short>` into every build and `release.yml` stamps the release version onto the released image. Unset (running from source), it falls back to `package.json`, whose version is frozen at `0.0.0-development`: releases are git tags and image stamps, never a `package.json` bump.
 
 ## Development
 
@@ -384,7 +383,7 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 ```json
 {
   "status": "ok",       // string — always "ok" when the server is up
-  "version": "0.10.0", // string — semver from package.json / APP_VERSION env var
+  "version": "0.13.0", // string — APP_VERSION env var (release or 0.0.0-sha.<short>); 0.0.0-development from source
   "uptime": 42          // integer — seconds since process start
 }
 ```
