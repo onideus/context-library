@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc && npm run copy-migrations",
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "copy-migrations": "cp -r src/db/migrations dist/db/migrations",
     "start": "node dist/server.js",
     "test": "vitest run",

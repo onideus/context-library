@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["scripts/**/*.ts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "data",
+    "scripts/import.ts",
+    "scripts/rehydrate-handoffs.test.ts"
+  ]
+}
