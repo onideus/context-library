@@ -107,6 +107,8 @@ Pointer shape is intentionally free-form (`{type: "git", repo, branch, path}`, `
 
 Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. Any caller-supplied `content_hash` is stripped before merge on both `store_artifact` and `update_artifact`. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` clears the hash.
 
+Content edits while an artifact is in `draft` can use `patch_artifact` (exact-match replacements, no full-content resend) instead of `update_artifact`; it recomputes `content_hash` the same way, and the locked-status policy above is unchanged — `patch_artifact` rejects `ready`, `executing`, and `completed` artifacts too.
+
 If a locked artifact needs to change, the correct move is to store a new artifact (typically with `metadata.supersedes` pointing at the old one) and `update_artifact` the old one to `superseded`. This preserves the audit trail — the interceptor can always trust that what it ran matches what was captured.
 
 ## Pipeline metadata contract
