@@ -3,7 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { countOccurrences, literalReplace, appendWithNewline } from "../tools/note-edits.js";
+import { countOccurrences, literalReplace, appendWithNewline, applyEdits } from "../tools/note-edits.js";
 
 /**
  * Note tool integration tests.
@@ -894,5 +894,86 @@ describe("note partial-edit helpers", () => {
     expect(appendWithNewline("a", "b")).toBe("a\nb");
     expect(appendWithNewline("a\n", "b")).toBe("a\nb");
     expect(appendWithNewline("", "b")).toBe("b");
+  });
+});
+
+// Pure helper behind patch_artifact — no Postgres needed.
+describe("applyEdits", () => {
+  it("applies a single edit", () => {
+    expect(applyEdits("Acme Corp ships v1", [{ old_str: "v1", new_str: "v2" }])).toEqual({
+      ok: true,
+      content: "Acme Corp ships v2",
+      replacements: [1],
+    });
+  });
+
+  it("applies edits in order, each against the previous result", () => {
+    const result = applyEdits("alpha", [
+      { old_str: "alpha", new_str: "project-alpha" },
+      { old_str: "project-", new_str: "the project " },
+    ]);
+    expect(result).toEqual({ ok: true, content: "the project alpha", replacements: [1, 1] });
+  });
+
+  it("reports NO_MATCH with the failing edit_index", () => {
+    expect(
+      applyEdits("one two", [
+        { old_str: "one", new_str: "1" },
+        { old_str: "three", new_str: "3" },
+      ])
+    ).toEqual({ ok: false, code: "NO_MATCH", edit_index: 1, match_count: 0 });
+  });
+
+  it("NO_MATCH when an edit's text was removed by an earlier edit", () => {
+    expect(
+      applyEdits("one two", [
+        { old_str: "one", new_str: "1" },
+        { old_str: "one", new_str: "uno" },
+      ])
+    ).toEqual({ ok: false, code: "NO_MATCH", edit_index: 1, match_count: 0 });
+  });
+
+  it("reports AMBIGUOUS_MATCH with match_count", () => {
+    expect(applyEdits("x x x", [{ old_str: "x", new_str: "y" }])).toEqual({
+      ok: false,
+      code: "AMBIGUOUS_MATCH",
+      edit_index: 0,
+      match_count: 3,
+    });
+  });
+
+  it("replace_all replaces every occurrence and requires at least one", () => {
+    expect(applyEdits("x x x", [{ old_str: "x", new_str: "y", replace_all: true }])).toEqual({
+      ok: true,
+      content: "y y y",
+      replacements: [3],
+    });
+    expect(applyEdits("abc", [{ old_str: "z", new_str: "y", replace_all: true }])).toEqual({
+      ok: false,
+      code: "NO_MATCH",
+      edit_index: 0,
+      match_count: 0,
+    });
+  });
+
+  it("treats special characters literally", () => {
+    const result = applyEdits("a .*?[](){}+|^$\\ b\nline2 ünïcödé 🚀", [
+      { old_str: ".*?[](){}+|^$\\", new_str: "$& $1 $$ $`" },
+      { old_str: "\nline2", new_str: "\r\nLINE2" },
+      { old_str: "ünïcödé 🚀", new_str: "日本語 ✓" },
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      content: "a $& $1 $$ $` b\r\nLINE2 日本語 ✓",
+      replacements: [1, 1, 1],
+    });
+  });
+
+  it("an empty new_str deletes old_str", () => {
+    expect(applyEdits("keep [x] this", [{ old_str: " [x]", new_str: "" }])).toEqual({
+      ok: true,
+      content: "keep this",
+      replacements: [1],
+    });
   });
 });

@@ -47,7 +47,7 @@ Adds structured task management, permanent knowledge capture, generated-output t
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`, `patch_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
@@ -163,6 +163,7 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_artifacts` | Postgres | Browse artifacts with type, status, scope, and tag filters; execution_order-aware sort |
 | `search_artifacts` | Postgres | Full-text search across artifact titles and content |
 | `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
+| `patch_artifact` | Postgres | Exact-match edits to an artifact's content (ordered, all-or-nothing) without resending the whole body; draft/superseded only; recomputes `content_hash` |
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types; superseded notes redirect to their successor, expired notes are hidden (`include_superseded` / `include_expired` opt out) |
 | `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, notes, and artifacts |
 | `extract_entities` | Entities | Trigger entity extraction on a single content item |
