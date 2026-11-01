@@ -1,21 +1,60 @@
 name: release
 
+# One-button release. Run it from the Actions tab (or `gh workflow run release.yml`):
+#
+#   1. Picks the version: the next patch/minor/major after the latest vX.Y.Z tag,
+#      or an exact version (e.g. 0.13.0-rc.1) when one is given.
+#   2. Picks the image: the newest commit on main that has a sha-<short> image.
+#      An image exists only if ci passed and image.yml's Trivy scan passed.
+#   3. Re-scans that exact image with Trivy and today's vulnerability data, so a
+#      CVE published since the merge blocks the release.
+#   4. Stamps the version onto the tested image without rebuilding it: the new
+#      image adds only APP_VERSION and OCI labels to the config, no code layers.
+#   5. Starts the stamped image and requires /health to report the new version.
+#   6. Produces the release files: a CycloneDX SBOM and a full Trivy JSON report
+#      of the release image, and RELEASE_NOTES.md (.github/scripts/release-notes.mjs):
+#      changes since the previous release grouped by type, security alerts fixed,
+#      the scan result and the image digest.
+#   7. Pushes <version> (and latest, unless it is a prerelease), tags the commit
+#      v<version> and creates the GitHub Release with those files attached.
+#
+# Tests are not re-run: the code is byte-for-byte what passed ci at merge time.
+# dry_run does everything except push, tag and release; the notes, SBOM and scan
+# report are uploaded as a workflow artifact so they can be reviewed. A real
+# release must be run from main; a dry run may use another branch's workflow.
+
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
-      source_sha:
-        description: 'SHA of built image to promote. Leave empty to use latest main HEAD.'
+      bump:
+        description: 'Version part to bump from the latest vX.Y.Z tag (ignored if version is set)'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: 'Exact version instead of a bump, e.g. 0.13.0-rc.1. A prerelease (contains "-") does not move latest.'
         required: false
         default: ''
-      version:
-        description: 'Version to publish, e.g. 0.5.4 or 0.5.4-test.1. Prerelease (contains "-") skips "latest" tag.'
-        required: true
+      source_sha:
+        description: 'Commit on main to release. Empty = newest main commit that has a built image.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Validate everything (scan, stamp, /health) but publish nothing'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
   packages: write
+  security-events: read
+
+env:
+  IMAGE: ghcr.io/onideus/context-library
 
 jobs:
   release:
@@ -23,32 +62,21 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # Read Dependabot and code scanning alerts for the notes' security section.
+      security-events: read
     steps:
+      - name: Require main for a real release
+        if: ${{ !inputs.dry_run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::A release must be run from main (this run uses ${GITHUB_REF}). Use dry_run to test another branch's workflow."
+          exit 1
+
+      # The dispatched ref supplies this workflow's scripts; full history and
+      # tags come with fetch-depth 0, and every release decision uses origin/main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
           fetch-depth: 0
-
-      - name: Resolve source SHA and version
-        id: resolve
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            INPUT_SHA="${{ inputs.source_sha }}"
-            if [ -n "${INPUT_SHA}" ]; then
-              FULL_SHA=$(git rev-parse "${INPUT_SHA}")
-            else
-              FULL_SHA=$(git rev-parse origin/main)
-            fi
-            VERSION="${{ inputs.version }}"
-            VERSION="${VERSION#v}"
-          else
-            FULL_SHA="${GITHUB_SHA}"
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          SHORT_SHA=$(echo "${FULL_SHA}" | cut -c1-7)
-          echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          fetch-tags: true
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -57,51 +85,294 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify SHA image exists
+      # Inputs reach every script through env, never ${{ }} interpolation.
+      - name: Resolve version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          if ! docker pull ghcr.io/onideus/context-library:sha-${{ steps.resolve.outputs.short_sha }}; then
-            echo "::error::No validated image found for sha-${{ steps.resolve.outputs.short_sha }}. Ensure the commit was merged to main and the image pipeline succeeded before promoting."
+          set -euo pipefail
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="${VERSION_INPUT#v}"
+            if ! [[ "$VERSION" =~ $semver ]]; then
+              echo "::error::'$VERSION_INPUT' is not a semver version like 1.2.3 or 1.2.3-rc.1"
+              exit 1
+            fi
+          else
+            LATEST=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+            LATEST="${LATEST:-v0.0.0}"
+            IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+            case "$BUMP" in
+              major) VERSION="$((MAJOR + 1)).0.0" ;;
+              minor) VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+              *)     VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+            esac
+            echo "Latest release ${LATEST}, ${BUMP} bump -> ${VERSION}"
+          fi
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Tag v${VERSION} already exists."
             exit 1
           fi
+          PRERELEASE=false
+          [[ "$VERSION" == *-* ]] && PRERELEASE=true
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
 
-      - name: Retag and push release tags
+      - name: Resolve source commit and image
+        id: source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.resolve.outputs.version }}"
-          SHA_IMAGE="ghcr.io/onideus/context-library:sha-${{ steps.resolve.outputs.short_sha }}"
-          docker tag "${SHA_IMAGE}" "ghcr.io/onideus/context-library:${VERSION}"
-          docker push "ghcr.io/onideus/context-library:${VERSION}"
-          if [[ "${VERSION}" != *-* ]]; then
-            docker tag "${SHA_IMAGE}" ghcr.io/onideus/context-library:latest
-            docker push ghcr.io/onideus/context-library:latest
+          set -euo pipefail
+          if [ -n "$SOURCE_SHA" ]; then
+            FULL_SHA=$(git rev-parse --verify "${SOURCE_SHA}^{commit}")
+            if ! git merge-base --is-ancestor "$FULL_SHA" origin/main; then
+              echo "::error::${SOURCE_SHA} is not on main."
+              exit 1
+            fi
+            if ! docker manifest inspect "${IMAGE}:sha-${FULL_SHA:0:7}" >/dev/null 2>&1; then
+              echo "::error::No image sha-${FULL_SHA:0:7}. Its ci run or image build did not succeed (or the image was pruned after 90 days)."
+              exit 1
+            fi
           else
-            echo "Prerelease version detected, skipping latest tag."
+            FULL_SHA=""
+            SKIPPED=""
+            for c in $(git rev-list --first-parent -n 20 origin/main); do
+              if docker manifest inspect "${IMAGE}:sha-${c:0:7}" >/dev/null 2>&1; then
+                FULL_SHA="$c"
+                break
+              fi
+              SKIPPED="${SKIPPED} ${c:0:7}"
+            done
+            if [ -z "$FULL_SHA" ]; then
+              echo "::error::None of the last 20 commits on main has a built image."
+              exit 1
+            fi
+            if [ -n "$SKIPPED" ]; then
+              echo "::warning title=Newer commits skipped::No image yet for${SKIPPED} (ci failed, or image.yml is still running). Releasing ${FULL_SHA:0:7} instead."
+            fi
+          fi
+          # A published version is never overwritten with different code. The one
+          # exception is re-running a release that pushed its image but failed
+          # before tagging: same version, stamped from the same commit.
+          if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            EXISTING=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+              --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}')
+            if [ "$EXISTING" != "$FULL_SHA" ]; then
+              echo "::error::Image ${IMAGE}:${VERSION} already exists (from ${EXISTING:-unknown}); refusing to overwrite a published version."
+              exit 1
+            fi
+            echo "::warning::${IMAGE}:${VERSION} already exists from this same commit; finishing the earlier release."
           fi
 
-      - name: Create GitHub Release
+          SHORT="${FULL_SHA:0:7}"
+          docker pull -q "${IMAGE}:sha-${SHORT}"
+          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:sha-${SHORT}")
+          echo "Releasing $(git log -1 --format='%h %s' "$FULL_SHA")"
+          echo "Source image ${DIGEST}"
+
+          # Previous stable release on this line of history, for the notes and
+          # for the image comparison ("fixed in this release").
+          PREV_TAG=""
+          for t in $(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+            if [ "$t" != "v${VERSION}" ] && git merge-base --is-ancestor "$t" "$FULL_SHA"; then
+              PREV_TAG="$t"
+              break
+            fi
+          done
+          PREV_IMAGE=""
+          if [ -n "$PREV_TAG" ] && docker manifest inspect "${IMAGE}:${PREV_TAG#v}" >/dev/null 2>&1; then
+            PREV_IMAGE="${IMAGE}:${PREV_TAG#v}"
+          fi
+          echo "Previous release: ${PREV_TAG:-none} (image: ${PREV_IMAGE:-not available})"
+          {
+            echo "full_sha=${FULL_SHA}"
+            echo "short_sha=${SHORT}"
+            echo "digest=${DIGEST}"
+            echo "prev_tag=${PREV_TAG}"
+            echo "prev_image=${PREV_IMAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Same settings as image.yml. The image passed this at build time; running
+      # it again with current vulnerability data catches anything published since.
+      - name: Re-scan image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.source.outputs.digest }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      - name: Stamp version onto the tested image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.source.outputs.digest }}
+          FULL_SHA: ${{ steps.source.outputs.full_sha }}
+        run: |
+          set -euo pipefail
+          # FROM the exact digest that was scanned; no RUN or COPY, so the code
+          # layers are reused untouched and only the image config changes.
+          printf '%s\n' \
+            "FROM ${DIGEST}" \
+            "ENV APP_VERSION=${VERSION}" \
+            "LABEL org.opencontainers.image.version=${VERSION} org.opencontainers.image.revision=${FULL_SHA}" \
+            | docker build --pull=false -t "${IMAGE}:${VERSION}" -
+          echo "Layers: source $(docker inspect --format '{{len .RootFS.Layers}}' "${DIGEST}"), stamped $(docker inspect --format '{{len .RootFS.Layers}}' "${IMAGE}:${VERSION}")"
+
+      - name: Verify /health reports the release version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run -d --name release-smoke -p 127.0.0.1:3100:3100 "${IMAGE}:${VERSION}" >/dev/null
+          trap 'docker rm -f release-smoke >/dev/null 2>&1 || true' EXIT
+          REPORTED=""
+          for _ in $(seq 1 30); do
+            if BODY=$(curl -fsS http://127.0.0.1:3100/health 2>/dev/null); then
+              REPORTED=$(echo "$BODY" | jq -r .version)
+              break
+            fi
+            sleep 1
+          done
+          if [ "$REPORTED" != "$VERSION" ]; then
+            echo "::error::/health reported '${REPORTED:-no response}', expected '${VERSION}'."
+            docker logs release-smoke | tail -n 30
+            exit 1
+          fi
+          echo "/health reports ${REPORTED}"
+
+      # Release files for downstream consumers. Every input is set explicitly
+      # so nothing carries over from the gating scan above. Both scan the local
+      # stamped image, which has the same layers as the scanned digest.
+      # Trivy does not create the output directory.
+      - name: Create release files directory
+        run: mkdir -p release-files
+
+      - name: Scan report for the release (all severities)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '0'
+          format: json
+          output: release-files/trivy-report.json
+
+      - name: SBOM for the release (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          format: cyclonedx
+          exit-code: '0'
+          output: release-files/sbom.cdx.json
+
+      # Same data, previous release's image: whatever it had that this image
+      # does not is what the release fixed for anyone running the image.
+      # Kept out of release-files; only the notes use it.
+      - name: Scan previous release image for comparison
+        if: ${{ steps.source.outputs.prev_image != '' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.source.outputs.prev_image }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '0'
+          format: json
+          output: prev-trivy-report.json
+
+      - name: Push release image
+        id: push
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${VERSION}"
+          if [ "$PRERELEASE" = "false" ]; then
+            docker tag "${IMAGE}:${VERSION}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          else
+            echo "Prerelease: latest not moved."
+          fi
+          echo "digest=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${VERSION}")" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          FULL_SHA: ${{ steps.source.outputs.full_sha }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          TRIVY_REPORT: release-files/trivy-report.json
+          PREV_TAG: ${{ steps.source.outputs.prev_tag }}
+          PREV_TRIVY_REPORT: ${{ steps.source.outputs.prev_image != '' && 'prev-trivy-report.json' || '' }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional. GITHUB_TOKEN cannot read Dependabot alerts; a fine-grained
+          # token with only "Dependabot alerts: read" on this repo adds them.
+          DEPENDABOT_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+          OUT: release-files/RELEASE_NOTES.md
+        run: |
+          node .github/scripts/release-notes.mjs
+          cat release-files/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Kept with the run on every release, and the only copy on a dry run.
+      - name: Upload release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files-v${{ steps.version.outputs.version }}
+          path: release-files/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Tag commit and create GitHub Release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          FULL_SHA: ${{ steps.source.outputs.full_sha }}
         run: |
-          VERSION="${{ steps.resolve.outputs.version }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PRERELEASE_FLAG=""
-            if [[ "${VERSION}" == *-* ]]; then
-              PRERELEASE_FLAG="--prerelease"
-            fi
-            gh release create "v${VERSION}" \
-              --target "${{ steps.resolve.outputs.full_sha }}" \
-              --generate-notes \
-              ${PRERELEASE_FLAG}
-          else
-            gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
-          fi
+          set -euo pipefail
+          FLAGS=()
+          [ "$PRERELEASE" = "true" ] && FLAGS+=(--prerelease)
+          gh release create "v${VERSION}" \
+            --target "${FULL_SHA}" \
+            --title "v${VERSION}" \
+            --notes-file release-files/RELEASE_NOTES.md \
+            "${FLAGS[@]}" \
+            release-files/RELEASE_NOTES.md \
+            release-files/sbom.cdx.json \
+            release-files/trivy-report.json
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHORT_SHA: ${{ steps.source.outputs.short_sha }}
+        run: echo "::notice title=Dry run passed::v${VERSION} from ${SHORT_SHA} would release. Nothing was pushed or tagged; the release files are in the run's artifacts."
 
       - name: Notify on release
-        if: always()
+        if: ${{ always() && !inputs.dry_run }}
         uses: ./.github/actions/ntfy-notify
         with:
           url: ${{ secrets.NTFY_URL }}
           token: ${{ secrets.NTFY_TOKEN }}
-          title: "Release ${{ job.status }}: v${{ steps.resolve.outputs.version }}"
-          message: Context Library v${{ steps.resolve.outputs.version }} — release ${{ job.status == 'success' && 'published' || 'FAILED' }}
+          title: "Release ${{ job.status }}: v${{ steps.version.outputs.version || '?' }}"
+          message: Context Library v${{ steps.version.outputs.version || '?' }} — release ${{ job.status == 'success' && 'published' || 'FAILED' }}
           priority: ${{ job.status == 'success' && 'default' || 'urgent' }}
           tags: ${{ job.status == 'success' && 'rocket' || 'rotating_light' }}
