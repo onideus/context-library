@@ -56,7 +56,7 @@ Each Postgres-gated test file auto-creates and resets its own dedicated database
 Context Library is built around a few core principles:
 
 - **Tiered deployment.** Every feature degrades gracefully. Core handoffs work without Postgres. Task search works without embeddings. Never add a hard dependency on an upper tier.
-- **Append-only handoffs.** Edits create new files via `patch_handoff`, which merges with the latest state. The only rewrite of a stored handoff is compaction of a superseded one, governed by `COMPACTION_MODE` (the default `archive` mode keeps a byte-exact copy first). Never add another path that mutates a stored handoff.
+- **Append-only handoffs.** Edits create new files via `update_handoff`, which merges with the latest state. The only rewrite of a stored handoff is compaction of a superseded one, governed by `COMPACTION_MODE` (the default `archive` mode keeps a byte-exact copy first). Never add another path that mutates a stored handoff.
 - **Auth at the boundary.** The server itself is unauthenticated. Auth is handled by an external proxy. Never add authentication logic to the server.
 - **Single-user by design.** This is personal infrastructure. Multi-tenancy, user management, and access control are out of scope.
 

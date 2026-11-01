@@ -31,7 +31,7 @@ Understanding the *meaning* of a state matters more than memorizing the transiti
 
 The artifact exists in Context Library. It is searchable and retrievable, but it should not be acted on yet. `draft` means: **an operator has not yet said this is fit to run.**
 
-New artifacts default to `draft` when `status` is omitted on `store_artifact`. A planning session should almost always leave its output in `draft` — the promotion to `ready` is a separate step, ideally taken by a human who has actually read the artifact.
+New artifacts default to `draft` when `status` is omitted on `create_artifact`. A planning session should almost always leave its output in `draft` — the promotion to `ready` is a separate step, ideally taken by a human who has actually read the artifact.
 
 ### ready — pipeline may pick this up
 
@@ -89,7 +89,7 @@ Use it when:
 - Ordering isn't linear (two artifacts both depend on a third, then either can run).
 - You want the interceptor to enforce the wait explicitly rather than relying on the operator getting the order right by hand.
 
-Dependencies are validated at write time. `store_artifact` and `update_artifact` reject dependency UUIDs that don't exist (`VALIDATION_ERROR`), and malformed UUIDs are caught before the database cast.
+Dependencies are validated at write time. `create_artifact` and `update_artifact` reject dependency UUIDs that don't exist (`VALIDATION_ERROR`), and malformed UUIDs are caught before the database cast.
 
 The interceptor is responsible for honoring dependencies at execution time — it should skip an artifact whose dependencies aren't all `completed` and re-check on the next poll.
 
@@ -107,9 +107,9 @@ Pointer shape is intentionally free-form (`{type: "git", repo, branch, path}`, `
 
 ## Immutable content on locked statuses
 
-Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. Any caller-supplied `content_hash` is stripped before merge on both `store_artifact` and `update_artifact`. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` keeps the hash.
+Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. Any caller-supplied `content_hash` is stripped before merge on both `create_artifact` and `update_artifact`. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` keeps the hash.
 
-Content edits while an artifact is in `draft` can use `patch_artifact` (exact-match replacements, no full-content resend) instead of `update_artifact`; it recomputes `content_hash` the same way, and the locked-status policy above is unchanged — `patch_artifact` rejects `ready`, `executing`, and `completed` artifacts too.
+Content edits while an artifact is in `draft` can use `edit_artifact` (exact-match replacements, no full-content resend) instead of `update_artifact`; it recomputes `content_hash` the same way, and the locked-status policy above is unchanged — `edit_artifact` rejects `ready`, `executing`, and `completed` artifacts too.
 
 If a locked artifact needs to change, the correct move is to store a new artifact (typically with `metadata.supersedes` pointing at the old one) and `update_artifact` the old one to `superseded`. This preserves the audit trail — the interceptor can always trust that what it ran matches what was captured.
 
