@@ -51,7 +51,7 @@ All four content layers are built and deployed.
 
 3. **Notes** (permanent knowledge) — Decisions, insights, patterns. Stored in PostgreSQL (`notes` table, migrations `005_notes.sql` + `013_note_lifecycle.sql`). FTS + semantic search. Tools: `create_note`, `get_note`, `list_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `search_notes`, `supersede_note`, `get_note_history`, `prune_note_history`. Indexed for `search_context`. Notes have a **lifecycle** (`active` → `superseded` via `supersede_note`; `expired` is computed from `valid_until`, never stored), a **provenance** field (`stated | decided | inferred | fetched | derived`, nullable = not recorded), and **version history** (`note_versions`, written by a database trigger on every effective update). See `docs/design/note-lifecycle.md` and the "Note lifecycle invariants" block under Database.
 
-4. **Artifacts** (lifecycle outputs) — CC prompts, research documents, generated content. Stored in PostgreSQL (`artifacts` table, migration `006_artifacts.sql`). Status lifecycle: `draft -> ready -> executing -> completed -> superseded`. Execution ordering and dependency tracking. Tools: `store_artifact`, `get_artifact`, `list_artifacts`, `update_artifact`, `search_artifacts`. Indexed for `search_context`.
+4. **Artifacts** (lifecycle outputs) — CC prompts, research documents, generated content. Stored in PostgreSQL (`artifacts` table, migration `006_artifacts.sql`). Status lifecycle: `draft -> ready -> executing -> completed -> superseded`. Execution ordering and dependency tracking. Tools: `store_artifact`, `get_artifact`, `list_artifacts`, `update_artifact`, `patch_artifact`, `search_artifacts`. Indexed for `search_context`.
 
 ### Cross-Layer Search
 
@@ -97,7 +97,8 @@ src/
                            #   supersede_note, get_note_history, prune_note_history
                            #   (writes go through notes/store.ts)
     note-edits.ts          # Pure literal-replace / append helpers for the partial-edit tools
-    artifacts.ts           # Artifact CRUD + search_artifacts, status lifecycle
+                           #   (applyEdits: ordered all-or-nothing edits for patch_artifact)
+    artifacts.ts           # Artifact CRUD + search_artifacts, patch_artifact, status lifecycle
     search.ts              # search_context (hybrid), reindex
     search-aliases.ts      # Query alias expansion for semantic search
     entities.ts            # Entity seed loading + context_envelope generation
@@ -235,7 +236,7 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `embeddings` — UUID PK, content_type + content_id (unique), content_text, embedding (vector(768)), metadata (JSONB). HNSW index for cosine similarity (m=16, ef_construction=128). FTS index on content_text.
 - `notes` — UUID PK, title, content, scope, domain, tags (text[]), source_url, related_task_ids (uuid[]), timestamps. FTS on title+content. Lifecycle columns (migration 013): `status` (`active` | `superseded`; CHECK), `superseded_by` (self-FK, NO ACTION, `DEFERRABLE INITIALLY IMMEDIATE`), `superseded_at`, `valid_until`, `provenance` (CHECK over the five values, nullable), `version` (INTEGER, trigger-owned). CHECKs: superseded ⇔ `superseded_by` set ⇔ `superseded_at` set; no self-supersede. `expired` is never stored — computed as `status='active' AND valid_until <= now()`. Trigger `notes_version_history` (BEFORE UPDATE) bumps `version` and writes a `note_versions` row on every effective update; a no-op UPDATE is a true no-op (no bump, no history, `updated_at` unchanged).
 - `note_versions` — PK (`note_id`, `version`); `snapshot` (JSONB of the row as it was at that version, minus id/version/created_at), `changed_fields` (text[]), `changed_via` (writer name from the transaction-local GUC `app.changed_via`, `'sql'` when unset), `changed_at`. Cascades with the note. Not a sync entity (never in `/sync/changes`); exported/imported.
-- `artifacts` — UUID PK, title, content, artifact_type, status (enum), scope, tags (text[]), pointer (JSONB), dependencies (uuid[]), execution_order (integer, unique per type), related_task_ids (uuid[]), metadata (JSONB), timestamps. FTS on title+content. `content_hash` (SHA-256 hex string) is auto-computed server-side and stored inside `metadata` whenever `content` is provided on `store_artifact` or `update_artifact`. The server-computed hash overrides any caller-supplied value. The hash is cleared on revert to `draft`. The tool layer strips any caller-supplied `content_hash` from metadata updates on all statuses when content is not changing in the same call. On promotion to a locked status, content_hash is recomputed from current row content if missing from metadata.
+- `artifacts` — UUID PK, title, content, artifact_type, status (enum), scope, tags (text[]), pointer (JSONB), dependencies (uuid[]), execution_order (integer, unique per type), related_task_ids (uuid[]), metadata (JSONB), timestamps. FTS on title+content. `content_hash` (SHA-256 hex string) is auto-computed server-side and stored inside `metadata` whenever `content` is provided on `store_artifact` or `update_artifact`. The server-computed hash overrides any caller-supplied value. The hash is kept on revert to `draft`. The tool layer strips any caller-supplied `content_hash` from metadata updates on all statuses when content is not changing in the same call. On promotion to a locked status, content_hash is recomputed from current row content if missing from metadata.
 - `entities` — Entity knowledge base for context_envelope generation. Seeded from deployment-local JSON.
 - `entity_nodes` — Canonical extracted entities, deduplicated across extraction runs. UNIQUE(canonical_name, entity_type), mention counting, first/last seen timestamps.
 - `entity_relations` — Knowledge graph triples (source → relation_type → target) with confidence, provider attribution, and back-reference to the source content item.
@@ -325,7 +326,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 **Multi-stage build** (`Dockerfile`):
 1. Builder stage: `node:22-slim`, `npm ci`, `tsc`, extract version to `/tmp/version.txt`.
-2. Production stage: `node:22-slim`, non-root `appuser` (UID 999), `npm ci --omit=dev`, copy `dist/` and migration SQL files. Injects `APP_VERSION` env var so the server reads version without filesystem access to package.json.
+2. Production stage: `node:22-slim`, non-root `appuser` (UID 999), `npm ci --omit=dev`, copy `dist/` and migration SQL files. Bakes the `APP_VERSION` build arg into the image env (see Environment Variables for who sets it).
 
 **Compose stacking** (additive overlays):
 - `docker-compose.yml` — Base: context-library container, binds `127.0.0.1:3100`, mounts `./data`.
@@ -342,9 +343,8 @@ All workflows are in `.github/workflows/`. Action SHAs are pinned. Every workflo
 
 - **`ci.yml`** — Trigger for pull_request and push to main. Calls `ci-checks.yml`. Its check reports as `ci / ci`, which the `main` ruleset requires before merging. This is the only place `ci-checks.yml` runs: do not call it again from another workflow, chain on `ci` with `workflow_run` instead.
 - **`ci-checks.yml`** — Reusable workflow. On PRs it first runs `actions/dependency-review-action`, which fails on any added or upgraded package with a HIGH/CRITICAL advisory (runtime or dev) before install spends minutes; then `npm ci` + `npm run build` + `npm test` against a Postgres service container (pgvector/pgvector:pg16). Notifies via ntfy. Merge gates on `main`: the `ci / ci` check (so dependency review) and a ruleset `code_scanning` rule blocking new HIGH+ CodeQL alerts (CodeQL is GitHub default setup, not a workflow file). After merge, Trivy in `image.yml` scans the image's OS and npm packages, and Dependabot alerts cover `package-lock.json`.
-- **`image.yml`** — Triggered by `workflow_run` when `ci` completes on main; runs only if that run succeeded and was a push in this repo. Checks out `workflow_run.head_sha` (the commit ci tested; `GITHUB_SHA` would be the branch head at trigger time), builds Docker image, Trivy container scan (HIGH/CRITICAL, fixed CVEs only, no account needed), pushes `sha-<short>` tagged image to GHCR. Because it is `workflow_run`, changes to this file take effect only once they are on main.
-- **`release.yml`** — On `v*` tag push or workflow_dispatch: promotes a SHA-tagged image to version tag + `latest` (skips latest for prereleases), creates GitHub Release with auto-generated notes, notifies via ntfy.
-- **`version-bump.yml`** — workflow_dispatch only. Takes a `bump_type` (patch/minor/major) or a `custom_version` override. Bumps `package.json`, verifies the build is clean, commits the change to a `chore/version-bump-X.Y.Z` branch, and opens a PR to main. Uses a personal access token so that merging the PR triggers `ci` normally, and `image.yml` after it (GITHUB_TOKEN pushes do not trigger downstream workflows).
+- **`image.yml`** — Triggered by `workflow_run` when `ci` completes on main; runs only if that run succeeded and was a push in this repo. Checks out `workflow_run.head_sha` (the commit ci tested; `GITHUB_SHA` would be the branch head at trigger time), builds Docker image with `APP_VERSION=0.0.0-sha.<short>` (unreleased), Trivy container scan (HIGH/CRITICAL, fixed CVEs only, no account needed), pushes `sha-<short>` tagged image to GHCR. Because it is `workflow_run`, changes to this file take effect only once they are on main.
+- **`release.yml`** — The one-button release, workflow_dispatch only (there is no tag-push trigger; the workflow creates the tag). Inputs: `bump` (patch/minor/major from the latest `vX.Y.Z` tag), optional exact `version` (prereleases contain `-` and do not move `latest`), optional `source_sha`, and `dry_run`. It picks the newest main commit with a `sha-<short>` image (warning about newer commits it skipped), re-scans that exact digest with Trivy using current vulnerability data, stamps the version onto it with a `FROM <digest>` + `ENV APP_VERSION` + OCI labels build (no code layers change), starts it and requires `/health` to report the new version, writes the release files (Trivy JSON report at all severities, CycloneDX SBOM, and `RELEASE_NOTES.md` from `.github/scripts/release-notes.mjs`: changes grouped by conventional-commit prefix since the previous stable tag; "fixed in this release" from a Trivy scan of the previous release's image diffed against this one with the same data, plus code scanning alerts closed in the window; vulnerabilities new since the previous image; scan summary; image digest), then pushes `<version>` (+ `latest`), creates the tag and GitHub Release with the notes as its body and the three files attached, and notifies via ntfy. `security-events: read` covers code scanning alerts; `GITHUB_TOKEN` cannot read Dependabot alerts, so that list appears only when the optional `DEPENDABOT_ALERTS_TOKEN` secret (fine-grained, Dependabot alerts read) is set. A real release must be dispatched from main; dry runs may use another branch's workflow and upload the files as a run artifact. Tests are not re-run: the code is what passed ci at merge. It refuses to overwrite a published version unless the existing image was stamped from the same commit (finishing a half-done release). `dry_run` stops before pushing.
 - **`cleanup.yml`** — Cleans up old container images and stale resources.
 
 CI does NOT validate Docker Compose configuration or startup. Run `scripts/test-compose.sh` locally before merging changes to any `docker-compose*.yml` file.
@@ -364,7 +364,7 @@ Key variables:
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.
 - `ENTITY_EXTRACTION_ENABLED` (default: `false`) — Enable background entity graph extraction on handoff/note writes. Related: `ENTITY_EXTRACTION_PROVIDER` (`ollama`/`api`/`none`), `ENTITY_EXTRACTION_ASYNC`, `ENTITY_MIN_CONFIDENCE`, `ENTITY_EXTRACTION_TIMEOUT_MS`, `OLLAMA_BASE_URL`, `OLLAMA_EXTRACTION_MODEL`, `ENTITY_API_KEY`, `ENTITY_API_BASE_URL`, `ENTITY_API_MODEL`, `ENTITY_API_FORMAT`. See the README env var tables for defaults.
-- `APP_VERSION` — Injected by Docker build; falls back to reading package.json at runtime.
+- `APP_VERSION` — The version `/health`, MCP server info and export manifests report. `image.yml` bakes `0.0.0-sha.<short>` into every build and `release.yml` stamps the release version onto the released image. Unset (running from source), it falls back to `package.json`, whose version is frozen at `0.0.0-development`: releases are git tags and image stamps, never a `package.json` bump.
 
 ## Development
 
@@ -384,7 +384,7 @@ Server starts on `http://localhost:3100`. MCP endpoint at `/mcp`. Health at `/he
 ```json
 {
   "status": "ok",       // string — always "ok" when the server is up
-  "version": "0.10.0", // string — semver from package.json / APP_VERSION env var
+  "version": "0.13.0", // string — APP_VERSION env var (release or 0.0.0-sha.<short>); 0.0.0-development from source
   "uptime": 42          // integer — seconds since process start
 }
 ```

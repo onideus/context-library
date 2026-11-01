@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { query } from "../db/client.js";
 import { withTransaction, appendChange } from "../db/changes.js";
 import { indexArtifact } from "../embeddings/indexer.js";
+import { applyEdits } from "./note-edits.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -212,14 +213,46 @@ Concurrent status transitions are gated by a conditional UPDATE. When status is 
 Pipeline metadata contract (cc-prompt artifacts):
 - 'target_repo' — REQUIRED for pipeline-consumed artifacts. An interceptor watching for ready cc-prompts will demote any artifact missing this key back to draft. If you promote to ready without target_repo set, expect the artifact to be demoted; add it via metadata: {target_repo: "..."} in the same update or an earlier one.
 - 'target_org' — optional, defaults per interceptor config.
-- 'content_hash' — SHA-256 of 'content', auto-computed server-side. Callers must NOT supply it — any supplied value is stripped from metadata updates before merge. On promotion to a locked status ('ready'/'executing'/'completed'), the hash is recomputed from the effective content. Reverting to 'draft' clears the hash. The interceptor verifies this hash at execution time.
+- 'content_hash' — SHA-256 of 'content', auto-computed server-side. Callers must NOT supply it — any supplied value is stripped from metadata updates before merge. On promotion to a locked status ('ready'/'executing'/'completed'), the hash is recomputed from the effective content. Reverting to 'draft' keeps the hash (the artifact still has content). The interceptor verifies this hash at execution time.
 - 'branch_target' (DEPRECATED) — kept one release for reader compatibility; prefer 'target_repo'.
 
 Integrity:
 - 'execution_order' must be unique within an 'artifact_type'. Moving an artifact onto an already-used slot returns EXECUTION_ORDER_CONFLICT.
 - 'dependencies' UUIDs are validated at write time. Pass an empty array to clear; any non-empty array must reference existing artifacts or returns VALIDATION_ERROR.
 
-Re-embeds when title, content, tags, or artifact_type change.`;
+Re-embeds when title, content, tags, or artifact_type change.
+
+For small edits to the content of a large artifact, prefer patch_artifact (exact-text replace) — it avoids resending the full content.`;
+
+const PATCH_ARTIFACT_DESC = `Edit an artifact's content by replacing exact spans of text, without resending the whole body. Prefer this over update_artifact for content changes that touch a small part of a large artifact (fixing a paragraph of a long prompt, updating a value in a spec, rewording a section of a report) — update_artifact requires the complete new content, costs tokens for the entire artifact, and risks silently changing text you didn't mean to touch.
+
+Do NOT use this to change title, tags, metadata, status, scope, pointer, or execution_order, or to replace most of the content — use update_artifact for those.
+
+Workflow: call get_artifact first so every old_str is copied exactly from the current content, and pass its metadata.content_hash as expected_content_hash.
+
+Parameters:
+- id (required): UUID of the artifact to edit.
+- edits (required, 1–50 items): ordered list of {old_str, new_str, replace_all?}. Edits apply in order, each against the result of the previous one, so a later edit can match text an earlier edit inserted. All edits apply or none do.
+  - old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
+  - new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
+  - replace_all (optional, default false): when true, replace every occurrence (at least one must exist); when false, old_str must occur exactly once.
+- expected_content_hash (optional): the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous patch_artifact response). Enforced whenever present; omit for last-writer-wins.
+
+Locked artifacts: content of an artifact in 'ready', 'executing', or 'completed' is immutable, exactly as with update_artifact. Move it back to 'draft' with update_artifact first. 'draft' and 'superseded' artifacts can be patched; the status is unchanged.
+
+Content hash: metadata.content_hash (SHA-256 of content) is recomputed server-side from the patched content, as update_artifact does. There is no way to supply it. Every other metadata key is preserved.
+
+Errors (returned as {error: true, message, code, ...}):
+- NOT_FOUND — no artifact with that id.
+- CANNOT_MODIFY_LOCKED_ARTIFACT — the artifact is 'ready', 'executing', or 'completed'. Nothing is written.
+- VALIDATION_ERROR — the artifact has no inline content (pointer-only), an old_str is empty, or the edits would leave the content empty (an artifact must keep content or a pointer). Nothing is written.
+- VERSION_CONFLICT — expected_content_hash does not match: the content changed since you read it, so nothing is written. current_content_hash is the hash as it is now — re-read with get_artifact, copy old_str from the current content, and retry. Checked before matching, so it takes precedence over NO_MATCH / AMBIGUOUS_MATCH.
+- NO_MATCH — the edit at edit_index (zero-based) does not occur in the content as it stands after the earlier edits (match_count: 0). Nothing is written. Re-read with get_artifact and copy the text exactly.
+- AMBIGUOUS_MATCH — the edit at edit_index occurs match_count times and replace_all is false. Nothing is written. Widen old_str with surrounding text until it is unique, or pass replace_all: true.
+
+If the edits leave the content identical (every new_str equal to its old_str), the call is a no-op: changed is false and nothing is written.
+
+Returns a compact confirmation WITHOUT the content: {id, title, status, changed, content_hash, previous_content_hash, replacements, content_length, updated_at}. replacements lists the number of occurrences replaced by each edit, in order; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Re-embeds the artifact for search when the content changed.`;
 
 const SEARCH_ARTIFACTS_DESC = `Full-text search across artifact titles and content using PostgreSQL FTS with English stemming. Returns matching artifacts WITH full content (unlike list_artifacts), ranked by relevance.
 
@@ -796,6 +829,203 @@ export function registerArtifactTools(mcpServer: McpServer): void {
         }
         return errorResponse((err as Error).message, "DB_ERROR");
       }
+    }
+  );
+
+  // ── patch_artifact ───────────────────────────────────────────
+  mcpServer.tool(
+    "patch_artifact",
+    PATCH_ARTIFACT_DESC,
+    {
+      id: z.string().describe("UUID of the artifact to edit"),
+      edits: z
+        .array(
+          z.object({
+            old_str: z
+              .string()
+              .min(1)
+              .describe("Exact text to find (literal, case- and whitespace-sensitive, not a regex)"),
+            new_str: z
+              .string()
+              .describe("Replacement text, inserted verbatim. Empty string deletes old_str"),
+            replace_all: z
+              .boolean()
+              .optional()
+              .describe("Replace every occurrence instead of requiring exactly one (default false)"),
+          })
+        )
+        .min(1)
+        .max(50)
+        .describe("Ordered edits (1–50), each applied to the result of the previous one. All apply or none do."),
+      expected_content_hash: z.string().optional().describe(
+        "Optimistic-concurrency precondition: the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous patch_artifact). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns current_content_hash. Omit for last-writer-wins."
+      ),
+    },
+    async (args) => {
+      if (!UUID_RE.test(args.id)) {
+        return errorResponse(`Artifact not found: ${args.id}`, "NOT_FOUND");
+      }
+
+      type PatchOutcome =
+        | { kind: "error"; body: Record<string, unknown> }
+        | {
+            kind: "ok";
+            row: ArtifactRow;
+            changed: boolean;
+            previousHash: string;
+            replacements: number[];
+          };
+
+      let outcome: PatchOutcome;
+      try {
+        outcome = await withTransaction(async (client): Promise<PatchOutcome> => {
+          const locked = await client.query<ArtifactRow>(
+            "SELECT * FROM artifacts WHERE id = $1 FOR UPDATE",
+            [args.id]
+          );
+          if (locked.rows.length === 0) {
+            return {
+              kind: "error",
+              body: { error: true, message: `Artifact not found: ${args.id}`, code: "NOT_FOUND" },
+            };
+          }
+          const current = locked.rows[0];
+
+          if (LOCKED_STATUSES.has(current.status)) {
+            return {
+              kind: "error",
+              body: {
+                error: true,
+                message: `Cannot modify content of a locked artifact (status: ${current.status})`,
+                code: "CANNOT_MODIFY_LOCKED_ARTIFACT",
+              },
+            };
+          }
+
+          if (typeof current.content !== "string" || current.content.length === 0) {
+            return {
+              kind: "error",
+              body: {
+                error: true,
+                message: "Artifact has no inline content to patch (it is pointer-only). Use update_artifact to set content.",
+                code: "VALIDATION_ERROR",
+              },
+            };
+          }
+
+          const storedHash = current.metadata?.content_hash;
+          const currentHash =
+            typeof storedHash === "string" ? storedHash : computeContentHash(current.content);
+
+          // A stale hash means old_str was copied from content that has since
+          // changed, so it outranks NO_MATCH / AMBIGUOUS_MATCH.
+          if (
+            args.expected_content_hash !== undefined &&
+            args.expected_content_hash !== currentHash
+          ) {
+            return {
+              kind: "error",
+              body: {
+                error: true,
+                message: "Artifact content changed since expected_content_hash was read. Call get_artifact and retry against the current content.",
+                code: "VERSION_CONFLICT",
+                current_content_hash: currentHash,
+              },
+            };
+          }
+
+          const result = applyEdits(current.content, args.edits);
+          if (!result.ok) {
+            const message =
+              result.code === "NO_MATCH"
+                ? `edits[${result.edit_index}].old_str was not found in the artifact content (after applying earlier edits). Call get_artifact and copy the text exactly.`
+                : `edits[${result.edit_index}].old_str matches ${result.match_count} times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.`;
+            return {
+              kind: "error",
+              body: {
+                error: true,
+                message,
+                code: result.code,
+                edit_index: result.edit_index,
+                match_count: result.match_count,
+              },
+            };
+          }
+
+          if (result.content === current.content) {
+            return {
+              kind: "ok",
+              row: current,
+              changed: false,
+              previousHash: currentHash,
+              replacements: result.replacements,
+            };
+          }
+
+          // Whitespace-only counts as empty, matching store_artifact/update_artifact.
+          if (result.content.trim().length === 0) {
+            return {
+              kind: "error",
+              body: {
+                error: true,
+                message: "Edits would leave the artifact content empty; an artifact must keep content or a pointer. Use update_artifact to replace content with a pointer.",
+                code: "VALIDATION_ERROR",
+              },
+            };
+          }
+
+          // Same content_hash rule as update_artifact: server-computed from the
+          // new content and merged into metadata, every other key preserved.
+          const upd = await client.query<ArtifactRow>(
+            `UPDATE artifacts SET content = $1, metadata = metadata || $2::jsonb WHERE id = $3 RETURNING *`,
+            [
+              result.content,
+              JSON.stringify({ content_hash: computeContentHash(result.content) }),
+              args.id,
+            ]
+          );
+          await appendChange(client, "artifact", args.id, "update");
+          return {
+            kind: "ok",
+            row: upd.rows[0],
+            changed: true,
+            previousHash: currentHash,
+            replacements: result.replacements,
+          };
+        });
+      } catch (err) {
+        return errorResponse((err as Error).message, "DB_ERROR");
+      }
+
+      if (outcome.kind === "error") return jsonResponse(outcome.body);
+
+      const { row, changed, previousHash, replacements } = outcome;
+      if (changed) {
+        indexArtifact(row.id, {
+          title: row.title,
+          content: row.content,
+          artifact_type: row.artifact_type,
+          tags: row.tags,
+          status: row.status,
+          scope: row.scope,
+          created_at: row.created_at,
+        }).catch((err) =>
+          console.warn("[patch_artifact] Background indexing failed:", (err as Error).message)
+        );
+      }
+
+      const content = row.content ?? "";
+      return jsonResponse({
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        changed,
+        content_hash: changed ? computeContentHash(content) : previousHash,
+        previous_content_hash: previousHash,
+        replacements,
+        content_length: content.length,
+        updated_at: row.updated_at,
+      });
     }
   );
 }

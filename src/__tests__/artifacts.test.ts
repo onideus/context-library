@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import { spawnServer, stopServer } from "./helpers/spawn-server.js";
 import { rm, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 /**
@@ -70,6 +71,24 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
   expect(res.status).toBe(200);
   const data = (await parseSseResponse(res)) as any;
   return JSON.parse(data.result.content[0].text);
+}
+
+// Direct DB access for states the tools cannot produce (legacy rows, etc.).
+async function withDb<T>(fn: (client: import("pg").Client) => Promise<T>): Promise<T> {
+  const pg = await import("pg");
+  const client = new pg.default.Client({
+    host: PG_HOST,
+    port: parseInt(PG_PORT),
+    user: PG_USER,
+    password: PG_PASSWORD,
+    database: PG_DATABASE,
+  });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
 }
 
 async function checkPostgres(): Promise<boolean> {
@@ -169,6 +188,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     expect(toolNames).toContain("list_artifacts");
     expect(toolNames).toContain("search_artifacts");
     expect(toolNames).toContain("update_artifact");
+    expect(toolNames).toContain("patch_artifact");
   });
 
   describe("store_artifact", () => {
@@ -1032,6 +1052,346 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       });
       expect(repromoted.status).toBe("ready");
       expect(repromoted.metadata.content_hash).toBe(originalHash);
+    });
+  });
+
+  describe("patch_artifact", () => {
+    const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+    async function storeDraft(content: string, extra: Record<string, unknown> = {}) {
+      return callTool("store_artifact", {
+        title: "Patch target",
+        artifact_type: "cc-prompt",
+        scope: "work",
+        content,
+        ...extra,
+      });
+    }
+
+    it("patches a draft: content and content_hash updated, other metadata kept, no content echoed", async () => {
+      const created = await storeDraft("Acme Corp report\nStatus: pending\nOwner: Jane Developer", {
+        metadata: { target_repo: "project-alpha", extra_key: "keep-me" },
+      });
+      const before = await callTool("get_artifact", { id: created.id });
+
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "Status: pending", new_str: "Status: done" }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(true);
+      expect(result.replacements).toEqual([1]);
+      expect(result.status).toBe("draft");
+      expect(result.title).toBe("Patch target");
+      expect(result).not.toHaveProperty("content");
+      expect(result.previous_content_hash).toBe(before.metadata.content_hash);
+
+      const expected = "Acme Corp report\nStatus: done\nOwner: Jane Developer";
+      expect(result.content_hash).toBe(sha256(expected));
+      expect(result.content_length).toBe(expected.length);
+
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.content).toBe(expected);
+      expect(after.metadata.content_hash).toBe(sha256(expected));
+      expect(after.metadata.target_repo).toBe("project-alpha");
+      expect(after.metadata.extra_key).toBe("keep-me");
+      expect(result.updated_at).toBe(after.updated_at);
+    });
+
+    it("applies multiple edits in order", async () => {
+      const created = await storeDraft("alpha beta gamma");
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [
+          { old_str: "alpha", new_str: "ALPHA" },
+          { old_str: "ALPHA beta", new_str: "first second" },
+          { old_str: "a", new_str: "4", replace_all: true },
+        ],
+      });
+      expect(result.replacements).toEqual([1, 1, 2]);
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.content).toBe("first second g4mm4");
+    });
+
+    it("is atomic: a failing later edit writes nothing", async () => {
+      const created = await storeDraft("one two three");
+      const before = await callTool("get_artifact", { id: created.id });
+
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [
+          { old_str: "one", new_str: "1" },
+          { old_str: "four", new_str: "4" },
+        ],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NO_MATCH");
+      expect(result.edit_index).toBe(1);
+      expect(result.match_count).toBe(0);
+
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.content).toBe("one two three");
+      expect(after.metadata.content_hash).toBe(before.metadata.content_hash);
+      expect(after.updated_at).toBe(before.updated_at);
+    });
+
+    it("returns AMBIGUOUS_MATCH with match_count", async () => {
+      const created = await storeDraft("x and x");
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "x", new_str: "y" }],
+      });
+      expect(result.code).toBe("AMBIGUOUS_MATCH");
+      expect(result.edit_index).toBe(0);
+      expect(result.match_count).toBe(2);
+    });
+
+    it("returns NOT_FOUND for a non-existent artifact", async () => {
+      const result = await callTool("patch_artifact", {
+        id: "00000000-0000-0000-0000-000000000000",
+        edits: [{ old_str: "a", new_str: "b" }],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("NOT_FOUND");
+    });
+
+    for (const status of ["ready", "executing", "completed"]) {
+      it(`rejects a '${status}' artifact with CANNOT_MODIFY_LOCKED_ARTIFACT`, async () => {
+        const created = await storeDraft("locked body", { status: "ready" });
+        if (status !== "ready") {
+          await callTool("update_artifact", { id: created.id, status: "executing" });
+        }
+        if (status === "completed") {
+          await callTool("update_artifact", { id: created.id, status: "completed" });
+        }
+        const before = await callTool("get_artifact", { id: created.id });
+        expect(before.status).toBe(status);
+
+        const result = await callTool("patch_artifact", {
+          id: created.id,
+          edits: [{ old_str: "locked", new_str: "changed" }],
+        });
+        expect(result.error).toBe(true);
+        expect(result.code).toBe("CANNOT_MODIFY_LOCKED_ARTIFACT");
+
+        const after = await callTool("get_artifact", { id: created.id });
+        expect(after.content).toBe("locked body");
+        expect(after.metadata.content_hash).toBe(before.metadata.content_hash);
+      });
+    }
+
+    it("rejects a pointer-only artifact with VALIDATION_ERROR", async () => {
+      const created = await callTool("store_artifact", {
+        title: "Pointer-only patch",
+        artifact_type: "research",
+        scope: "work",
+        pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.md" },
+      });
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "a", new_str: "b" }],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+    });
+
+    it("succeeds when expected_content_hash matches", async () => {
+      const created = await storeDraft("hash guarded");
+      const before = await callTool("get_artifact", { id: created.id });
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "guarded", new_str: "checked" }],
+        expected_content_hash: before.metadata.content_hash,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(true);
+      expect(result.content_hash).toBe(sha256("hash checked"));
+    });
+
+    it("returns VERSION_CONFLICT on a stale expected_content_hash and writes nothing", async () => {
+      const created = await storeDraft("stale guard");
+      const before = await callTool("get_artifact", { id: created.id });
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "stale", new_str: "fresh" }],
+        expected_content_hash: FAKE_HASH,
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VERSION_CONFLICT");
+      expect(result.current_content_hash).toBe(before.metadata.content_hash);
+
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.content).toBe("stale guard");
+      expect(after.updated_at).toBe(before.updated_at);
+    });
+
+    it("VERSION_CONFLICT takes precedence over NO_MATCH", async () => {
+      const created = await storeDraft("precedence");
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "absent", new_str: "x" }],
+        expected_content_hash: FAKE_HASH,
+      });
+      expect(result.code).toBe("VERSION_CONFLICT");
+    });
+
+    it("returns changed: false and writes nothing for a no-op patch", async () => {
+      const created = await storeDraft("same text");
+      const before = await callTool("get_artifact", { id: created.id });
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "same", new_str: "same" }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(false);
+      expect(result.replacements).toEqual([1]);
+      expect(result.content_hash).toBe(before.metadata.content_hash);
+      expect(result.previous_content_hash).toBe(before.metadata.content_hash);
+
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.updated_at).toBe(before.updated_at);
+    });
+
+    it("rejects an edit that would empty the content", async () => {
+      const created = await storeDraft("everything");
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "everything", new_str: "" }],
+      });
+      expect(result.error).toBe(true);
+      expect(result.code).toBe("VALIDATION_ERROR");
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.content).toBe("everything");
+    });
+
+    it("patches a superseded artifact (mirrors update_artifact)", async () => {
+      const created = await storeDraft("retired body");
+      await callTool("update_artifact", { id: created.id, status: "superseded" });
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "retired", new_str: "archived" }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe("superseded");
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.content).toBe("archived body");
+      expect(after.metadata.content_hash).toBe(sha256("archived body"));
+    });
+
+    it("a patched draft promoted to ready carries the hash of the patched content", async () => {
+      const created = await storeDraft("draft v1", { metadata: { target_repo: "project-alpha" } });
+      await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "v1", new_str: "v2" }],
+      });
+      const promoted = await callTool("update_artifact", { id: created.id, status: "ready" });
+      expect(promoted.status).toBe("ready");
+      expect(promoted.metadata.content_hash).toBe(sha256("draft v2"));
+    });
+
+    it("offers no way to set content_hash: no parameter, and a stray key is ignored", async () => {
+      const res = await mcpPost(jsonrpc("tools/list"));
+      const data = (await parseSseResponse(res)) as any;
+      const tool = data.result.tools.find((t: any) => t.name === "patch_artifact");
+      expect(Object.keys(tool.inputSchema.properties).sort()).toEqual(
+        ["edits", "expected_content_hash", "id"]
+      );
+
+      const created = await storeDraft("caller hash");
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "caller", new_str: "server" }],
+        content_hash: FAKE_HASH,
+      });
+      expect(result.content_hash).toBe(sha256("server hash"));
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.metadata.content_hash).toBe(sha256("server hash"));
+    });
+
+    it("bumps updated_at on a successful patch", async () => {
+      const created = await storeDraft("timestamp body");
+      const before = await callTool("get_artifact", { id: created.id });
+      await new Promise((r) => setTimeout(r, 10));
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "timestamp", new_str: "bumped" }],
+      });
+      expect(result.changed).toBe(true);
+      expect(new Date(result.updated_at).getTime()).toBeGreaterThan(
+        new Date(before.updated_at).getTime()
+      );
+    });
+
+    it("no-op on a whitespace-only artifact returns changed: false, not VALIDATION_ERROR", async () => {
+      const created = await storeDraft("placeholder");
+      await withDb((c) =>
+        c.query("UPDATE artifacts SET content = '   ' WHERE id = $1", [created.id])
+      );
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: " ", new_str: " ", replace_all: true }],
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.changed).toBe(false);
+    });
+
+    it("falls back to hashing the content when no content_hash is stored", async () => {
+      const created = await storeDraft("legacy body");
+      await withDb((c) =>
+        c.query("UPDATE artifacts SET metadata = metadata - 'content_hash' WHERE id = $1", [
+          created.id,
+        ])
+      );
+
+      const conflict = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "legacy", new_str: "x" }],
+        expected_content_hash: FAKE_HASH,
+      });
+      expect(conflict.code).toBe("VERSION_CONFLICT");
+      expect(conflict.current_content_hash).toBe(sha256("legacy body"));
+
+      const result = await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "legacy", new_str: "current" }],
+        expected_content_hash: sha256("legacy body"),
+      });
+      expect(result.changed).toBe(true);
+      expect(result.previous_content_hash).toBe(sha256("legacy body"));
+      expect(result.content_hash).toBe(sha256("current body"));
+      const after = await callTool("get_artifact", { id: created.id });
+      expect(after.metadata.content_hash).toBe(sha256("current body"));
+    });
+
+    for (const [label, edits] of [
+      ["an empty old_str", [{ old_str: "", new_str: "x" }]],
+      ["zero edits", []],
+      ["51 edits", Array.from({ length: 51 }, () => ({ old_str: "a", new_str: "a" }))],
+    ] as const) {
+      it(`rejects ${label} at schema validation and writes nothing`, async () => {
+        const created = await storeDraft("schema guard a");
+        const before = await callTool("get_artifact", { id: created.id });
+        const res = await mcpPost(
+          jsonrpc("tools/call", { name: "patch_artifact", arguments: { id: created.id, edits } })
+        );
+        const data = (await parseSseResponse(res)) as any;
+        expect(data.error !== undefined || data.result?.isError === true).toBe(true);
+
+        const after = await callTool("get_artifact", { id: created.id });
+        expect(after.content).toBe("schema guard a");
+        expect(after.updated_at).toBe(before.updated_at);
+      });
+    }
+
+    it("leaves update_artifact usable after a patch (re-reads current content)", async () => {
+      const created = await storeDraft("first");
+      await callTool("patch_artifact", {
+        id: created.id,
+        edits: [{ old_str: "first", new_str: "second" }],
+      });
+      const updated = await callTool("update_artifact", { id: created.id, title: "Renamed" });
+      expect(updated.content).toBe("second");
+      expect(updated.metadata.content_hash).toBe(sha256("second"));
     });
   });
 
