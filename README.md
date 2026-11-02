@@ -119,6 +119,8 @@ Here Context Library is the caller: it sends your content to a model to extract 
 
 **Additional tools:** `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations`
 
+These six tools are registered only when `ENTITY_TOOLS` resolves on. The default, `auto`, turns them on when `ENTITY_EXTRACTION_ENABLED` or `ENTITY_GRAPH_ENABLED` is `true`, or `ENTITY_EXTRACTION_PROVIDER` is set to anything other than `none` (the `docker-compose.entities.yml` overlay sets it to `ollama` unless you override it). **Upgrading:** if you use the entity tools without setting any of those, set `ENTITY_TOOLS=true` to keep them; to hide them despite a configured provider, set `ENTITY_TOOLS=false`.
+
 ## Architecture
 
 - **Server:** Hono 4.x + StreamableHTTP MCP transport (Node.js 22, TypeScript)
@@ -169,18 +171,20 @@ The reference implementation is private. What is documented here is the pattern 
 | `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
 | `edit_artifact` | Postgres | Exact-match edits to an artifact's content (ordered, all-or-nothing) without resending the whole body; draft/superseded only; recomputes `content_hash` |
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types; superseded notes redirect to their successor, expired notes are hidden (`include_superseded` / `include_expired` opt out) |
-| `extract_entities` | Entities | Trigger entity extraction on a single content item |
-| `create_extraction_run` | Entities | Batch-extract entities from multiple content items |
-| `compare_extraction_runs` | Entities | Compare two extraction runs (e.g., different providers or models) |
-| `list_extraction_runs` | Entities | List recent entity extraction runs with stats |
-| `list_entities` | Entities | Browse the extracted entity graph with type and name filters |
-| `get_entity_relations` | Entities | Retrieve the relation graph for a specific entity |
+| `extract_entities` | Entities¹ | Trigger entity extraction on a single content item |
+| `create_extraction_run` | Entities¹ | Batch-extract entities from multiple content items |
+| `compare_extraction_runs` | Entities¹ | Compare two extraction runs (e.g., different providers or models) |
+| `list_extraction_runs` | Entities¹ | List recent entity extraction runs with stats |
+| `list_entities` | Entities¹ | Browse the extracted entity graph with type and name filters |
+| `get_entity_relations` | Entities¹ | Retrieve the relation graph for a specific entity |
+
+¹ Registered only when `ENTITY_TOOLS` resolves on (see [Tier 4](#tier-4--entity-extraction-knowledge-graph)).
 
 Tool names follow one convention: `verb_noun` in snake_case (`create_`, `get_`, `list_`, `search_`, `update_`, `edit_`, `append_`, `delete_`, plus a few domain verbs such as `supersede_` and `prune_`).
 
 ### Renamed tools
 
-Nine tools were renamed. The old names still work as deprecated aliases for **one release** and are removed in the next one; each alias call logs `[deprecated-tool] <old> called; use <new>`. Set `LEGACY_TOOL_NAMES=false` to preview the removal — it also brings the tool count down from 43 to 34, which matters for clients that warn when a server offers around 40 tools. `reindex` is no longer an MCP tool (no alias): use `npm run reindex`.
+Nine tools were renamed. The old names still work as deprecated aliases for **one release** and are removed in the next one; each alias call logs `[deprecated-tool] <old> called; use <new>`. Set `LEGACY_TOOL_NAMES=false` to preview the removal — it also brings the tool count down from 43 to 34 with the entity tools registered, or from 33 to 28 without them (see `ENTITY_TOOLS`), which matters for clients that warn when a server offers around 40 tools. `reindex` is no longer an MCP tool (no alias): use `npm run reindex`.
 
 | Old name | New name |
 |---|---|
@@ -392,9 +396,18 @@ Reference: [Open WebUI MCP documentation](https://docs.openwebui.com/features/mc
 
 #### Model and context requirements
 
-Every tool is registered on every server, whatever tier you deploy, so the tool list a client loads is always the same size. Measured at v0.13.0, the `tools/list` response for all 35 tools is about 93,000 characters, roughly **23K tokens**. Tool descriptions change between releases, so treat this as approximate.
+Every tool except the six entity-graph tools is registered on every server, whatever tier you deploy; the entity tools are registered only when `ENTITY_TOOLS` resolves on (see [Tier 4](#tier-4--entity-extraction-knowledge-graph)). The size of the `tools/list` response a client loads therefore depends on two settings. Measured when `ENTITY_TOOLS` was added, after v0.13.0:
 
-- **Context window.** A model needs a context window of at least about 23K tokens just to hold the tool list, before any conversation. Your messages and the tool results come on top of that, so configure well above it; 32K tokens is a practical floor and more is better. LM Studio and Ollama both default to context windows smaller than many models support. The context length is a setting in each: set it explicitly when you load the model.
+| `LEGACY_TOOL_NAMES` | Entity tools | Tools | `tools/list` size |
+|---|---|---|---|
+| `true` (default) | on | 43 | about 104,000 characters, roughly 26K tokens |
+| `true` (default) | off | 33 | about 93,000 characters, roughly 23K tokens |
+| `false` | on | 34 | about 93,000 characters, roughly 23K tokens |
+| `false` | off | 28 | about 85,000 characters, roughly **21K tokens** |
+
+Tool descriptions change between releases, so treat these as approximate.
+
+- **Context window.** A model needs a context window of at least about 21K–26K tokens (depending on the configuration above) just to hold the tool list, before any conversation. Your messages and the tool results come on top of that, so configure well above it; 32K tokens is a practical floor and more is better. LM Studio and Ollama both default to context windows smaller than many models support. The context length is a setting in each: set it explicitly when you load the model.
 - **Tool calling.** The model must support tool calling. Small models often call tools poorly: wrong tool, malformed arguments, or no call at all. The tool descriptions in this server are long by design (each is a self-contained briefing for a model with no prior context), which favors larger models.
 
 ### Other MCP Clients
@@ -654,7 +667,7 @@ See `.env.example` for all configuration options.
 | `DATA_DIR` | `./data` | Handoff file storage path |
 | `RETENTION_COUNT` | `0` | Max handoff files to retain (`0` = unlimited) |
 | `COMPACTION_MODE` | `archive` | How the superseded handoff is treated after a store: `archive` (keep a byte-exact original in `handoffs/archive/`), `off` (never rewrite), `in-place` (legacy, lossy) |
-| `LEGACY_TOOL_NAMES` | `true` | Also register the nine pre-rename tool names as deprecated aliases (see [Renamed tools](#renamed-tools)); removed in the next release. `false` previews that and lowers the tool count from 43 to 34 |
+| `LEGACY_TOOL_NAMES` | `true` | Also register the nine pre-rename tool names as deprecated aliases (see [Renamed tools](#renamed-tools)); removed in the next release. `false` previews that and lowers the tool count from 43 to 34 with the entity tools registered, or from 33 to 28 without them (`ENTITY_TOOLS`) |
 | `NOTE_HISTORY_MAX_VERSIONS` | `0` | Max prior versions kept per note in `note_versions` (`0` = unlimited); `prune_note_history` is the per-note manual control |
 | `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
 | `LOG_RESPONSE_BODIES` | `false` | Include response bodies in the per-request `/mcp` response logs (debugging only; bodies contain user content) |
@@ -690,6 +703,7 @@ See `.env.example` for all configuration options.
 
 | Variable | Default | Description |
 |---|---|---|
+| `ENTITY_TOOLS` | `auto` | Register the six entity-graph tools: `true`, `false`, or `auto` (on when `ENTITY_EXTRACTION_ENABLED` or `ENTITY_GRAPH_ENABLED` is `true`, or `ENTITY_EXTRACTION_PROVIDER` is not `none`). Other values warn and behave as `auto` |
 | `ENTITY_EXTRACTION_ENABLED` | `false` | Enable background entity extraction on handoff/note writes |
 | `ENTITY_EXTRACTION_PROVIDER` | `none` | Extraction provider: `ollama`, `api`, or `none` |
 | `ENTITY_EXTRACTION_ASYNC` | `true` | Run extraction fire-and-forget (recommended) |

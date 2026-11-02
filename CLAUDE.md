@@ -63,7 +63,7 @@ All four content layers are built and deployed.
 
 ### Entity Graph (Tier 4, optional)
 
-Not a fifth content primitive — a knowledge graph extracted *from* the four layers. When `ENTITY_EXTRACTION_ENABLED=true`, handoff and note writes trigger fire-and-forget extraction of entity triples (subject → relation → object) via a configured provider (Ollama, Anthropic/OpenAI-compatible API, or MCP sampling). Stored in `entity_nodes`/`entity_relations`/`extraction_runs` (migration `009_entity_graph.sql`). Tools: `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations`. The server also registers MCP prompts (`session_start`, `architect`, `plan`) as workflow entry points.
+Not a fifth content primitive — a knowledge graph extracted *from* the four layers. When `ENTITY_EXTRACTION_ENABLED=true`, handoff and note writes trigger fire-and-forget extraction of entity triples (subject → relation → object) via a configured provider (Ollama, Anthropic/OpenAI-compatible API, or MCP sampling). Stored in `entity_nodes`/`entity_relations`/`extraction_runs` (migration `009_entity_graph.sql`). Tools: `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations` — registered only when `ENTITY_TOOLS` resolves on (see Environment Variables); background extraction and graph retrieval do not depend on it. The server also registers MCP prompts (`session_start`, `architect`, `plan`) as workflow entry points.
 
 ## Tool Design
 
@@ -96,7 +96,10 @@ Authoring agents that produce `cc-prompt` artifacts for pipeline consumption mus
 ```
 src/
   server.ts                # Hono app, CORS, health, MCP route, startup/shutdown
-  config.ts                # All env var reads, centralized defaults
+  mcp-server.ts            # createMcpServer() factory + version; side-effect-free on import
+                           #   (no listen, migrations, providers or DB connection), so tests
+                           #   build the real server in memory
+  config.ts                # All env var reads, centralized defaults; resolveEntityToolsEnabled
   storage/
     json-store.ts          # File I/O for handoffs + archiveHandoff (pre-compaction copy)
     schemas.ts             # Zod HandoffSchema + Handoff type
@@ -176,6 +179,8 @@ src/
   __tests__/
     helpers/
       spawn-server.ts      # spawnServer/stopServer/runScriptSync: cross-platform tsx child processes
+      in-memory-tools.ts   # listToolsInMemory: real createMcpServer() tools/list over an SDK
+                           #   in-memory transport (no server process, no Postgres)
     server.test.ts         # Integration: server spawn + HTTP
     merge.test.ts          # Unit: mergeHandoff logic
     indexer.test.ts        # Unit: text extraction + chunking
@@ -185,7 +190,12 @@ src/
     tasks.test.ts          # Integration: task CRUD (Postgres-gated)
     tool-aliases.test.ts   # Alias table + registerTool (unit); tools/list with and without
                            #   LEGACY_TOOL_NAMES, alias calls vs new names (servers spawned;
-                           #   artifact aliases Postgres-gated)
+                           #   artifact aliases Postgres-gated); both servers set ENTITY_TOOLS=true
+    tool-budget.test.ts    # Ratchet: tools/list size (legacy off/on), description sum and longest
+                           #   description must not exceed the constants at the top; lower them
+                           #   when descriptions shrink, raise only with a stated reason
+    entity-tools-gate.test.ts  # Unit: resolveEntityToolsEnabled; in-memory: entity tools and
+                           #   aliases listed only when ENTITY_TOOLS resolves on
     notes.test.ts          # Integration: note CRUD + partial edits (Postgres-gated);
                            #   note-edits helpers ungated
     note-lifecycle.test.ts # Integration: supersede_note, get_note_history, prune_note_history,
@@ -398,12 +408,13 @@ Key variables:
 - `MCP_PORT` (default: `3100`) — Server port.
 - `DATA_DIR` (default: `./data`) — Handoff file storage path.
 - `RETENTION_COUNT` (default: `0`, unlimited) — Max handoff files to retain before pruning oldest. Never applies to `handoffs/archive/`.
-- `LEGACY_TOOL_NAMES` (default: `true`) — Also register the nine pre-rename tool names as deprecated aliases (see "Tool naming"). Removed in the next release; `false` previews that and lowers the tool count from 43 to 34 (some clients warn near 40). Only the literal `false` turns it off.
+- `LEGACY_TOOL_NAMES` (default: `true`) — Also register the nine pre-rename tool names as deprecated aliases (see "Tool naming"). Removed in the next release; `false` previews that and lowers the tool count from 43 to 34 with the entity tools registered, or from 33 to 28 without them (`ENTITY_TOOLS`); some clients warn near 40. Only the literal `false` turns it off.
 - `COMPACTION_MODE` (default: `archive`) — What happens to the handoff a `create_handoff` supersedes. `archive` copies the byte-exact original to `DATA_DIR/handoffs/archive/` before rewriting it; `off` never rewrites (the archival-deployment setting); `in-place` is the legacy lossy rewrite. Unrecognised values fall back to `archive` with a warning — a typo must never select the destructive path.
 - `NOTE_HISTORY_MAX_VERSIONS` (default: `0`, unlimited) — Max `note_versions` rows kept per note; trimmed after each versioned write. `prune_note_history` is the per-note manual control.
 - `CORS_ORIGINS` (default: `https://claude.ai,https://claude.com`) — Comma-separated allowed origins.
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.
+- `ENTITY_TOOLS` (default: `auto`) — Register the six entity-graph tools and their deprecated aliases. `true` / `false` force it; `auto` (also unset or empty) turns them on when `ENTITY_EXTRACTION_ENABLED` or `ENTITY_GRAPH_ENABLED` is `true` or `ENTITY_EXTRACTION_PROVIDER` is anything but `none`. Other values warn once per process and behave as `auto`. Pure resolver `resolveEntityToolsEnabled`; `config.entityToolsEnabled` is a getter that reads the environment at access time.
 - `ENTITY_EXTRACTION_ENABLED` (default: `false`) — Enable background entity graph extraction on handoff/note writes. Related: `ENTITY_EXTRACTION_PROVIDER` (`ollama`/`api`/`none`), `ENTITY_EXTRACTION_ASYNC`, `ENTITY_MIN_CONFIDENCE`, `ENTITY_EXTRACTION_TIMEOUT_MS`, `OLLAMA_BASE_URL`, `OLLAMA_EXTRACTION_MODEL`, `ENTITY_API_KEY`, `ENTITY_API_BASE_URL`, `ENTITY_API_MODEL`, `ENTITY_API_FORMAT`. See the README env var tables for defaults.
 - `APP_VERSION` — The version `/health`, MCP server info and export manifests report. `image.yml` bakes `0.0.0-sha.<short>` into every build and `release.yml` stamps the release version onto the released image. Unset (running from source), it falls back to `package.json`, whose version is frozen at `0.0.0-development`: releases are git tags and image stamps, never a `package.json` bump.
 
