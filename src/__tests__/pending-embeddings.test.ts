@@ -203,5 +203,78 @@ describe.skipIf(!pgAvailable)("Pending Embeddings Queue", () => {
     expect(drain.errors).toBe(1);
     expect(drain.processed).toBe(0);
     expect(drain.remaining).toBe(0);
+    expect(drain.dropped).toBe(1);
+  });
+
+  it("drainPendingEmbeddings with skipHandoffs leaves handoff rows alone", async () => {
+    const { query } = await import("../db/client.js");
+    const { drainPendingEmbeddings } = await import("../embeddings/indexer.js");
+
+    // Oldest first: three handoff rows whose files do not exist, then two note
+    // rows whose notes do not exist (dropped when drained).
+    await query(
+      `INSERT INTO pending_embeddings (content_type, content_id, created_at) VALUES
+         ('handoff', 'missing-a.json', now() - interval '3 hours'),
+         ('handoff', 'missing-b.json', now() - interval '3 hours'),
+         ('handoff', 'missing-c.json', now() - interval '3 hours')`
+    );
+    await query(
+      `INSERT INTO pending_embeddings (content_type, content_id, created_at) VALUES
+         ('note', '00000000-0000-4000-8000-000000000001', now() - interval '2 hours'),
+         ('note', '00000000-0000-4000-8000-000000000002', now() - interval '1 hour')`
+    );
+    const handoffRows = async () =>
+      (
+        await query<{ content_id: string }>(
+          `SELECT content_id FROM pending_embeddings WHERE content_type = 'handoff' ORDER BY content_id`
+        )
+      ).rows.map((r) => r.content_id);
+
+    // Batch of one: the handoff rows are excluded in the select, so they do not
+    // use it up — the oldest note row is drained (dropped), one note row remains.
+    const first = await drainPendingEmbeddings(1, { skipHandoffs: true });
+    expect(first).toEqual({ processed: 0, remaining: 1, errors: 1, dropped: 1, failures: [] });
+    expect(await handoffRows()).toEqual(["missing-a.json", "missing-b.json", "missing-c.json"]);
+
+    const second = await drainPendingEmbeddings(20, { skipHandoffs: true });
+    expect(second).toEqual({ processed: 0, remaining: 0, errors: 1, dropped: 1, failures: [] });
+
+    // Only handoff rows left: the early "nothing selected" return still counts
+    // non-handoff rows only.
+    const third = await drainPendingEmbeddings(20, { skipHandoffs: true });
+    expect(third).toEqual({ processed: 0, remaining: 0, errors: 0, dropped: 0, failures: [] });
+    expect(await handoffRows()).toEqual(["missing-a.json", "missing-b.json", "missing-c.json"]);
+
+    // The default call keeps today's behaviour: it deletes them, reported as dropped.
+    const all = await drainPendingEmbeddings();
+    expect(all.errors).toBe(3);
+    expect(all.dropped).toBe(3);
+    expect(all.processed).toBe(0);
+    expect(all.remaining).toBe(0);
+    expect(await handoffRows()).toEqual([]);
+  });
+
+  it("drainPendingEmbeddings reports a row that failed to embed in failures, not dropped", async () => {
+    const { query } = await import("../db/client.js");
+    const { drainPendingEmbeddings } = await import("../embeddings/indexer.js");
+
+    const filename = "drain-failure-detail.json";
+    await writeFile(
+      join(TEST_DATA_DIR, "handoffs", filename),
+      JSON.stringify({ stored_at: "2026-04-17T10:00:00Z", tone_notes: "embed me" }),
+      "utf-8"
+    );
+    await query(`INSERT INTO pending_embeddings (content_type, content_id) VALUES ('handoff', $1)`, [
+      filename,
+    ]);
+
+    // EMBEDDING_URL points at 127.0.0.1:1 → connectivity error → row stays queued.
+    const drain = await drainPendingEmbeddings();
+    expect(drain.errors).toBe(1);
+    expect(drain.dropped).toBe(0);
+    expect(drain.remaining).toBe(1);
+    expect(drain.failures).toHaveLength(1);
+    expect(drain.failures[0]).toMatchObject({ content_type: "handoff", content_id: filename });
+    expect(drain.failures[0].error).toBeTruthy();
   });
 });

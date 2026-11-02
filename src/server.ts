@@ -1,17 +1,9 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { config } from "./config.js";
-import { registerHandoffTools } from "./tools/handoff.js";
-import { registerHandoffNavTools } from "./tools/handoff-nav.js";
-import { registerTaskTools } from "./tools/tasks.js";
-import { registerNoteTools } from "./tools/notes.js";
-import { registerArtifactTools } from "./tools/artifacts.js";
-import { registerSearchTools } from "./tools/search.js";
-import { registerPrompts } from "./tools/prompts.js";
-import { registerEntityTools } from "./tools/entity-tools.js";
+import { createMcpServer, version } from "./mcp-server.js";
 import { registerSyncRoutes } from "./sync/routes.js";
 import { registerProvider } from "./entities/registry.js";
 import { createOllamaProviderFromConfig } from "./entities/providers/ollama.js";
@@ -21,22 +13,9 @@ import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/client.js";
 import { backfillHandoffChanges } from "./db/changes.js";
 import { isEmbeddingAvailable } from "./embeddings/client.js";
-import { readFileSync } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-
-// Read version: prefer APP_VERSION env var, fall back to package.json
-function getVersion(): string {
-  if (process.env.APP_VERSION) return process.env.APP_VERSION;
-  try {
-    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-const version = getVersion();
 
 const app = new Hono();
 
@@ -131,22 +110,8 @@ app.get("/health/ready", async (c) => {
 registerSyncRoutes(app);
 
 // ── MCP transport route (authenticated) ─────────────────────
-// Factory for stateless MCP server instances (one per request, per SDK pattern)
-function createMcpServer(): McpServer {
-  const server = new McpServer({
-    name: config.serverName,
-    version,
-  });
-  registerHandoffTools(server);
-  registerHandoffNavTools(server);
-  registerTaskTools(server);
-  registerNoteTools(server);
-  registerArtifactTools(server);
-  registerSearchTools(server);
-  registerEntityTools(server);
-  registerPrompts(server);
-  return server;
-}
+// One stateless McpServer per request, built by createMcpServer() in
+// mcp-server.ts.
 
 /**
  * Extract the SSE `data:` payload from a buffered MCP response body so we

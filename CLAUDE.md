@@ -63,7 +63,7 @@ All four content layers are built and deployed.
 
 ### Entity Graph (Tier 4, optional)
 
-Not a fifth content primitive — a knowledge graph extracted *from* the four layers. When `ENTITY_EXTRACTION_ENABLED=true`, handoff and note writes trigger fire-and-forget extraction of entity triples (subject → relation → object) via a configured provider (Ollama, Anthropic/OpenAI-compatible API, or MCP sampling). Stored in `entity_nodes`/`entity_relations`/`extraction_runs` (migration `009_entity_graph.sql`). Tools: `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations`. The server also registers MCP prompts (`session_start`, `architect`, `plan`) as workflow entry points.
+Not a fifth content primitive — a knowledge graph extracted *from* the four layers. When `ENTITY_EXTRACTION_ENABLED=true`, handoff and note writes trigger fire-and-forget extraction of entity triples (subject → relation → object) via a configured provider (Ollama, Anthropic/OpenAI-compatible API, or MCP sampling). Stored in `entity_nodes`/`entity_relations`/`extraction_runs` (migration `009_entity_graph.sql`). Tools: `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations` — registered only when `ENTITY_TOOLS` resolves on (see Environment Variables); background extraction and graph retrieval do not depend on it. The server also registers MCP prompts (`session_start`, `architect`, `plan`) as workflow entry points.
 
 ## Tool Design
 
@@ -96,7 +96,10 @@ Authoring agents that produce `cc-prompt` artifacts for pipeline consumption mus
 ```
 src/
   server.ts                # Hono app, CORS, health, MCP route, startup/shutdown
-  config.ts                # All env var reads, centralized defaults
+  mcp-server.ts            # createMcpServer() factory + version; side-effect-free on import
+                           #   (no listen, migrations, providers or DB connection), so tests
+                           #   build the real server in memory
+  config.ts                # All env var reads, centralized defaults; resolveEntityToolsEnabled
   storage/
     json-store.ts          # File I/O for handoffs + archiveHandoff (pre-compaction copy)
     schemas.ts             # Zod HandoffSchema + Handoff type
@@ -176,15 +179,23 @@ src/
   __tests__/
     helpers/
       spawn-server.ts      # spawnServer/stopServer/runScriptSync: cross-platform tsx child processes
+      in-memory-tools.ts   # listToolsInMemory: real createMcpServer() tools/list over an SDK
+                           #   in-memory transport (no server process, no Postgres)
     server.test.ts         # Integration: server spawn + HTTP
     merge.test.ts          # Unit: mergeHandoff logic
     indexer.test.ts        # Unit: text extraction + chunking
+    indexer-outcomes.test.ts  # Unit: indexed/queued/lost per item, indexAll* counts (mocked DB/TEI)
     search-dedup.test.ts   # Unit: deduplication
     search-aliases.test.ts # Unit: alias expansion
     tasks.test.ts          # Integration: task CRUD (Postgres-gated)
     tool-aliases.test.ts   # Alias table + registerTool (unit); tools/list with and without
                            #   LEGACY_TOOL_NAMES, alias calls vs new names (servers spawned;
-                           #   artifact aliases Postgres-gated)
+                           #   artifact aliases Postgres-gated); both servers set ENTITY_TOOLS=true
+    tool-budget.test.ts    # Ratchet: tools/list size (legacy off/on), description sum and longest
+                           #   description must not exceed the constants at the top; lower them
+                           #   when descriptions shrink, raise only with a stated reason
+    entity-tools-gate.test.ts  # Unit: resolveEntityToolsEnabled; in-memory: entity tools and
+                           #   aliases listed only when ENTITY_TOOLS resolves on
     notes.test.ts          # Integration: note CRUD + partial edits (Postgres-gated);
                            #   note-edits helpers ungated
     note-lifecycle.test.ts # Integration: supersede_note, get_note_history, prune_note_history,
@@ -222,7 +233,8 @@ scripts/
   export.ts                # npm run export — tarball + per-table JSONL + manifest
   import.ts                # npm run import — restore + re-embed queue
   reindex.ts               # npm run reindex — rebuild the embeddings index (operator)
-  reindex.test.ts          # Unit: argument rules, handoff guard, call order (no DB/TEI)
+  reindex.test.ts          # Unit: argument rules, handoff guard, call order, failure rule (fake deps);
+                           #   process runs against unreachable ports / an empty DATA_DIR (no DB/TEI)
   portability/
     tables.ts              # Shared table registry (columns, orderBy, casts)
     rows.ts                # buildInsert: JSONL row → INSERT (absent column → DEFAULT)
@@ -243,7 +255,22 @@ The `scripts/` directory contains tooling for one-off operations, data migration
 - `portability/` — Shared library for `export.ts` and `import.ts`. `tables.ts` is the single source of truth for which Postgres tables ship in an export, in what column order, sorted by which key, with which per-column type casts on restore. `io.ts` holds JSONL / tar helpers (system `tar` is shelled out to; no Node tar dependency). `manifest.ts` defines the manifest shape.
 - `extract-entities.ts` — Reads handoff JSON files from the configured data directory, batches them to the Anthropic API for entity extraction, and writes/merges a draft `entities.seed.json` for human review. Idempotent: an existing seed file is merged, preserving human-edited constraints. Exposed as `npm run extract-entities`. Requires `ANTHROPIC_API_KEY`.
 - `rehydrate-handoffs.ts` — Reconstructs the text of compacted handoffs from the chunks embedded before compaction ran. Only touches files `audit-compaction.ts` classifies RECOVERABLE. `--dry-run` is the DEFAULT; `--write` emits, `--force` regenerates. Output is a sidecar at `DATA_DIR/handoffs/archive/<filename>.recovered.json` — the compacted file itself is never modified. Honest limitation, stated in the script header, the recovered record, and its report: `extractHandoffText` flattened the handoff to prose before chunking, so this restores the TEXT of `active_context`, not its key structure; chunk seams are marked rather than guessed. Exposed as `npm run rehydrate-handoffs`.
-- `reindex.ts` — Rebuilds the semantic search index; formerly the `reindex` MCP tool, now an operator action with no MCP alias. Runs from a source checkout like `export`/`import` (the image ships `dist/` only): `EMBEDDING_URL`, the `PG*` variables and `DATA_DIR` must point at the deployment — e.g. `localhost` with the host ports your compose file publishes for the embedding server and Postgres. Checks the embedding server first (unreachable → exit 1, before any database access), drains `pending_embeddings`, then re-embeds and prints the counts. With no flags it reindexes tasks, notes and artifacts and says it skipped handoffs; `--types` narrows to a subset. Handoffs need BOTH `--types` including `handoff` AND `--include-handoffs`; `--types handoff` alone exits 2 before touching anything, printing the Cross-Layer Search warning (reindexing compacted handoffs overwrites their only recovery copy). Exits non-zero on any failure (including handoff index errors) and always calls `pool.end()`. Exposed as `npm run reindex`.
+- `reindex.ts` — Rebuilds the semantic search index; formerly the `reindex` MCP tool, now an operator action with no MCP alias. Exposed as `npm run reindex`.
+  - **Where it runs:** from a source checkout like `export`/`import` (the image ships `dist/` only). `EMBEDDING_URL`, the `PG*` variables and `DATA_DIR` must point at the deployment — e.g. `localhost` with the host ports your compose file publishes for the embedding server and Postgres (a checkout's `.env` is loaded and can set them).
+  - **Flags:** with no flags it reindexes tasks, notes and artifacts and says it skipped handoffs; `--types` narrows to a subset. Handoffs need BOTH `--types` including `handoff` AND `--include-handoffs`; `--types handoff` alone exits 2 before touching anything, printing the Cross-Layer Search warning (reindexing compacted handoffs overwrites their only recovery copy).
+  - **Order of steps:**
+    1. When handoffs are requested, checks that `DATA_DIR/handoffs` is a readable directory with at least one `*.json` file (otherwise exit 1, naming the resolved path, before any network or database access).
+    2. Checks the embedding server (unreachable → exit 1, before any database access).
+    3. Runs `SELECT 1` (unreachable → exit 1, naming the `PG*` variables, before any drain or index work).
+    4. Drains one batch of `pending_embeddings` with `drainPendingEmbeddings(…, { skipHandoffs: true })` — always, whatever the flags, so handoff rows are excluded in the select and never read or deleted from a checkout whose `DATA_DIR` may be wrong (they are what keeps an unembedded handoff from being compacted; the server drains them).
+    5. Re-embeds and prints per-type `indexed`/`queued`/`failed` counts (handoffs: `indexed`/`skipped`/`queued`/`errors`).
+  - **Exit 1** (`success: false` plus a `failures` list in the JSON summary) when:
+    - any requested type has `queued + failed > 0` (handoffs: `queued + errors > 0`) — an item queued instead of embedded, a 4xx, a database error or a failed enqueue all count;
+    - the drain could not read the queue;
+    - the drain reports `errors - dropped > 0`. Each failed row is printed with `content_type`, `content_id` and last error; a row that keeps failing is cleared by hand with `DELETE FROM pending_embeddings WHERE content_type = … AND content_id = …`, as there is no retry cap;
+    - a step throws.
+
+    Rows the drain dropped because their source no longer exists are warnings, not failures. Usage errors exit 2. Always calls `pool.end()`.
 - `merge-entities.ts` — Pure merge logic for the entity seeding pipeline. Extracted from `extract-entities.ts` for testability. Not directly runnable.
 - `extract-entities.test.ts` — Test suite for the extraction and merge logic (lives in `scripts/`, not `src/__tests__/`).
 - `test-compose.sh` — Validates every supported Docker Compose stacking combination via `docker compose config -q`. Run before opening a PR that touches any `docker-compose*.yml` file (CI does not validate compose).
@@ -264,7 +291,7 @@ Migrations live in `src/db/migrations/` as numbered `.sql` files. The runner (`s
 - `entity_nodes` — Canonical extracted entities, deduplicated across extraction runs. UNIQUE(canonical_name, entity_type), mention counting, first/last seen timestamps.
 - `entity_relations` — Knowledge graph triples (source → relation_type → target) with confidence, provider attribution, and back-reference to the source content item.
 - `extraction_runs` — One row per extraction invocation: provider, model, status, counts, timing. Enables compare_extraction_runs across providers/models.
-- `pending_embeddings` — Dead letter queue for embeddings that failed during TEI outages. Drained on startup, on the next successful search_context, and by `npm run reindex`.
+- `pending_embeddings` — Dead letter queue for embeddings that failed during TEI outages. Drained on startup and on the next successful search_context (all rows, handoffs included). `npm run reindex` drains one batch of task, note and artifact rows only — never handoff rows, which it cannot be sure it reads from the deployment's `DATA_DIR` — and fails the run if a drained row fails to embed.
 - `changes` — Append-only sync change log (see "Sync foundation" below). BIGSERIAL `seq` is the authoritative cursor; `changed_at` is display-only. One row per mutation to tasks/notes/artifacts (same transaction) and to handoffs (fire-and-forget best-effort). Tombstone rows for deletes.
 - `sync_op_log` — Server-side dedupe of client push ops. UNIQUE(op_uuid) so replays return the earlier outcome without re-applying.
 - `_migrations` — filename PK, applied_at timestamp.
@@ -324,7 +351,7 @@ The `/sync/*` HTTP endpoints are NOT MCP tools. The iOS Phase 1a client can't pa
 
 **TEI endpoint:** OpenAI-compatible `/v1/embeddings`. Health check via `/health` with 2-second timeout.
 
-**Graceful degradation:** `isEmbeddingAvailable()` checks TEI health before every search operation (and `scripts/reindex.ts` before it touches the database). If unavailable, returns `EMBEDDING_UNAVAILABLE` error with guidance to use `search_tasks` instead. Indexing on store/patch is fire-and-forget (`.catch()` logs warning, never blocks the tool response).
+**Graceful degradation:** `isEmbeddingAvailable()` checks TEI health before every search operation (and `scripts/reindex.ts` before it touches the database). If unavailable, returns `EMBEDDING_UNAVAILABLE` error with guidance to use `search_tasks` instead. Indexing on create/update is fire-and-forget (`.catch()` logs warning, never blocks the tool response).
 
 **Chunking:** `extractHandoffText` recursively walks JSON objects, producing labeled `key: value` lines. Skips structural keys (stored_at, schema_version, etc.) and structural values (UUIDs, ISO timestamps, semver). `chunkText` splits at ~2000 chars on double-newline > single-newline > sentence boundaries. Undersized trailing chunks merge into previous.
 
@@ -381,12 +408,13 @@ Key variables:
 - `MCP_PORT` (default: `3100`) — Server port.
 - `DATA_DIR` (default: `./data`) — Handoff file storage path.
 - `RETENTION_COUNT` (default: `0`, unlimited) — Max handoff files to retain before pruning oldest. Never applies to `handoffs/archive/`.
-- `LEGACY_TOOL_NAMES` (default: `true`) — Also register the nine pre-rename tool names as deprecated aliases (see "Tool naming"). Removed in the next release; `false` previews that and lowers the tool count from 43 to 34 (some clients warn near 40). Only the literal `false` turns it off.
+- `LEGACY_TOOL_NAMES` (default: `true`) — Also register the nine pre-rename tool names as deprecated aliases (see "Tool naming"). Removed in the next release; `false` previews that and lowers the tool count from 43 to 34 with the entity tools registered, or from 33 to 28 without them (`ENTITY_TOOLS`); some clients warn near 40. Only the literal `false` turns it off.
 - `COMPACTION_MODE` (default: `archive`) — What happens to the handoff a `create_handoff` supersedes. `archive` copies the byte-exact original to `DATA_DIR/handoffs/archive/` before rewriting it; `off` never rewrites (the archival-deployment setting); `in-place` is the legacy lossy rewrite. Unrecognised values fall back to `archive` with a warning — a typo must never select the destructive path.
 - `NOTE_HISTORY_MAX_VERSIONS` (default: `0`, unlimited) — Max `note_versions` rows kept per note; trimmed after each versioned write. `prune_note_history` is the per-note manual control.
 - `CORS_ORIGINS` (default: `https://claude.ai,https://claude.com`) — Comma-separated allowed origins.
 - `EMBEDDING_URL` (default: `http://embeddings:80`) — TEI server endpoint.
 - `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` — Model config for TEI.
+- `ENTITY_TOOLS` (default: `auto`) — Register the six entity-graph tools and their deprecated aliases. `true` / `false` force it; `auto` (also unset or empty) turns them on when `ENTITY_EXTRACTION_ENABLED` or `ENTITY_GRAPH_ENABLED` is `true` or `ENTITY_EXTRACTION_PROVIDER` is anything but `none`. Other values warn once per process and behave as `auto`. Pure resolver `resolveEntityToolsEnabled`; `config.entityToolsEnabled` is a getter that reads the environment at access time.
 - `ENTITY_EXTRACTION_ENABLED` (default: `false`) — Enable background entity graph extraction on handoff/note writes. Related: `ENTITY_EXTRACTION_PROVIDER` (`ollama`/`api`/`none`), `ENTITY_EXTRACTION_ASYNC`, `ENTITY_MIN_CONFIDENCE`, `ENTITY_EXTRACTION_TIMEOUT_MS`, `OLLAMA_BASE_URL`, `OLLAMA_EXTRACTION_MODEL`, `ENTITY_API_KEY`, `ENTITY_API_BASE_URL`, `ENTITY_API_MODEL`, `ENTITY_API_FORMAT`. See the README env var tables for defaults.
 - `APP_VERSION` — The version `/health`, MCP server info and export manifests report. `image.yml` bakes `0.0.0-sha.<short>` into every build and `release.yml` stamps the release version onto the released image. Unset (running from source), it falls back to `package.json`, whose version is frozen at `0.0.0-development`: releases are git tags and image stamps, never a `package.json` bump.
 
