@@ -18,6 +18,13 @@ export interface ToolsListOptions {
  * set for the call and restored afterwards.
  */
 export async function listToolsInMemory(opts: ToolsListOptions): Promise<Tool[]> {
+  return (await connectInMemory(opts)).tools;
+}
+
+/** listToolsInMemory plus the server `instructions` from the initialize response. */
+export async function connectInMemory(
+  opts: ToolsListOptions
+): Promise<{ tools: Tool[]; instructions: string | undefined }> {
   // config is a plain mutable object; if it is ever Object.freeze()d, this
   // assignment throws (ESM modules are strict) and the helper needs another way in.
   const mutableConfig = config as { legacyToolNames: boolean };
@@ -34,7 +41,7 @@ export async function listToolsInMemory(opts: ToolsListOptions): Promise<Tool[]>
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     const { tools } = await client.listTools();
-    return tools;
+    return { tools, instructions: client.getInstructions() };
   } finally {
     await client.close();
     await server.close();

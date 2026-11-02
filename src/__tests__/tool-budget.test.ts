@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { TOOL_ALIASES } from "../tools/tool-aliases.js";
-import { listToolsInMemory } from "./helpers/in-memory-tools.js";
+import { connectInMemory, listToolsInMemory } from "./helpers/in-memory-tools.js";
 
 /**
  * tools/list payload budget.
@@ -54,5 +54,34 @@ describe("tools/list payload budget", () => {
     expect(longest.length, `longest description: ${longest.name}`).toBeLessThanOrEqual(
       MAX_SINGLE_DESCRIPTION
     );
+  });
+});
+
+/** Server instructions length cap (fixed; clients that show them add it on top of tools/list). */
+const MAX_INSTRUCTIONS_CHARS = 6_000;
+
+/** A token in the instructions that looks like a tool name. */
+const TOOL_NAME_TOKEN =
+  /\b(create|get|list|search|update|edit|append|delete|supersede|prune|extract|compare)_[a-z_]+\b/g;
+
+describe("server instructions", () => {
+  it(`are non-empty and within ${MAX_INSTRUCTIONS_CHARS} chars`, async () => {
+    const { instructions } = await connectInMemory({ legacyToolNames: false, entityTools: "true" });
+    expect(instructions?.trim().length ?? 0).toBeGreaterThan(0);
+    expect(instructions!.length).toBeLessThanOrEqual(MAX_INSTRUCTIONS_CHARS);
+  });
+
+  it("name only tools that are always registered, never a deprecated alias", async () => {
+    const { tools, instructions } = await connectInMemory({ legacyToolNames: true, entityTools: "false" });
+    const registered = new Set(tools.map((t) => t.name));
+    const named = [...(instructions ?? "").matchAll(TOOL_NAME_TOKEN)].map((m) => m[0]);
+    expect(named.length).toBeGreaterThan(0);
+    for (const name of named) {
+      expect(name in TOOL_ALIASES, name).toBe(false);
+      expect(registered.has(name), name).toBe(true);
+    }
+    for (const oldName of Object.keys(TOOL_ALIASES)) {
+      expect(instructions!.includes(oldName), oldName).toBe(false);
+    }
   });
 });
