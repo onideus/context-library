@@ -497,7 +497,8 @@ export async function getPendingEmbeddingsCount(): Promise<number> {
 /**
  * Count queued rows other than handoffs. Used for `remaining` when a drain runs with
  * `skipHandoffs`. Returns 0 if the table doesn't exist yet or Postgres is unavailable,
- * like getPendingEmbeddingsCount.
+ * like getPendingEmbeddingsCount, but logs a warning so a failed count is not mistaken
+ * for an empty queue.
  */
 async function getPendingNonHandoffCount(): Promise<number> {
   try {
@@ -505,7 +506,11 @@ async function getPendingNonHandoffCount(): Promise<number> {
       `SELECT count(*)::text AS count FROM pending_embeddings WHERE content_type <> 'handoff'`
     );
     return Number(result.rows[0]?.count ?? 0);
-  } catch {
+  } catch (err) {
+    console.warn(
+      "[indexer] Could not count pending embeddings, reporting remaining=0:",
+      (err as Error).message
+    );
     return 0;
   }
 }

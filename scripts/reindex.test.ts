@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -311,6 +311,39 @@ describe("scripts/reindex.ts as a process", () => {
       expect(res.status).toBe(1);
       expect(res.stderr).toContain(resolve(dataDir, "handoffs"));
       expect(res.stderr).toContain("DATA_DIR");
+      expect(res.stderr).not.toContain("Embedding server");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 1 for handoffs when DATA_DIR has no handoffs directory, before the embedding server", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "cl-reindex-"));
+    try {
+      const res = runScriptSync("scripts/reindex.ts", ["--types", "handoff", "--include-handoffs"], {
+        ...env,
+        DATA_DIR: dataDir,
+      });
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain(resolve(dataDir, "handoffs"));
+      expect(res.stderr).toContain("does not exist");
+      expect(res.stderr).not.toContain("Embedding server");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 1 for handoffs when DATA_DIR/handoffs is a file, before the embedding server", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "cl-reindex-"));
+    try {
+      writeFileSync(join(dataDir, "handoffs"), "");
+      const res = runScriptSync("scripts/reindex.ts", ["--types", "handoff", "--include-handoffs"], {
+        ...env,
+        DATA_DIR: dataDir,
+      });
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain(resolve(dataDir, "handoffs"));
+      expect(res.stderr).toContain("is not a directory");
       expect(res.stderr).not.toContain("Embedding server");
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
