@@ -130,7 +130,9 @@ describe("tool description contract", () => {
         expect(text, tool.name).toContain("DO NOT CALL WHEN:");
         expect(text, tool.name).toContain("CONSEQUENCE OF SKIPPING:");
       } else {
-        expect(text.includes("CALL THIS WHEN"), tool.name).toBe(false);
+        for (const label of ["CALL THIS WHEN", "DO NOT CALL WHEN", "CONSEQUENCE OF SKIPPING"]) {
+          expect(text.includes(label), `${tool.name}: ${label}`).toBe(false);
+        }
       }
     }
   });

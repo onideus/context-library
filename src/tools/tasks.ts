@@ -99,9 +99,9 @@ const LIST_TASKS_DESC = `List tasks by filter. Defaults: status 'open', all scop
 
 Returns: tasks[] (full tasks), total_count, limit, offset.`;
 
-const UPDATE_TASK_DESC = `Change a task. Sent fields replace the stored values, omitted ones are kept; tags replaces the whole list. null clears only priority, blocked_reason, scheduled_date or due_date.
+const UPDATE_TASK_DESC = `Change a task. Sent fields replace the stored values, omitted ones are kept; tags replaces the whole list. Send null to clear priority, blocked_reason, scheduled_date or due_date; action null means no action.
 
-action: 'complete' (sets completed_at, clears blocked_reason), 'cancel' (clears blocked_reason), 'defer', 'reopen' (open again, clears completed_at).
+action: 'complete' (sets completed_at, clears blocked_reason), 'cancel' (clears blocked_reason), 'defer' (sets status deferred only), 'reopen' (open again, clears completed_at).
 
 expected_status is checked only when the action changes status: on mismatch nothing is written and STATUS_CONFLICT returns current.
 

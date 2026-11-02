@@ -381,14 +381,14 @@ CALL THIS WHEN: a session starts (always first); before create_handoff or update
 DO NOT CALL WHEN: you need an older session (list_handoffs, then get_handoff).
 CONSEQUENCE OF SKIPPING: you miss open tasks, repeat finished work, or contradict the recorded state.
 
-- session_continuity: 'resume' = state is live; 'cold_start' = closed with final=true over 15 minutes ago, treat as history; 'unknown' = no valid timestamp.
+- session_continuity: 'resume' = state is live; 'cold_start' = closed with final=true 15+ minutes ago, treat as history; 'unknown' = no valid timestamp.
 - same_calendar_day=false: operational_state is from an earlier day; confirm it first.
 - task_summary and artifact_summary are live and authoritative over task or artifact text in the handoff.
 - Read and apply tone_notes before responding.
 - embedding_status.available=false: semantic search is offline; use search_tasks.
 - scope 'work' or 'personal' removes fields, listed in filtered_fields.
 
-Returns the handoff fields plus the fields above, elapsed_seconds, session_closed, handoff_count, next_step and other metadata. NOT_FOUND if none exists.`;
+Returns the handoff fields plus filename (update_handoff's expected_source), the fields above, elapsed_seconds, session_closed, handoff_count, next_step and other metadata. NOT_FOUND if none exists.`;
 
 const PATCH_HANDOFF_DESCRIPTION = `Change part of the latest handoff, saved as a new handoff (the source is kept). Read first with get_latest_handoff.
 
@@ -396,7 +396,7 @@ The merge is one level deep. tone_notes, timezone: replaced when given. operatio
 
 final=true closes the session (it may be the only field); a call without it reopens a closed session. tasks is deprecated and a no-op: use create_task / update_task.
 
-Returns: success, patched_fields, stored_at, source_handoff, task_summary, session_closed, session_closed_at, schema_version. HANDOFF_CONFLICT (nothing saved): expected_source is stale; re-read and re-apply.`;
+Returns: success, filename (the new handoff), patched_fields, stored_at, source_handoff, task_summary, session_closed, session_closed_at, schema_version. HANDOFF_CONFLICT (nothing saved): expected_source is stale; re-read and re-apply.`;
 
 // ── Zod Schemas for update_handoff ──────────────────────────────────
 
@@ -692,6 +692,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
             type: "text" as const,
             text: JSON.stringify({
               ...filtered,
+              filename: latestFilename,
               retrieved_at: localIsoTimestamp(handoff.timezone),
               elapsed_seconds: computeElapsedSeconds(handoff.stored_at),
               same_calendar_day: computeSameCalendarDay(handoff.stored_at, handoff.timezone),
@@ -756,7 +757,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .string()
         .optional()
         .describe(
-          "Filename of the latest handoff you read (from list_handoffs or create_handoff). If a newer one exists: HANDOFF_CONFLICT, nothing saved."
+          "filename from get_latest_handoff (or your last create_handoff / update_handoff). If a newer handoff exists: HANDOFF_CONFLICT, nothing saved."
         ),
     },
     async (args) => {
@@ -951,6 +952,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
             type: "text" as const,
             text: JSON.stringify({
               success: true,
+              filename: newFilename,
               patched_fields: patchedFields,
               stored_at: merged.stored_at,
               source_handoff: sourceFilename,
