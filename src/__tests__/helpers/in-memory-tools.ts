@@ -18,6 +18,8 @@ export interface ToolsListOptions {
  * set for the call and restored afterwards.
  */
 export async function listToolsInMemory(opts: ToolsListOptions): Promise<Tool[]> {
+  // config is a plain mutable object; if it is ever Object.freeze()d, this
+  // assignment throws (ESM modules are strict) and the helper needs another way in.
   const mutableConfig = config as { legacyToolNames: boolean };
   const savedLegacy = mutableConfig.legacyToolNames;
   const savedEntityTools = process.env.ENTITY_TOOLS;

@@ -83,6 +83,8 @@ describe("resolveEntityToolsEnabled", () => {
     expect(off.enabled).toBe(false);
     expect(off.warn).toHaveBeenCalledTimes(1);
     expect(off.warn.mock.calls[0][0]).toMatch(/auto \| true \| false/);
+    // The message quotes the value as set, not the trimmed, lower-cased one.
+    expect(resolve(" Yes").warn.mock.calls[0][0]).toContain('ENTITY_TOOLS " Yes"');
 
     const on = resolve("yes", { provider: "ollama" });
     expect(on.enabled).toBe(true);

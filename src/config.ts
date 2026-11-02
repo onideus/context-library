@@ -26,7 +26,7 @@ export function resolveEntityToolsEnabled(
   if (value === "false") return false;
   if (value !== "" && value !== "auto") {
     warn(
-      `[config] Unrecognised ENTITY_TOOLS "${value}" — behaving as "auto". ` +
+      `[config] Unrecognised ENTITY_TOOLS ${JSON.stringify(raw)} — behaving as "auto". ` +
         `Valid values: auto | true | false.`
     );
   }
