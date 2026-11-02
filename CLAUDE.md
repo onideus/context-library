@@ -67,11 +67,11 @@ Not a fifth content primitive — a knowledge graph extracted *from* the four la
 
 ## Tool Design
 
-Every tool description is a **cold-start briefing**. The model reads it with zero prior context about Context Library. Descriptions must be self-contained: explain what the tool does, what each parameter means, what the return shape looks like, and any usage guidance (e.g., "call get_latest_handoff before patching"). This is critical because different MCP clients inject tool descriptions differently and the model may have no system prompt context about this server.
+Every tool description must let a model with **no other context** call the tool correctly: what it does and what it is for, when to call it, the constraints that change how it is called (preconditions, locked statuses, enforced transitions, all-or-nothing behaviour, merge vs replace, what is irreversible), and one `Returns:` line naming the top-level response fields (error codes only where the caller must branch on them). Keep it compact, within the limits `src/__tests__/tool-budget.test.ts` enforces (per-description, per-parameter, description-sum and whole-payload caps). No "Parameters:" sections, response-shape walkthroughs, rationale or history: each parameter's meaning, and its default or allowed values when the schema does not show them, lives in that parameter's own `.describe()`. Shared background (the four primitives and routing, scope values, note provenance, read-before-write, session start) lives once in the server instructions, `src/tools/server-instructions.ts`. Some MCP clients never show instructions to the model, so nothing required for a correct call may live only there.
 
 Before adding or modifying MCP tools, read the `mcp-builder` skill reference for tool design patterns, naming conventions, and quality benchmarks.
 
-Search and retrieval tool descriptions follow a CALL-THIS-WHEN / DO-NOT-CALL-WHEN / CONSEQUENCE-OF-SKIPPING structure. This pattern explicitly enumerates trigger conditions, non-triggers, and the cost of failing to call the tool when needed. It produces measurably higher call-through rates than purely informational descriptions. When adding new search or retrieval tools, follow this pattern. When adding write or fetch tools (which are reactive to explicit user requests), the steering pattern is not required.
+Search and retrieval tool descriptions (`search_context`, `search_notes`, `search_tasks`, `search_artifacts`, `get_note_history` and `get_latest_handoff`) carry the CALL-THIS-WHEN / DO-NOT-CALL-WHEN / CONSEQUENCE-OF-SKIPPING structure as three labelled lines, one line each: `CALL THIS WHEN:`, `DO NOT CALL WHEN:`, `CONSEQUENCE OF SKIPPING:`. The pattern enumerates trigger conditions, non-triggers, and the cost of failing to call the tool when needed, and produces measurably higher call-through rates than purely informational descriptions. When adding new search or retrieval tools, follow this pattern. Write and fetch tools (which are reactive to explicit user requests) do not carry the labels; give them at most one short "Call when … / not when …" line when the name does not make it obvious. `tool-budget.test.ts` checks which tools carry the labels.
 
 ### Tool naming
 
@@ -96,7 +96,7 @@ Authoring agents that produce `cc-prompt` artifacts for pipeline consumption mus
 ```
 src/
   server.ts                # Hono app, CORS, health, MCP route, startup/shutdown
-  mcp-server.ts            # createMcpServer() factory + version; side-effect-free on import
+  mcp-server.ts            # createMcpServer() factory + version + server instructions; side-effect-free on import
                            #   (no listen, migrations, providers or DB connection), so tests
                            #   build the real server in memory
   config.ts                # All env var reads, centralized defaults; resolveEntityToolsEnabled
@@ -118,6 +118,9 @@ src/
                            #   and edit_note)
     artifacts.ts           # Artifact CRUD + search_artifacts, edit_artifact, status lifecycle
     search.ts              # search_context (hybrid)
+    server-instructions.ts # MCP server `instructions`: shared background sent once (primitives,
+                           #   scope, provenance, read-before-write). Never the only home of a fact
+                           #   a model needs to call a tool: some clients do not show instructions
     tool-aliases.ts        # Deprecated tool-name aliases (old → new), registerTool wrapper,
                            #   str_replace_note adapter; gated by LEGACY_TOOL_NAMES
     search-aliases.ts      # Query alias expansion for semantic search
@@ -179,8 +182,9 @@ src/
   __tests__/
     helpers/
       spawn-server.ts      # spawnServer/stopServer/runScriptSync: cross-platform tsx child processes
-      in-memory-tools.ts   # listToolsInMemory: real createMcpServer() tools/list over an SDK
-                           #   in-memory transport (no server process, no Postgres)
+      in-memory-tools.ts   # listToolsInMemory / connectInMemory: real createMcpServer() tools/list
+                           #   (and instructions) over an SDK in-memory transport (no server
+                           #   process, no Postgres)
     server.test.ts         # Integration: server spawn + HTTP
     merge.test.ts          # Unit: mergeHandoff logic
     indexer.test.ts        # Unit: text extraction + chunking
@@ -191,9 +195,12 @@ src/
     tool-aliases.test.ts   # Alias table + registerTool (unit); tools/list with and without
                            #   LEGACY_TOOL_NAMES, alias calls vs new names (servers spawned;
                            #   artifact aliases Postgres-gated); both servers set ENTITY_TOOLS=true
-    tool-budget.test.ts    # Ratchet: tools/list size (legacy off/on), description sum and longest
-                           #   description must not exceed the constants at the top; lower them
-                           #   when descriptions shrink, raise only with a stated reason
+    tool-budget.test.ts    # Ratchet: tools/list size (legacy off/on) and description sum must not
+                           #   exceed the constants at the top; lower them when descriptions shrink,
+                           #   raise only with a stated reason. Fixed caps: 1,400 per description,
+                           #   160 per parameter, 6,000 for instructions. Also ungated: every
+                           #   parameter described, steering labels, the wording the gated
+                           #   lifecycle suites pin, instructions name only always-on tools
     entity-tools-gate.test.ts  # Unit: resolveEntityToolsEnabled; in-memory: entity tools and
                            #   aliases listed only when ENTITY_TOOLS resolves on
     notes.test.ts          # Integration: note CRUD + partial edits (Postgres-gated);

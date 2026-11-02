@@ -5,6 +5,8 @@
 [![Release](https://img.shields.io/github/v/release/onideus/context-library)](https://github.com/onideus/context-library/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+**Portable memory for AI assistants that keeps every client in sync: switch tools and pick up exactly where you left off.**
+
 A personal MCP server that provides persistent operational context, task management, knowledge capture, artifact tracking, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
 
 ## What It Does
@@ -396,19 +398,19 @@ Reference: [Open WebUI MCP documentation](https://docs.openwebui.com/features/mc
 
 #### Model and context requirements
 
-Every tool except the six entity-graph tools is registered on every server, whatever tier you deploy; the entity tools are registered only when `ENTITY_TOOLS` resolves on (see [Tier 4](#tier-4--entity-extraction-knowledge-graph)). The size of the `tools/list` response a client loads therefore depends on two settings. Measured when `ENTITY_TOOLS` was added, after v0.13.0:
+Every tool except the six entity-graph tools is registered on every server, whatever tier you deploy; the entity tools are registered only when `ENTITY_TOOLS` resolves on (see [Tier 4](#tier-4--entity-extraction-knowledge-graph)). The size of the `tools/list` response a client loads therefore depends on two settings. Measured after the tool descriptions were compacted (after v0.13.0), at roughly 4 characters per token:
 
 | `LEGACY_TOOL_NAMES` | Entity tools | Tools | `tools/list` size |
 |---|---|---|---|
-| `true` (default) | on | 43 | about 104,000 characters, roughly 26K tokens |
-| `true` (default) | off | 33 | about 93,000 characters, roughly 23K tokens |
-| `false` | on | 34 | about 93,000 characters, roughly 23K tokens |
-| `false` | off | 28 | about 85,000 characters, roughly **21K tokens** |
+| `true` (default) | on | 43 | about 58,000 characters, roughly 15K tokens |
+| `true` (default) | off | 33 | about 51,000 characters, roughly 13K tokens |
+| `false` | on | 34 | about 48,000 characters, roughly 12K tokens |
+| `false` | off | 28 | about 43,000 characters, roughly **11K tokens** |
 
-Tool descriptions change between releases, so treat these as approximate.
+The server also sends `instructions` (shared background on how the tools fit together) of about 3,600 characters, roughly 1K tokens, in every configuration. Clients that show instructions to the model add them on top of the tool list; some clients never show them. Tool descriptions change between releases, so treat these as approximate.
 
-- **Context window.** A model needs a context window of at least about 21K–26K tokens (depending on the configuration above) just to hold the tool list, before any conversation. Your messages and the tool results come on top of that, so configure well above it; 32K tokens is a practical floor and more is better. LM Studio and Ollama both default to context windows smaller than many models support. The context length is a setting in each: set it explicitly when you load the model.
-- **Tool calling.** The model must support tool calling. Small models often call tools poorly: wrong tool, malformed arguments, or no call at all. The tool descriptions in this server are long by design (each is a self-contained briefing for a model with no prior context), which favors larger models.
+- **Context window.** A model needs a context window of at least about 11K–15K tokens (depending on the configuration above), plus about 1K for the instructions, just to hold the tool list, before any conversation. Your messages and the tool results come on top of that, so configure well above it; 24K tokens is a practical floor and 32K or more is better. LM Studio and Ollama both default to context windows smaller than many models support. The context length is a setting in each: set it explicitly when you load the model.
+- **Tool calling.** The model must support tool calling. Small models often call tools poorly: wrong tool, malformed arguments, or no call at all.
 
 ### Other MCP Clients
 
