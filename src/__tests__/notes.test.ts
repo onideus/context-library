@@ -161,6 +161,14 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       PGUSER: PG_USER,
       PGPASSWORD: PG_PASSWORD,
       PGDATABASE: PG_DATABASE,
+      // Fire-and-forget indexing runs after every note write. Point it at a
+      // closed loopback port so it fails fast (ECONNREFUSED -> pending
+      // queue) instead of resolving the default "embeddings" hostname, whose
+      // DNS lookup can stall the libuv threadpool for seconds on some hosts
+      // and starve the server's Postgres connection attempts — the
+      // concurrent append_note test opens new pool connections and fails
+      // when they take longer than the pool's 3 s connect timeout.
+      EMBEDDING_URL: "http://127.0.0.1:1",
     });
 
     // Uncomment for debugging:
@@ -999,7 +1007,8 @@ describe.skipIf(!pgAvailable)("Note Tools", () => {
       const results = await Promise.all(
         lines.map((line) => callTool("append_note", { id: created.id, content: line }))
       );
-      for (const r of results) expect(r.error).toBeUndefined();
+      // Compare the failed responses themselves so a failure shows their code and message.
+      expect(results.filter((r) => r.error !== undefined)).toEqual([]);
 
       const fetched = await callTool("get_note", { id: created.id });
       const contentLines: string[] = fetched.content.split("\n");
