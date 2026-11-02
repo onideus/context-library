@@ -10,7 +10,7 @@ export const config = {
   port: parseInt(process.env.MCP_PORT ?? "3100", 10),
   dataDir: process.env.DATA_DIR ?? "./data",
   retentionCount: parseInt(process.env.RETENTION_COUNT ?? "0", 10),
-  // Register the pre-rename tool names (create_handoff, edit_artifact, ...) as
+  // Register the pre-rename tool names (store_handoff, patch_artifact, ...) as
   // deprecated aliases of their new names. The aliases are removed in the next
   // release; `false` previews that and lowers the advertised tool count. Only
   // the literal "false" turns them off.

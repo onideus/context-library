@@ -169,7 +169,8 @@ The import queues rows into `pending_embeddings` when either:
 When neither condition is true, no re-embed is queued.
 
 Once queued, the standard `drainPendingEmbeddings()` path — invoked by
-`search_context`, by `npm run reindex`, and by the server on startup — will
+`search_context`, by `npm run reindex` (task, note and artifact rows only;
+handoff rows are left to the server), and by the server on startup — will
 re-embed each entry against the current model in FIFO order. If TEI is
 unavailable at import time, the queue simply waits. This is the same
 resilience path used everywhere else in the server, not a special case.
