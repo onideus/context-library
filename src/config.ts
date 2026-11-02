@@ -5,6 +5,44 @@ const defaultCorsOrigins = ["https://claude.ai", "https://claude.com"];
 /** Handoff compaction strategy. See `compactionMode` on the config object. */
 export type CompactionMode = "archive" | "in-place" | "off";
 
+/**
+ * Whether the entity-graph tools (extract_entities, list_entities, ...) are
+ * registered. `raw` is the ENTITY_TOOLS value:
+ *   true  — always register them.
+ *   false — never register them.
+ *   auto  (default; unset or empty) — register them when entity extraction or
+ *         graph retrieval is enabled, or an extraction provider other than
+ *         "none" is configured.
+ * Any other value warns (every call — this function keeps no state) and
+ * behaves as auto.
+ */
+export function resolveEntityToolsEnabled(
+  raw: string | undefined,
+  env: { extractionEnabled: boolean; graphEnabled: boolean; provider: string | undefined },
+  warn: (msg: string) => void = console.warn
+): boolean {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (value !== "" && value !== "auto") {
+    warn(
+      `[config] Unrecognised ENTITY_TOOLS "${value}" — behaving as "auto". ` +
+        `Valid values: auto | true | false.`
+    );
+  }
+  const provider = (env.provider ?? "").trim().toLowerCase() || "none";
+  return env.extractionEnabled || env.graphEnabled || provider !== "none";
+}
+
+// The entityToolsEnabled getter runs on every /mcp request; warn about each
+// distinct invalid ENTITY_TOOLS value once per process.
+const warnedEntityToolsValues = new Set<string>();
+function warnEntityToolsOnce(raw: string, msg: string): void {
+  if (warnedEntityToolsValues.has(raw)) return;
+  warnedEntityToolsValues.add(raw);
+  console.warn(msg);
+}
+
 export const config = {
   serverName: process.env.SERVER_NAME ?? "context-library",
   port: parseInt(process.env.MCP_PORT ?? "3100", 10),
@@ -71,6 +109,21 @@ export const config = {
   // Graph-augmented retrieval — third RRF signal in search_context.
   // Disabled by default; enable once an extraction run has populated entity_nodes/entity_relations.
   entityGraphEnabled: process.env.ENTITY_GRAPH_ENABLED === "true",
+  // Register the entity-graph tools? See resolveEntityToolsEnabled. A getter
+  // so it reads the environment at access time (tests vary it); the server
+  // never changes its own environment, so runtime behaviour is fixed.
+  get entityToolsEnabled(): boolean {
+    const raw = process.env.ENTITY_TOOLS;
+    return resolveEntityToolsEnabled(
+      raw,
+      {
+        extractionEnabled: process.env.ENTITY_EXTRACTION_ENABLED === "true",
+        graphEnabled: process.env.ENTITY_GRAPH_ENABLED === "true",
+        provider: process.env.ENTITY_EXTRACTION_PROVIDER,
+      },
+      (msg) => warnEntityToolsOnce(raw ?? "", msg)
+    );
+  },
   entityGraphHops: (function () {
     const v = parseInt(process.env.ENTITY_GRAPH_HOPS ?? "1", 10);
     if (!Number.isFinite(v)) return 1;

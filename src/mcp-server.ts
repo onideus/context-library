@@ -38,7 +38,9 @@ export function createMcpServer(): McpServer {
   registerNoteTools(server);
   registerArtifactTools(server);
   registerSearchTools(server);
-  registerEntityTools(server);
+  // Entity-graph tools only when ENTITY_TOOLS resolves on (see
+  // resolveEntityToolsEnabled in config.ts).
+  if (config.entityToolsEnabled) registerEntityTools(server);
   registerPrompts(server);
   return server;
 }
