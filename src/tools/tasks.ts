@@ -87,54 +87,33 @@ const orderDirEnum = z.enum(["asc", "desc"]);
 
 // ── Tool Descriptions ────────────────────────────────────────────
 
-const CREATE_TASK_DESC = `Create a new task with title, scope, and optional metadata. Tasks start as 'open' by default. Use scope to separate work, personal, and shared items. Tags provide free-form categorization. Set blocked_reason if the task can't proceed yet.
+const CREATE_TASK_DESC = `Create a task: an action item with a lifecycle (open, completed, deferred, cancelled). The tasks table is the authoritative task store: do not keep parallel task lists in handoffs or elsewhere. Check search_tasks first for a duplicate. New tasks are 'open'.
 
-Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with open/completed lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles tasks. Route content to the appropriate primitive — use create_note for decisions and insights, create_artifact for generated outputs, and create_handoff for working session state.
+Returns the task with every field (id, status, completed_at, timestamps, …).`;
 
-This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems. All task tracking should flow through create_task, update_task, and list_tasks.
+const GET_TASK_DESC = `Get one task by id, with every field.
 
-Scope values:
-- 'work': work-related tasks (engineering projects, OSS contributions, employer obligations).
-- 'personal': personal tasks (health, family, finance, life admin).
-- 'shared': reusable across contexts (architecture follow-ups, OSS project work, cross-context infrastructure tasks).
-Pass scope explicitly. When the user's request is clearly personal (health, family, finance), pass 'personal'. When clearly work-related, pass 'work'. When the task is reusable across contexts, pass 'shared'. When ambiguous, ask before creating.`;
+Returns the task. NOT_FOUND if missing.`;
 
-const GET_TASK_DESC = `Retrieve a single task by its UUID. Returns all fields including timestamps and tags.
+const LIST_TASKS_DESC = `List tasks by filter. Defaults: status 'open', all scopes, newest first; status null lists every status. Use it to ground progress reports in tracked work.
 
-When to call: after list_tasks or search_tasks returns a task ID and you need the full context field. List and search results include title and status but not the full context or notes. Use get_task to drill down into blocking details, sub-task references, or task-specific history.`;
+Returns: tasks[] (full tasks), total_count, limit, offset.`;
 
-const LIST_TASKS_DESC = `List tasks with optional filters. Defaults to showing open tasks sorted by creation date (newest first). Use status=null to query across all statuses. Tags filter uses ANY-match. Blocked filter isolates tasks with/without a blocked_reason.
+const UPDATE_TASK_DESC = `Change a task. Sent fields replace the stored values, omitted ones are kept; tags replaces the whole list. null clears only priority, blocked_reason, scheduled_date or due_date.
 
-WHEN TO PULL TASKS: Before any evaluative response (performance reviews, weekly check-ins, compensation assessments, progress reports), pull task data to ground your assessment in tracked work — not memory alone.
+action: 'complete' (sets completed_at, clears blocked_reason), 'cancel' (clears blocked_reason), 'defer', 'reopen' (open again, clears completed_at).
 
-Scope filter:
-- When scope is omitted, this tool returns tasks across all scopes (work, personal, shared) — no scope filtering is applied.
-- Pass scope='work' to restrict to work tasks, 'personal' for personal items, or 'shared' for reusable/cross-context items.
-- If the user's request is clearly personal (health, family, finance), pass scope='personal'. If clearly work-related, pass scope='work'. If the user wants cross-context items only, pass scope='shared'. When ambiguous, omit and let the user clarify.
+expected_status is checked only when the action changes status: on mismatch nothing is written and STATUS_CONFLICT returns current.
 
-This is the authoritative task store — do not maintain parallel task lists in handoff state or external systems.`;
+Returns the updated task. Errors: NOT_FOUND, VALIDATION_ERROR (nothing to update), STATUS_CONFLICT.`;
 
-const UPDATE_TASK_DESC = `Update a task's fields and/or apply a lifecycle action. Actions are convenience shortcuts: 'complete' marks done with timestamp, 'cancel' marks cancelled, 'defer' parks the task, 'reopen' returns to open. Field updates can accompany any action. Tags are full-replacement (provide complete array). Set blocked_reason to null to unblock.
+const SEARCH_TASKS_DESC = `Keyword search (full-text, English stemming) over task titles and context, ranked. Works when semantic search is offline.
 
-Scope values accept 'work', 'personal', or 'shared' — match the contract documented on create_task.`;
+CALL THIS WHEN: the user asks what is open, blocked or done on a topic; before create_task, to avoid a duplicate.
+DO NOT CALL WHEN: task_summary from get_latest_handoff already answers it, or the question is not about tracked work.
+CONSEQUENCE OF SKIPPING: duplicate tasks get created, or finished work is reopened.
 
-const SEARCH_TASKS_DESC = `Full-text search across task titles and context. Uses PostgreSQL FTS with English stemming. Filter by status and scope. Results ranked by relevance.
-
-CALL THIS WHEN:
-- The user asks about task status, progress, or what's open/blocked
-- You are about to create a new task (check for duplicates first)
-- The conversation references work items by keyword
-
-DO NOT CALL WHEN:
-- task_summary from get_latest_handoff already answered the question
-- The user is asking about general concepts, not tracked work items
-
-CONSEQUENCE OF SKIPPING: Duplicate tasks will be created or completed work will be re-opened.
-
-Scope filter:
-- When scope is omitted, this tool searches across all scopes (work, personal, shared) — no scope filtering is applied.
-- Pass scope='work' to restrict to work tasks, 'personal' for personal items, or 'shared' for reusable/cross-context items.
-- If the user's request is clearly personal (health, family, finance), pass scope='personal'. If clearly work-related, pass scope='work'. When ambiguous, omit and let the user clarify.`;
+Returns: tasks[] (full tasks), total_count, next_step.`;
 
 // ── Tool Registration ────────────────────────────────────────────
 
@@ -144,16 +123,16 @@ export function registerTaskTools(mcpServer: McpServer): void {
     "create_task",
     CREATE_TASK_DESC,
     {
-      title: z.string().describe("Task title (required)"),
-      context: z.string().optional().describe("Additional context or notes"),
+      title: z.string().describe("Task title."),
+      context: z.string().optional().describe("Details, background or notes."),
       scope: scopeEnum.describe(
-        "'work', 'personal', or 'shared' (required). 'shared' covers items that are reusable across contexts (architecture decisions, OSS project follow-ups)."
+        "'work', 'personal', or 'shared' (reusable across both). Ask when unclear."
       ),
-      priority: priorityEnum.nullable().optional().describe("Priority level, or null for unranked"),
-      tags: z.array(z.string()).optional().describe("Free-form tags for categorization"),
-      blocked_reason: z.string().nullable().optional().describe("If set, task is blocked with this reason"),
-      scheduled_date: z.string().optional().describe("ISO date — 'start thinking about this' date"),
-      due_date: z.string().optional().describe("ISO date — hard deadline"),
+      priority: priorityEnum.nullable().optional().describe("Priority; omit or null for unranked."),
+      tags: z.array(z.string()).optional().describe("Free-form tags."),
+      blocked_reason: z.string().nullable().optional().describe("Why the task cannot proceed; setting it marks the task blocked."),
+      scheduled_date: z.string().optional().describe("ISO date to start on it."),
+      due_date: z.string().optional().describe("ISO date: hard deadline."),
     },
     async (args) => {
       if (!args.title?.trim()) {
@@ -202,7 +181,7 @@ export function registerTaskTools(mcpServer: McpServer): void {
     "get_task",
     GET_TASK_DESC,
     {
-      id: z.string().describe("Task UUID (required)"),
+      id: z.string().describe("Task id (UUID)."),
     },
     async (args) => {
       try {
@@ -225,19 +204,19 @@ export function registerTaskTools(mcpServer: McpServer): void {
     "list_tasks",
     LIST_TASKS_DESC,
     {
-      status: statusEnum.nullable().optional().describe("Filter by status (default: 'open', null = all statuses)"),
-      scope: scopeEnum.nullable().optional().describe("Filter by scope"),
-      priority: priorityEnum.nullable().optional().describe("Filter by priority"),
-      tags: z.array(z.string()).optional().describe("Filter by tags (ANY match)"),
-      blocked: z.boolean().nullable().optional().describe("true = blocked only, false = unblocked only"),
-      due_before: z.string().optional().describe("ISO date — tasks due before this date"),
-      due_after: z.string().optional().describe("ISO date — tasks due after this date"),
-      scheduled_before: z.string().optional().describe("ISO date — tasks scheduled before this date"),
-      scheduled_after: z.string().optional().describe("ISO date — tasks scheduled after this date"),
-      limit: z.number().optional().describe("Max results (default 50, max 200)"),
-      offset: z.number().optional().describe("Offset for pagination (default 0)"),
-      order_by: orderByEnum.optional().describe("Sort field (default: 'created_at')"),
-      order_dir: orderDirEnum.optional().describe("Sort direction (default: 'desc')"),
+      status: statusEnum.nullable().optional().describe("Status filter; default 'open', null = all statuses."),
+      scope: scopeEnum.nullable().optional().describe("Scope filter; omit or null = all scopes."),
+      priority: priorityEnum.nullable().optional().describe("Priority filter."),
+      tags: z.array(z.string()).optional().describe("Match tasks with ANY of these tags."),
+      blocked: z.boolean().nullable().optional().describe("true = blocked only, false = unblocked only."),
+      due_before: z.string().optional().describe("ISO date: due before it."),
+      due_after: z.string().optional().describe("ISO date: due after it."),
+      scheduled_before: z.string().optional().describe("ISO date: scheduled before it."),
+      scheduled_after: z.string().optional().describe("ISO date: scheduled after it."),
+      limit: z.number().optional().describe("Max results, 1-200 (default 50)."),
+      offset: z.number().optional().describe("Rows to skip (default 0)."),
+      order_by: orderByEnum.optional().describe("Sort field (default 'created_at')."),
+      order_dir: orderDirEnum.optional().describe("Sort direction (default 'desc'); with order_by 'priority', 'asc' puts critical first."),
     },
     async (args) => {
       try {
@@ -343,19 +322,19 @@ export function registerTaskTools(mcpServer: McpServer): void {
     "update_task",
     UPDATE_TASK_DESC,
     {
-      id: z.string().describe("Task UUID (required)"),
+      id: z.string().describe("Task id (UUID)."),
       action: z.enum(["complete", "cancel", "defer", "reopen"]).nullable().optional()
-        .describe("Convenience lifecycle action"),
-      title: z.string().optional().describe("New title"),
-      context: z.string().optional().describe("New context"),
-      scope: scopeEnum.optional().describe("New scope"),
-      priority: priorityEnum.nullable().optional().describe("New priority (null = unranked)"),
-      tags: z.array(z.string()).optional().describe("New tags (full replacement)"),
-      blocked_reason: z.string().nullable().optional().describe("Set blocked reason, or null to unblock"),
-      scheduled_date: z.string().nullable().optional().describe("New scheduled date, or null to clear"),
-      due_date: z.string().nullable().optional().describe("New due date, or null to clear"),
+        .describe("Lifecycle action; omit or null for none."),
+      title: z.string().optional().describe("New title."),
+      context: z.string().optional().describe("New context."),
+      scope: scopeEnum.optional().describe("New scope."),
+      priority: priorityEnum.nullable().optional().describe("New priority; null = unranked."),
+      tags: z.array(z.string()).optional().describe("New tags; replaces the whole list."),
+      blocked_reason: z.string().nullable().optional().describe("Reason the task is blocked; null unblocks."),
+      scheduled_date: z.string().nullable().optional().describe("New ISO scheduled date; null clears."),
+      due_date: z.string().nullable().optional().describe("New ISO due date; null clears."),
       expected_status: statusEnum.optional().describe(
-        "Optimistic concurrency precondition. When provided AND the update mutates status (via 'action' or an explicit status change through sync), the UPDATE runs conditionally against this value — if the row is no longer in expected_status, returns STATUS_CONFLICT with current server state instead of silently overwriting a concurrent writer's change."
+        "Status you believe the task has. Checked only when the action changes status; on mismatch STATUS_CONFLICT, nothing written."
       ),
     },
     async (args) => {
@@ -505,10 +484,10 @@ export function registerTaskTools(mcpServer: McpServer): void {
     "search_tasks",
     SEARCH_TASKS_DESC,
     {
-      query: z.string().describe("Full-text search query (required)"),
-      status: statusEnum.nullable().optional().describe("Filter by status (default: null = all)"),
-      scope: scopeEnum.nullable().optional().describe("Filter by scope"),
-      limit: z.number().optional().describe("Max results (default 20, max 100)"),
+      query: z.string().describe("Search words; every word must match (stemmed)."),
+      status: statusEnum.nullable().optional().describe("Status filter; omit or null = all."),
+      scope: scopeEnum.nullable().optional().describe("Scope filter; omit or null = all."),
+      limit: z.number().optional().describe("Max results, 1-100 (default 20)."),
     },
     async (args) => {
       if (!args.query?.trim()) {
