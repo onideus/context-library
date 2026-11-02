@@ -43,7 +43,7 @@ export function mergeHandoff(
     patchedFields.push("timezone");
   }
 
-  // Objects — deep merge
+  // Objects — one-level merge: each patch key replaces that key's whole value
   if (patch.operational_state !== undefined && patch.operational_state !== null) {
     merged.operational_state = {
       ...(original.operational_state || {}),
