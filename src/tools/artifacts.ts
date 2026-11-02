@@ -151,125 +151,47 @@ const pointerSchema = z.object({
 
 // ── Tool Descriptions ────────────────────────────────────────────
 
-const STORE_ARTIFACT_DESC = `Store a generated output as an artifact. Artifacts are the fourth content primitive — tracked, searchable, lifecycle-aware outputs that bridge planning and execution. Use for CC prompts, research reports, blog posts, templates, presentations — anything generated once and consumed later.
+const STORE_ARTIFACT_DESC = `Save a generated output for later use: a prompt for a coding agent (artifact_type 'cc-prompt'), a report, a template. Give inline content, a pointer, or both. ready, executing and completed lock the content; update_artifact enforces status transitions.
 
-How artifacts differ from the other primitives:
-- Tasks are action items with an open/completed lifecycle — "write the migration" is a task.
-- Notes are permanent interpretation — decisions, patterns, takeaways. No lifecycle, no ordering.
-- Handoffs are ephemeral session state.
-- Artifacts are the concrete outputs produced by work. They have a status lifecycle (draft → ready → executing → completed) and can be ordered within a batch via execution_order.
+cc-prompts: metadata.target_repo is required, or the pipeline interceptor demotes the artifact from ready back to draft; target_org is optional; content_hash is server-computed (a supplied value is dropped); branch_target is deprecated (use target_repo).
 
-Route content to the appropriate primitive — see create_note, create_task, create_handoff, and update_handoff for guidance on what belongs elsewhere.
+execution_order is unique per artifact_type (EXECUTION_ORDER_CONFLICT); dependencies must exist (VALIDATION_ERROR).
 
-Storage modes:
-- Inline 'content' — for small artifacts like CC prompts, snippets, short docs. Stored directly in Postgres, indexed for semantic search.
-- 'pointer' — for large artifacts (binaries, generated media, repo files). Stored externally; the pointer describes how to fetch it. Shape: {type: 'git', repo, branch, path} | {type: 'local', path} | {type: 'url', href}.
-- You may provide both when content is a preview/summary and the pointer is the canonical source.
+Returns: id, title, artifact_type, status, created_at.`;
 
-Status lifecycle:
-- draft — being assembled, not ready for use
-- ready — finalized and available for execution or consumption
-- executing — currently being acted on (e.g., a CC prompt being run)
-- completed — execution finished
-- superseded — replaced or retired; reachable from any state
+const GET_ARTIFACT_DESC = `Get one artifact by id with every field: content, pointer, status, dependencies, execution_order, metadata and the rest. metadata.content_hash is edit_artifact's expected_content_hash.
 
-Use 'execution_order' to sequence artifacts within a batch (e.g., a chain of CC prompts where 1 builds infrastructure, 2 adds tests, 3 updates docs). Use 'dependencies' for explicit cross-artifact ordering when execution_order is not enough. Use 'metadata' for flexible fields — see the pipeline metadata contract below.
+Returns the artifact. NOT_FOUND if missing.`;
 
-Pipeline metadata contract (cc-prompt artifacts consumed by a pipeline interceptor):
-- 'target_repo' (REQUIRED for pipeline-consumed artifacts) — repository name the interceptor should check out. An interceptor watching for ready cc-prompts will demote any artifact missing this key back to draft; without target_repo it does not know where to execute.
-- 'target_org' (optional) — org/owner qualifying target_repo. Defaults per interceptor config when omitted.
-- 'content_hash' — SHA-256 of 'content'. Auto-computed server-side on store and on promotion to a locked status ('ready'/'executing'/'completed'); callers must NOT supply it. Any caller-supplied value is dropped. The interceptor recomputes and verifies at execution time; a mismatch aborts the run.
-- 'branch_target' (DEPRECATED) — kept for one release for reader compatibility. New artifacts should use 'target_repo' instead. Interceptors still read branch_target if target_repo is absent, but that fallback is going away.
-- Other conventional keys: 'base_branch', 'working_branch', 'model', 'surface', 'batch_label', 'risk_hint'. Free-form — deployments extend as needed.
+const LIST_ARTIFACTS_DESC = `List artifacts by filter, without content or metadata (use get_artifact). artifact_type 'cc-prompt' + status 'ready' is the run queue, in execution order. Default order: execution_order ascending with an artifact_type filter, else newest first.
 
-Integrity:
-- 'execution_order' must be unique within an 'artifact_type'. Attempting to store a duplicate returns EXECUTION_ORDER_CONFLICT. Leave execution_order unset (null) if you do not need a fixed slot.
-- 'dependencies' UUIDs are validated at write time — all referenced artifacts must exist. Orphaned references return VALIDATION_ERROR.
+Returns: artifacts [{id, title, artifact_type, status, scope, tags, execution_order, timestamps}], total_count, limit, offset, next_step.`;
 
-Returns {id, title, artifact_type, status, created_at}. Re-embeds on create; falls back to the pending queue if the embedding server is offline.`;
+const UPDATE_ARTIFACT_DESC = `Change fields of an artifact; omitted fields are kept. tags, dependencies and related_task_ids replace the whole list; metadata merges top-level keys.
 
-const GET_ARTIFACT_DESC = `Retrieve a single artifact by its UUID. Returns the full artifact record including content, pointer, dependencies, and metadata.`;
+Enforced transitions (else INVALID_STATUS_TRANSITION): draft → ready; ready → executing | draft; executing → completed | ready; and any status → superseded. Content of a ready, executing or completed artifact is locked (CANNOT_MODIFY_LOCKED_ARTIFACT): move it to draft in a separate call first.
 
-const LIST_ARTIFACTS_DESC = `List artifacts with optional filters and pagination. Returns metadata only (id, title, artifact_type, status, scope, tags, execution_order, timestamps) — NOT the full content. Call get_artifact to retrieve a body.
+A status change lands only if the status is still expected_status (default: as read at the call's start), else STATUS_CONFLICT with current. Without a status change expected_status is not checked.
 
-This is the primary retrieval tool for execution sessions. Calling list_artifacts({artifact_type: 'cc-prompt', status: 'ready'}) returns the next ordered batch of prompts ready to run. Defaults to execution_order ASC when filtering by artifact_type, otherwise created_at DESC.
+cc-prompts: set metadata.target_repo before or when promoting to ready, or the interceptor demotes it to draft. content_hash is server-computed (a supplied one is stripped); branch_target is deprecated.
 
-Filters (all optional):
-- artifact_type — e.g., 'cc-prompt', 'research', 'blog-post'
-- status — 'draft' | 'ready' | 'executing' | 'completed' | 'superseded'
-- scope — 'work' | 'personal' | 'shared'. When omitted, returns artifacts across all scopes.
-- tags — ANY-match array`;
+execution_order is unique per artifact_type (EXECUTION_ORDER_CONFLICT); dependencies must exist (VALIDATION_ERROR); content or pointer must remain. Returns the artifact.`;
 
-const UPDATE_ARTIFACT_DESC = `Update fields on an existing artifact. All fields are optional — only provided fields are modified. Tags, dependencies, and related_task_ids are full-replacement (provide complete arrays). Metadata merges at the top level (provided keys overwrite; omitted keys are preserved).
+const PATCH_ARTIFACT_DESC = `Replace exact text inside an artifact's content without resending it (other fields: update_artifact). Call get_artifact first, copy each old_str exactly, and pass metadata.content_hash as expected_content_hash.
 
-Status transitions are enforced:
-- draft → ready, superseded
-- ready → executing, draft, superseded
-- executing → completed, ready, superseded
-- completed → superseded
-- Any state → superseded (retirement)
+Edits apply in order, each to the previous result; all apply or none do. old_str must occur exactly once unless replace_all is true. content_hash is recomputed.
 
-Concurrent status transitions are gated by a conditional UPDATE. When status is being changed, the write only lands if the row is still in the caller's expected status (the row's status as of the read at the top of this call, or 'expected_status' when supplied). A concurrent transition — including a competing interceptor's ready → executing claim — returns STATUS_CONFLICT with the current server state instead of overwriting. This is how the interceptor claim mutex works: two interceptors racing on ready → executing produce one success and one STATUS_CONFLICT, no silent overwrite.
+Errors (nothing written): NOT_FOUND; CANNOT_MODIFY_LOCKED_ARTIFACT (ready, executing, completed: move to draft first); VALIDATION_ERROR (no inline content, or empty result); VERSION_CONFLICT (stale hash, checked first; gives current_content_hash); NO_MATCH / AMBIGUOUS_MATCH with edit_index, match_count.
 
-Pipeline metadata contract (cc-prompt artifacts):
-- 'target_repo' — REQUIRED for pipeline-consumed artifacts. An interceptor watching for ready cc-prompts will demote any artifact missing this key back to draft. If you promote to ready without target_repo set, expect the artifact to be demoted; add it via metadata: {target_repo: "..."} in the same update or an earlier one.
-- 'target_org' — optional, defaults per interceptor config.
-- 'content_hash' — SHA-256 of 'content', auto-computed server-side. Callers must NOT supply it — any supplied value is stripped from metadata updates before merge. On promotion to a locked status ('ready'/'executing'/'completed'), the hash is recomputed from the effective content. Reverting to 'draft' keeps the hash (the artifact still has content). The interceptor verifies this hash at execution time.
-- 'branch_target' (DEPRECATED) — kept one release for reader compatibility; prefer 'target_repo'.
+Returns, without content: id, title, status, changed, content_hash, previous_content_hash, replacements, content_length, updated_at.`;
 
-Integrity:
-- 'execution_order' must be unique within an 'artifact_type'. Moving an artifact onto an already-used slot returns EXECUTION_ORDER_CONFLICT.
-- 'dependencies' UUIDs are validated at write time. Pass an empty array to clear; any non-empty array must reference existing artifacts or returns VALIDATION_ERROR.
+const SEARCH_ARTIFACTS_DESC = `Keyword search (full-text, English stemming) over artifact titles and content, ranked. Returns full artifacts with content.
 
-Re-embeds when title, content, tags, or artifact_type change.
+CALL THIS WHEN: the user refers to a prompt, report or other generated output; before create_artifact, to find duplicates or earlier versions.
+DO NOT CALL WHEN: list_artifacts with a status filter already answered it this turn.
+CONSEQUENCE OF SKIPPING: duplicate or superseded artifacts get recreated.
 
-For small edits to the content of a large artifact, prefer edit_artifact (exact-text replace) — it avoids resending the full content.`;
-
-const PATCH_ARTIFACT_DESC = `Edit an artifact's content by replacing exact spans of text, without resending the whole body. Prefer this over update_artifact for content changes that touch a small part of a large artifact (fixing a paragraph of a long prompt, updating a value in a spec, rewording a section of a report) — update_artifact requires the complete new content, costs tokens for the entire artifact, and risks silently changing text you didn't mean to touch.
-
-Do NOT use this to change title, tags, metadata, status, scope, pointer, or execution_order, or to replace most of the content — use update_artifact for those.
-
-Workflow: call get_artifact first so every old_str is copied exactly from the current content, and pass its metadata.content_hash as expected_content_hash.
-
-Parameters:
-- id (required): UUID of the artifact to edit.
-- edits (required, 1–50 items): ordered list of {old_str, new_str, replace_all?}. Edits apply in order, each against the result of the previous one, so a later edit can match text an earlier edit inserted. All edits apply or none do.
-  - old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
-  - new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
-  - replace_all (optional, default false): when true, replace every occurrence (at least one must exist); when false, old_str must occur exactly once.
-- expected_content_hash (optional): the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous edit_artifact response). Enforced whenever present; omit for last-writer-wins.
-
-Locked artifacts: content of an artifact in 'ready', 'executing', or 'completed' is immutable, exactly as with update_artifact. Move it back to 'draft' with update_artifact first. 'draft' and 'superseded' artifacts can be patched; the status is unchanged.
-
-Content hash: metadata.content_hash (SHA-256 of content) is recomputed server-side from the patched content, as update_artifact does. There is no way to supply it. Every other metadata key is preserved.
-
-Errors (returned as {error: true, message, code, ...}):
-- NOT_FOUND — no artifact with that id.
-- CANNOT_MODIFY_LOCKED_ARTIFACT — the artifact is 'ready', 'executing', or 'completed'. Nothing is written.
-- VALIDATION_ERROR — the artifact has no inline content (pointer-only), an old_str is empty, or the edits would leave the content empty (an artifact must keep content or a pointer). Nothing is written.
-- VERSION_CONFLICT — expected_content_hash does not match: the content changed since you read it, so nothing is written. current_content_hash is the hash as it is now — re-read with get_artifact, copy old_str from the current content, and retry. Checked before matching, so it takes precedence over NO_MATCH / AMBIGUOUS_MATCH.
-- NO_MATCH — the edit at edit_index (zero-based) does not occur in the content as it stands after the earlier edits (match_count: 0). Nothing is written. Re-read with get_artifact and copy the text exactly.
-- AMBIGUOUS_MATCH — the edit at edit_index occurs match_count times and replace_all is false. Nothing is written. Widen old_str with surrounding text until it is unique, or pass replace_all: true.
-
-If the edits leave the content identical (every new_str equal to its old_str), the call is a no-op: changed is false and nothing is written.
-
-Returns a compact confirmation WITHOUT the content: {id, title, status, changed, content_hash, previous_content_hash, replacements, content_length, updated_at}. replacements lists the number of occurrences replaced by each edit, in order; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Re-embeds the artifact for search when the content changed.`;
-
-const SEARCH_ARTIFACTS_DESC = `Full-text search across artifact titles and content using PostgreSQL FTS with English stemming. Returns matching artifacts WITH full content (unlike list_artifacts), ranked by relevance.
-
-CALL THIS WHEN:
-- The user references a CC prompt, research document, or generated output
-- You are about to create a new artifact (check for duplicates or superseded versions)
-- The conversation involves pipeline execution status
-
-DO NOT CALL WHEN:
-- list_artifacts with status filter already answered the question in this turn
-
-CONSEQUENCE OF SKIPPING: Duplicate or superseded artifacts will be recreated.
-
-For cross-type semantic search that finds artifacts alongside handoffs, tasks, and notes, use search_context with content_types: ['artifact'] instead — this tool only searches within the artifacts table.
-
-Filters: artifact_type, status, scope. When scope is omitted, searches across all scopes (work, personal, shared).`;
+Returns: artifacts[] (with rank), total_count, next_step.`;
 
 // ── Tool Registration ────────────────────────────────────────────
 
@@ -280,19 +202,19 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     "create_artifact",
     STORE_ARTIFACT_DESC,
     {
-      title: z.string().describe("Short descriptive title for the artifact"),
-      artifact_type: z.string().describe("Kind of artifact, e.g., 'cc-prompt', 'research', 'blog-post', 'template', 'presentation'. Free-form — new types are valid."),
+      title: z.string().describe("Short descriptive title."),
+      artifact_type: z.string().describe("Kind of artifact, free-form, e.g. 'cc-prompt', 'research', 'template'. Stored lowercase."),
       scope: scopeEnum.describe(
-        "'work', 'personal', or 'shared' (required). Pass 'shared' when the artifact is reusable across contexts (architecture templates, OSS artifacts)."
+        "'work', 'personal', or 'shared' (reusable across both). Ask when unclear."
       ),
-      content: z.string().optional().describe("Inline artifact body. Required if pointer is not provided."),
-      pointer: pointerSchema.optional().describe("External storage pointer: {type: 'git', repo, branch, path} | {type: 'local', path} | {type: 'url', href}. Required if content is not provided."),
-      status: statusEnum.optional().describe("Lifecycle state (default 'draft')"),
-      tags: z.array(z.string()).optional().describe("Free-form tags"),
-      dependencies: z.array(z.string()).optional().describe("UUIDs of artifacts that must complete before this one"),
-      execution_order: z.number().int().optional().describe("Ordering within a batch (1, 2, 3...). Use for sequenced prompt chains."),
-      related_task_ids: z.array(z.string()).optional().describe("UUIDs of tasks this artifact relates to"),
-      metadata: z.record(z.string(), z.unknown()).optional().describe("Flexible metadata. Pipeline contract for cc-prompt artifacts: 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it), 'target_org' (optional, defaults per interceptor config), 'base_branch', 'working_branch', 'model', 'surface', 'batch_label', 'risk_hint'. 'content_hash' is auto-computed server-side — do NOT supply it; any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo' (kept one release for reader compatibility)."),
+      content: z.string().optional().describe("Inline body. Required unless pointer is given."),
+      pointer: pointerSchema.optional().describe("External location: {type:'git', repo, branch, path} | {type:'local', path} | {type:'url', href}. Required unless content is given."),
+      status: statusEnum.optional().describe("Initial status (default 'draft')."),
+      tags: z.array(z.string()).optional().describe("Free-form tags."),
+      dependencies: z.array(z.string()).optional().describe("UUIDs of artifacts that must complete before this one; each must exist."),
+      execution_order: z.number().int().optional().describe("Position within a batch of this artifact_type (1, 2, 3…); unique per type."),
+      related_task_ids: z.array(z.string()).optional().describe("UUIDs of related tasks."),
+      metadata: z.record(z.string(), z.unknown()).optional().describe("Free-form keys. cc-prompts need target_repo; optional target_org, base_branch, working_branch, model, batch_label. Never send content_hash."),
     },
     async (args) => {
       if (!args.title?.trim()) {
@@ -411,7 +333,7 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     "get_artifact",
     GET_ARTIFACT_DESC,
     {
-      id: z.string().describe("UUID of the artifact to retrieve"),
+      id: z.string().describe("Artifact id (UUID)."),
     },
     async (args) => {
       try {
@@ -434,14 +356,14 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     "list_artifacts",
     LIST_ARTIFACTS_DESC,
     {
-      artifact_type: z.string().optional().describe("Filter by artifact_type"),
-      status: statusEnum.optional().describe("Filter by status"),
-      scope: scopeEnum.nullable().optional().describe("Filter by scope"),
-      tags: z.array(z.string()).optional().describe("Filter by tags (ANY match)"),
-      limit: z.number().min(1).max(100).optional().describe("Max results (1-100, default 20)"),
-      offset: z.number().min(0).optional().describe("Offset for pagination (default 0)"),
-      order_by: listOrderByEnum.optional().describe("Sort field. Default: 'execution_order' when artifact_type filter is set, otherwise 'created_at'"),
-      order_dir: orderDirEnum.optional().describe("Sort direction. Default: 'asc' for execution_order, 'desc' for created_at/updated_at"),
+      artifact_type: z.string().optional().describe("Type filter (case-insensitive)."),
+      status: statusEnum.optional().describe("Status filter."),
+      scope: scopeEnum.nullable().optional().describe("Scope filter; omit or null = all."),
+      tags: z.array(z.string()).optional().describe("Match artifacts with ANY of these tags."),
+      limit: z.number().min(1).max(100).optional().describe("Max results (default 20)."),
+      offset: z.number().min(0).optional().describe("Rows to skip (default 0)."),
+      order_by: listOrderByEnum.optional().describe("Sort field; default 'execution_order' with an artifact_type filter, else 'created_at'."),
+      order_dir: orderDirEnum.optional().describe("Default 'asc' for execution_order, 'desc' otherwise."),
     },
     async (args) => {
       try {
@@ -506,11 +428,11 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     "search_artifacts",
     SEARCH_ARTIFACTS_DESC,
     {
-      query: z.string().describe("Full-text search query"),
-      artifact_type: z.string().optional().describe("Filter by artifact_type"),
-      status: statusEnum.optional().describe("Filter by status"),
-      scope: scopeEnum.nullable().optional().describe("Filter by scope"),
-      limit: z.number().min(1).max(50).optional().describe("Max results (1-50, default 10)"),
+      query: z.string().describe("Search words; every word must match (stemmed)."),
+      artifact_type: z.string().optional().describe("Type filter (case-insensitive)."),
+      status: statusEnum.optional().describe("Status filter."),
+      scope: scopeEnum.nullable().optional().describe("Scope filter; omit or null = all."),
+      limit: z.number().min(1).max(50).optional().describe("Max results (default 10)."),
     },
     async (args) => {
       if (!args.query?.trim()) {
@@ -579,20 +501,20 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     "update_artifact",
     UPDATE_ARTIFACT_DESC,
     {
-      id: z.string().describe("UUID of the artifact to update"),
-      title: z.string().optional().describe("New title"),
-      artifact_type: z.string().optional().describe("New artifact_type"),
-      content: z.string().nullable().optional().describe("New inline content, or null to clear"),
-      pointer: pointerSchema.nullable().optional().describe("New pointer, or null to clear"),
-      status: statusEnum.optional().describe("New status — must follow valid transitions"),
-      scope: scopeEnum.optional().describe("New scope"),
-      tags: z.array(z.string()).optional().describe("New tags (full replacement)"),
-      dependencies: z.array(z.string()).optional().describe("New dependencies (full replacement)"),
-      execution_order: z.number().int().nullable().optional().describe("New execution_order, or null to clear"),
-      related_task_ids: z.array(z.string()).optional().describe("New related task IDs (full replacement)"),
-      metadata: z.record(z.string(), z.unknown()).optional().describe("Metadata to merge (top-level keys). Pipeline contract for cc-prompt artifacts: set 'target_repo' (REQUIRED — interceptor demotes ready artifacts without it) and optionally 'target_org'. 'content_hash' is auto-computed server-side and any caller-supplied value is stripped. 'branch_target' is DEPRECATED in favor of 'target_repo'."),
+      id: z.string().describe("Artifact id (UUID)."),
+      title: z.string().optional().describe("New title."),
+      artifact_type: z.string().optional().describe("New type (stored lowercase)."),
+      content: z.string().nullable().optional().describe("New inline content, replacing the old; null clears. Rejected while ready, executing or completed."),
+      pointer: pointerSchema.nullable().optional().describe("New pointer; null clears."),
+      status: statusEnum.optional().describe("New status; must be an allowed transition."),
+      scope: scopeEnum.optional().describe("New scope."),
+      tags: z.array(z.string()).optional().describe("New tags; replaces the whole list."),
+      dependencies: z.array(z.string()).optional().describe("Artifact UUIDs; replaces the whole list ([] clears). Each must exist."),
+      execution_order: z.number().int().nullable().optional().describe("New position within the artifact_type, unique per type; null clears."),
+      related_task_ids: z.array(z.string()).optional().describe("Related task UUIDs; replaces the whole list."),
+      metadata: z.record(z.string(), z.unknown()).optional().describe("Keys to merge into metadata (each replaces its value). cc-prompts need target_repo. content_hash is stripped."),
       expected_status: statusEnum.optional().describe(
-        "Optimistic concurrency precondition. When provided AND status is being changed, the UPDATE runs conditionally against this value — if the row is no longer in expected_status, returns STATUS_CONFLICT with current server state instead of silently overwriting a concurrent transition. When omitted, the row's current status (as of the read at the top of this call) is used as the precondition."
+        "Status you expect the artifact to have; checked only when this call changes status (STATUS_CONFLICT)."
       ),
     },
     async (args) => {
@@ -840,28 +762,28 @@ export function registerArtifactTools(mcpServer: McpServer): void {
     "edit_artifact",
     PATCH_ARTIFACT_DESC,
     {
-      id: z.string().describe("UUID of the artifact to edit"),
+      id: z.string().describe("Artifact id (UUID)."),
       edits: z
         .array(
           z.object({
             old_str: z
               .string()
               .min(1)
-              .describe("Exact text to find (literal, case- and whitespace-sensitive, not a regex)"),
+              .describe("Exact text to find: literal, case- and whitespace-sensitive, not a regex."),
             new_str: z
               .string()
-              .describe("Replacement text, inserted verbatim. Empty string deletes old_str"),
+              .describe("Replacement text, inserted verbatim; an empty string deletes old_str."),
             replace_all: z
               .boolean()
               .optional()
-              .describe("Replace every occurrence instead of requiring exactly one (default false)"),
+              .describe("Replace every occurrence instead of requiring exactly one (default false)."),
           })
         )
         .min(1)
         .max(50)
-        .describe("Ordered edits (1–50), each applied to the result of the previous one. All apply or none do."),
+        .describe("Exact-text replacements, applied in order."),
       expected_content_hash: z.string().optional().describe(
-        "Optimistic-concurrency precondition: the content_hash you last saw (metadata.content_hash from get_artifact, or content_hash from a previous edit_artifact). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns current_content_hash. Omit for last-writer-wins."
+        "content_hash you last read (get_artifact's metadata.content_hash or a previous edit). Mismatch: VERSION_CONFLICT, nothing written."
       ),
     },
     async (args) => {
