@@ -151,6 +151,10 @@ function serverEnv(port: number, dataDir: string, extra: NodeJS.ProcessEnv = {})
   };
   delete env.LEGACY_TOOL_NAMES;
   if (extra.LEGACY_TOOL_NAMES !== undefined) env.LEGACY_TOOL_NAMES = extra.LEGACY_TOOL_NAMES;
+  // The entity-graph tools and their aliases are listed below, so register
+  // them on both servers whatever a local .env says (dotenv never overrides a
+  // variable that is already set).
+  env.ENTITY_TOOLS = "true";
   return env;
 }
 
