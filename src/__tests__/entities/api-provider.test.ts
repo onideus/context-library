@@ -20,7 +20,7 @@ function anthropicProvider(overrides: Partial<ConstructorParameters<typeof ApiPr
   return new ApiProvider({
     apiKey: "test-key",
     baseUrl: "https://api.anthropic.com",
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-5-5",
     apiFormat: "anthropic",
     minConfidence: 0.5,
     timeoutMs: 5000,
@@ -49,7 +49,7 @@ function mockOk(body: unknown, status = 200) {
   };
 }
 
-function anthropicResponse(text: string, model = "claude-sonnet-4-20250514") {
+function anthropicResponse(text: string, model = "claude-sonnet-5-5") {
   return { content: [{ type: "text", text }], model };
 }
 
@@ -83,7 +83,7 @@ describe("ApiProvider.extract() — Anthropic format", () => {
     const result = await anthropicProvider().extract("content", "note", "n-001");
 
     expect(result.provider).toBe("api");
-    expect(result.providerVersion).toBe("claude-sonnet-4-20250514");
+    expect(result.providerVersion).toBe("claude-sonnet-5-5");
     expect(result.contentType).toBe("note");
     expect(result.contentId).toBe("n-001");
     expect(result.triples).toHaveLength(2);
