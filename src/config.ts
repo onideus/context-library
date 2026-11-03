@@ -104,7 +104,7 @@ export const config = {
   })(),
   entityApiKey: process.env.ENTITY_API_KEY ?? null,
   entityApiBaseUrl: process.env.ENTITY_API_BASE_URL ?? "https://api.anthropic.com",
-  entityApiModel: process.env.ENTITY_API_MODEL ?? "claude-sonnet-4-20250514",
+  entityApiModel: process.env.ENTITY_API_MODEL ?? "claude-sonnet-5-5",
   entityApiFormat: (process.env.ENTITY_API_FORMAT ?? "anthropic") as "anthropic" | "openai",
   // Graph-augmented retrieval — third RRF signal in search_context.
   // Disabled by default; enable once an extraction run has populated entity_nodes/entity_relations.

@@ -715,7 +715,7 @@ See `.env.example` for all configuration options.
 | `ENTITY_EXTRACTION_TIMEOUT_MS` | `30000` | Timeout per extraction call in milliseconds |
 | `ENTITY_API_KEY` | — | API key for the `api` provider (leave unset to disable) |
 | `ENTITY_API_BASE_URL` | `https://api.anthropic.com` | Base URL for the `api` provider |
-| `ENTITY_API_MODEL` | `claude-sonnet-4-20250514` | Model used by the `api` provider |
+| `ENTITY_API_MODEL` | `claude-sonnet-5-5` | Model used by the `api` provider |
 | `ENTITY_API_FORMAT` | `anthropic` | API wire format: `anthropic` or `openai` |
 
 ### Entity Graph Retrieval (optional)
