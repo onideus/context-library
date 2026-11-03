@@ -352,50 +352,17 @@ export function buildGraphOnlyFetchSql(
               `;
 }
 
-const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across all indexed content — handoffs, tasks, notes, artifacts.
+const SEARCH_CONTEXT_DESCRIPTION = `Semantic search across handoffs, tasks, notes and artifacts: the primary search. With the embedding server down it returns EMBEDDING_UNAVAILABLE: use search_tasks.
 
-CALL THIS WHEN:
-- The conversation touches architecture, strategy, infrastructure, pipeline, deployment, or design decisions
-- The user references a prior decision, pattern, or constraint ("we decided", "the rule is", "last time")
-- The user mentions a named person, device, project, or system by name
-- The topic involves career, compensation, hardware, network, medical, or financial context
-- You are about to recommend an approach and existing decisions may constrain the answer
-- You are about to update an artifact status, create a task, or modify any CB primitive (check existing state first)
+CALL THIS WHEN: the topic touches prior decisions or designs; the user names a person, project or system; before recommending or changing anything.
+DO NOT CALL WHEN: general knowledge, already searched this turn, or the user says not to.
+CONSEQUENCE OF SKIPPING: you contradict recorded decisions and duplicate work.
 
-DO NOT CALL WHEN:
-- The question is general knowledge with no project-specific dimension
-- You already retrieved relevant results earlier in this same conversation turn
-- The user explicitly says "don't search" or "from memory"
+Lifecycle (notes): a matching superseded note is replaced by the head of its chain, matched ids in matched_via; expired notes are omitted; if the chain ends in an expired note, nothing is shown for it and a notice says so. after/before filter the matched notes, so a successor shown by a redirect may lie outside the window: pass include_superseded: true when asking about historical state. Read lifecycle_notices when non-empty; cite successors, not superseded notes.
 
-CONSEQUENCE OF SKIPPING: Recommendations will contradict documented decisions. Duplicate work will be created. The user will catch the error and lose trust in the system.
+Read context_envelope first: address boundary_detected or constraint_alerts before advising.
 
-QUERY TIPS: Natural language, include entity names. People: full name. Devices: user's name for it.
-
-Content type guide — what each type contains:
-- handoff — what happened in recent sessions, operational history
-- note — decisions made, patterns established, lessons learned
-- task — action items and their status
-- artifact — generated outputs: CC prompts, research, templates, reports
-
-If you know which primitive you want, filter by content_types to reduce noise. If uncertain, run without a filter and let RRF surface what's most relevant.
-
-- after (optional): ISO date — only return results stored after this date
-- before (optional): ISO date — only return results stored before this date
-Use these to narrow searches to specific time windows (e.g., "what did I decide about X last week"). after/before filter the notes that MATCH; a successor shown by a redirect (see Lifecycle) may lie outside the window - pass include_superseded: true when asking about historical state.
-
-Lifecycle (notes): a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), carrying the old note's relevance. That result lists the superseded note id(s) that matched under matched_via, and lifecycle_notices holds one plain-English line per redirect ("Note 2b7c… ('…') matched but was superseded by 9e1a… ('…') on 2026-05-02 — showing the successor."). Expired notes are omitted (a superseded note is redirected even if its own valid_until has passed). If a superseded note matched but its chain ends in an expired note, nothing is shown for it and lifecycle_notices says so ("…which expired on <date>; there is no current version to show") - do not treat the old note as current. Every note result carries note_status (active | superseded | expired), superseded_by, superseded_at, valid_until, successor_title (null unless superseded) and matched_via ([] when the note matched directly). Cite the successor, never the superseded note. READ lifecycle_notices whenever it is non-empty; notices are reported only for notes in the returned page (or candidates that could have made it). redirected is the number of superseded matches that were replaced by a returned successor (several matches can collapse into one successor). Pass include_superseded: true to get superseded notes as themselves (each flagged and noticed), include_expired: true to include expired notes (flagged and noticed). Other content types have no lifecycle and are unaffected.
-
-READ context_envelope FIRST. If boundary_detected=true or constraint_alerts non-empty, address constraints before recommendations.
-
-Returns: {results[], context_envelope, query, total, mode, reranked, reranker_configured, deduplicated, pre_dedup_count, lifecycle_notices[], redirected, next_step}. pre_dedup_count is the candidate count before lifecycle redirection and dedup.
-
-reranker_configured is whether this server has a cross-encoder reranker endpoint set (RERANKER_URL). reranked is whether that reranker actually rescored this response. reranker_configured=false means reranking is off by configuration. reranker_configured=true with reranked=false on a response with more than one result means the reranker is unreachable, timing out, or returning bad data — the server logs a [rerank] warning with the reason. Single-result responses are never reranked.
-
-If results reference events indirectly, reformulate with specific terms, lower threshold (0.05), higher limit (20).
-
-Response Format:
-- Reasoning-capable models (extended thinking enabled): Use structured reflection before synthesizing results. Evaluate whether retrieved evidence actually supports the user's question. Note gaps explicitly when results are thin or off-topic.
-- Standard inference models: Respond directly using available results. Flag when results seem insufficient and suggest query reformulation.`;
+Returns: results[] (notes add note_status, successor_title, matched_via), context_envelope, lifecycle_notices[], redirected (superseded matches replaced by a returned successor), next_step, counts.`;
 
 export function registerSearchTools(mcpServer: McpServer): void {
   // \u2500\u2500 search_context \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -403,46 +370,46 @@ export function registerSearchTools(mcpServer: McpServer): void {
     "search_context",
     SEARCH_CONTEXT_DESCRIPTION,
     {
-      query: z.string().describe("Natural language search query"),
+      query: z.string().describe("Natural-language query; include specific names."),
       content_types: z
         .array(z.enum(["handoff", "task", "note", "artifact"]))
         .optional()
-        .describe("Filter by content type. Default: search all."),
+        .describe("Content types to search (default all)."),
       limit: z
         .number()
         .min(1)
         .max(20)
         .optional()
-        .describe("Max results. Default: 5"),
+        .describe("Max results (default 5)."),
       similarity_threshold: z
         .number()
         .min(0)
         .max(1)
         .optional()
-        .describe("Minimum cosine similarity. Default: 0.15"),
+        .describe("Minimum cosine similarity (default 0.15); try 0.05 and a higher limit when results are thin."),
       hybrid: z
         .boolean()
         .optional()
-        .describe("Enable hybrid search (vector + full-text RRF fusion). Default: true"),
+        .describe("Fuse vector and full-text ranking (default true); false = vector only."),
       after: z
         .string()
         .optional()
-        .describe("ISO date — only return results from content stored after this date"),
+        .describe("ISO date: only content stored after it."),
       before: z
         .string()
         .optional()
-        .describe("ISO date — only return results from content stored before this date"),
+        .describe("ISO date: only content stored before it."),
       include_superseded: z
         .boolean()
         .optional()
         .describe(
-          "Notes only. false (default): a superseded note that matches is replaced by its current successor (see matched_via and lifecycle_notices). true: return superseded notes as themselves, flagged note_status='superseded' with successor_title."
+          "Notes: true returns superseded notes as themselves (note_status 'superseded') instead of redirecting. Default false."
         ),
       include_expired: z
         .boolean()
         .optional()
         .describe(
-          "Notes only. false (default): notes whose valid_until has passed are omitted. true: include them, flagged note_status='expired'."
+          "Notes: true includes notes past valid_until, flagged note_status 'expired'. Default false."
         ),
     },
     async (args) => {

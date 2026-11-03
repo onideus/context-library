@@ -594,6 +594,35 @@ describe("MCP Tools", () => {
       expect(patchResult.source_handoff).toMatch(/\.json$/);
     });
 
+    it("returns the filename expected_source needs, from get_latest_handoff and from each patch", async () => {
+      await storeAndVerify({ tone_notes: "expected_source chain" });
+
+      const call = async (name: string, args: Record<string, unknown>) => {
+        const res = await mcpPost(jsonrpc("tools/call", { name, arguments: args }));
+        const data = (await parseSseResponse(res)) as any;
+        return JSON.parse(data.result.content[0].text);
+      };
+
+      const latest = await call("get_latest_handoff", {});
+      expect(latest.filename).toMatch(/\.json$/);
+
+      const first = await call("update_handoff", {
+        tone_notes: "patched once",
+        expected_source: latest.filename,
+      });
+      expect(first.success).toBe(true);
+      expect(first.source_handoff).toBe(latest.filename);
+      expect(first.filename).toMatch(/\.json$/);
+      expect(first.filename).not.toBe(latest.filename);
+
+      const second = await call("update_handoff", {
+        tone_notes: "patched twice",
+        expected_source: first.filename,
+      });
+      expect(second.success).toBe(true);
+      expect(second.source_handoff).toBe(first.filename);
+    });
+
     it("returns task_summary shape in response", async () => {
       // Schema 1.3: task_summary is authoritative (Postgres-backed) and
       // shares only the count contract across the dynamic and fallback

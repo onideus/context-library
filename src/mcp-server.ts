@@ -8,6 +8,7 @@ import { registerArtifactTools } from "./tools/artifacts.js";
 import { registerSearchTools } from "./tools/search.js";
 import { registerPrompts } from "./tools/prompts.js";
 import { registerEntityTools } from "./tools/entity-tools.js";
+import { SERVER_INSTRUCTIONS } from "./tools/server-instructions.js";
 import { readFileSync } from "node:fs";
 
 // The MCP server factory, kept free of import-time side effects (no listening
@@ -28,10 +29,13 @@ export const version = getVersion();
 
 // Factory for stateless MCP server instances (one per request, per SDK pattern)
 export function createMcpServer(): McpServer {
-  const server = new McpServer({
-    name: config.serverName,
-    version,
-  });
+  const server = new McpServer(
+    {
+      name: config.serverName,
+      version,
+    },
+    { instructions: SERVER_INSTRUCTIONS }
+  );
   registerHandoffTools(server);
   registerHandoffNavTools(server);
   registerTaskTools(server);

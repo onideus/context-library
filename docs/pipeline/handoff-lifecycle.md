@@ -6,7 +6,7 @@ The pipeline pattern depends on this discipline. If handoffs bloat into task dat
 
 ## Store vs patch vs get
 
-Three tools cover the whole lifecycle. Their descriptions are the contract of record — if this page and the tool descriptions disagree, the tool descriptions win.
+Three tools cover the whole lifecycle. Their descriptions are the contract of record for what each tool does — if this page and the tool descriptions disagree on behaviour, the tool descriptions win. The descriptions are deliberately compact; this page adds the usage guidance they leave out.
 
 | Tool | Purpose | When |
 |---|---|---|
@@ -64,7 +64,7 @@ Three specific failure modes recur when handoffs are misused. Each one degrades 
 
 ### Temporal urgency claims propagating as fact
 
-A handoff that says `"blocked on legal review, decision needed by Friday"` becomes canonical if it is not corrected on the next session. The next handoff will inherit the framing (via deep merge on `active_context`), and by the third session "needed by Friday" is being cited as background. If the deadline was speculative when written, mark it that way (`"blocked on legal review, tentative Friday target — confirm"`) or omit it entirely and put it in a task with a `due_date`. Tasks have a lifecycle; handoff prose does not.
+A handoff that says `"blocked on legal review, decision needed by Friday"` becomes canonical if it is not corrected on the next session. The next handoff will inherit the framing (`update_handoff` carries forward every `active_context` key the patch does not replace), and by the third session "needed by Friday" is being cited as background. If the deadline was speculative when written, mark it that way (`"blocked on legal review, tentative Friday target — confirm"`) or omit it entirely and put it in a task with a `due_date`. Tasks have a lifecycle; handoff prose does not.
 
 ### Handoffs as task database
 
@@ -74,7 +74,7 @@ If you find yourself writing tasks into `active_context`, stop and call `create_
 
 ### Architecture snapshots that rot
 
-`active_context` is for *what is happening right now*. It is not the place for "here's how the auth system works" or "the ingest pipeline uses Kafka." Those are notes. If an architectural description ends up in a handoff, it will be deep-merged into every subsequent handoff by the next `update_handoff` — and it will be wrong the moment the architecture changes, because nothing forces a refresh. Notes have no lifecycle expectation, are searchable by meaning, and are the correct home for durable interpretation.
+`active_context` is for *what is happening right now*. It is not the place for "here's how the auth system works" or "the ingest pipeline uses Kafka." Those are notes. If an architectural description ends up in a handoff, every subsequent `update_handoff` that does not replace that key will carry it forward — and it will be wrong the moment the architecture changes, because nothing forces a refresh. Notes have no lifecycle expectation, are searchable by meaning, and are the correct home for durable interpretation.
 
 ## What a healthy handoff looks like
 

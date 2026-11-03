@@ -367,124 +367,36 @@ export async function compactPreviousHandoff(previousFilename: string | null): P
 
 // ── Tool Descriptions ──────────────────────────────────────────────
 
-const STORE_HANDOFF_DESCRIPTION = `Store the current operational handoff state as a new timestamped file (append-only — previous handoffs are preserved, not overwritten). Use this for full-state captures at session boundaries. For partial updates mid-session, use update_handoff instead.
+const STORE_HANDOFF_DESCRIPTION = `Save the full session state as a new handoff; earlier handoffs are kept. This is a full replacement of the session state, not a patch: anything left out is absent from the new handoff. Partial change: update_handoff.
 
-Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and create_artifact for guidance on what belongs elsewhere.
+Call get_latest_handoff first and carry forward what is still true. Keep active_context to working state (decisions go in notes, action items in tasks).
 
-IMPORTANT: Always call get_latest_handoff first to load existing state before storing. This prevents data loss from overwriting fields you didn't intend to clear.
+final=true closes the session: after 15 minutes, get_latest_handoff reports session_continuity 'cold_start'.
 
-Usage cadence:
-- At session boundaries (start/end of conversation)
-- Mid-session when significant context has accumulated
-- Before heavy context operations that may compress earlier messages
+Returns: success, filename, stored_at, task_summary, schema_version, session_closed, session_closed_at, next_step.`;
 
-Session naming convention: Use YYYY-MM-DD-vNN format for session labels in active_context.session_meta.label (e.g., "2026-04-10-v01").
+const GET_LATEST_HANDOFF_DESCRIPTION = `Load the latest handoff: the previous session's operational_state, active_context and tone_notes, plus live task and artifact summaries.
 
-Content routing — what belongs in active_context (handoff):
-- Working state: current branch, where you stopped, next steps in this session
-- In-progress decisions not yet finalized
-- Short-lived context that only matters in the next 1–2 sessions
+CALL THIS WHEN: a session starts (always first); before create_handoff or update_handoff; before judgments that rely on recent context.
+DO NOT CALL WHEN: you need an older session (list_handoffs, then get_handoff).
+CONSEQUENCE OF SKIPPING: you miss open tasks, repeat finished work, or contradict the recorded state.
 
-What belongs elsewhere:
-- Durable decisions, architectural patterns, lessons learned → create_note
-- Action items with completion lifecycle → create_task
-- Generated outputs (CC prompts, research, templates) → create_artifact
+- session_continuity: 'resume' = state is live; 'cold_start' = closed with final=true 15+ minutes ago, treat as history; 'unknown' = no valid timestamp.
+- same_calendar_day=false: operational_state is from an earlier day; confirm it first.
+- task_summary and artifact_summary are live and authoritative over task or artifact text in the handoff.
+- Read and apply tone_notes before responding.
+- embedding_status.available=false: semantic search is offline; use search_tasks.
+- scope 'work' or 'personal' removes fields, listed in filtered_fields.
 
-If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
+Returns the handoff fields plus filename (update_handoff's expected_source), the fields above, elapsed_seconds, session_closed, handoff_count, next_step and other metadata. NOT_FOUND if none exists.`;
 
-Task management uses create_task and update_task. Handoff task arrays are deprecated and will be stripped server-side if provided (the request still succeeds; a structured warning is logged).
+const PATCH_HANDOFF_DESCRIPTION = `Change part of the latest handoff, saved as a new handoff (the source is kept). Read first with get_latest_handoff.
 
-Parameters:
-  - operational_state (optional): {sleep_hours, physical_state, energy_level, mood}
-  - active_context (optional): Free-form object for session context, conversation arc, key decisions, and prompts generated. Supports an optional session_meta sub-object: {label, surface, model} to record which instance/surface/model produced this handoff.
-  - tone_notes (optional): Guidance for the next instance on how to approach the user
-  - timezone (optional): IANA timezone identifier (e.g., 'America/New_York')
-  - final (optional, default false): Set true on the last write of a session. The stored handoff is marked session_closed=true with a session_closed_at timestamp so the next get_latest_handoff returns session_continuity='cold_start' instead of 'resume'. The flag is also reserved as the trigger for future compaction of the session's handoff chain. If unsure whether this is the final write, omit — false is the safe default.
+The merge is one level deep. tone_notes, timezone: replaced when given. operational_state, active_context: each top-level key sent replaces that key's whole value (nested objects such as session_meta are not merged); other keys are kept; an active_context key sent as null is stored as null. A field sent as null or omitted is unchanged.
 
-Returns: {success, stored_at, filename, task_summary, schema_version, session_closed, session_closed_at}
+final=true closes the session (it may be the only field); a call without it reopens a closed session. tasks is deprecated and a no-op: use create_task / update_task.
 
-Response Format:
-- Reasoning-capable models (extended thinking enabled): Use structured reflection before confirming the store. Evaluate whether the captured state reflects the actual session. Note any gaps in active_context or tasks explicitly.
-- Standard inference models: Respond directly. Confirm the store and summarize task_summary. Flag when captured state seems thin.`;
-
-const GET_LATEST_HANDOFF_DESCRIPTION = `Retrieve the most recent handoff state. Returns operational context, active work, task lists, and tone notes from the last session.
-
-WHEN TO CALL: At session start (always), before any create_handoff or update_handoff (to load current state), and before any evaluative or judgment-class response (to ground reasoning in recorded context, not inference alone).
-
-After loading the handoff, check for durable decisions by calling search_context(content_types: ['note']) or search_notes(query) for topic-specific retrieval. Notes are permanent interpretation — they don't expire between sessions. If making an architectural recommendation, career decision, or strategic judgment, check notes before responding. Handoffs show what was happening; notes show what has been decided and why.
-
-CONSEQUENCE OF SKIPPING: You will operate without session context, miss open tasks, duplicate completed work, or contradict the conversation arc documented in the handoff.
-
-Pre-computed fields: elapsed_seconds, same_calendar_day (if false, operational_state is stale — confirm with user), task_summary, artifact_summary, applied_scope/filtered_fields, schema_version, handoff_count, stored_at_local, embedding_status, evidence_pulled, session_closed, session_closed_at, session_continuity.
-
-Session continuity:
-- session_closed (boolean): true when the previous write set final=true. Implies the user explicitly ended that session.
-- session_closed_at (ISO timestamp or null): when the session was closed (matches stored_at on the closing handoff).
-- session_continuity ('cold_start' | 'resume' | 'unknown'): coarse signal for whether this conversation is picking up a still-open session ('resume') or starting after a closed one ('cold_start'). Use this to frame how literally to apply operational_state and active_context — a closed session's working state is historical, not live. A closed session reopened within ~15 minutes still reports 'resume' so brief reopens (e.g., to fix config) don't lose context.
-
-embedding_status: {available, last_success, pending_count}. available=false means semantic search (search_context) is offline — use search_tasks for keyword-based lookup. pending_count>0 means prior create/update operations have queued items awaiting TEI recovery; they drain automatically on the next successful search_context call; an operator \`npm run reindex\` re-embeds tasks, notes and artifacts.
-
-Response shape: operational_state, active_context, task_summary, artifact_summary, tone_notes (read before responding), timezone, stored_at, retrieved_at, elapsed_seconds, same_calendar_day, schema_version, handoff_count, embedding_status, evidence_pulled. Legacy handoff task arrays (tasks.completed/open/blocked) and memory_deltas are NOT returned since schema 1.3 — they are stripped from the response in every scope even when present on the underlying historical file. task_summary is the authoritative replacement for task arrays, computed live from the Postgres tasks table. Call search_tasks or list_tasks for full task detail.
-
-task_summary shape:
-When Postgres is available, task_summary is computed live from the authoritative tasks table and returns:
-{open_count, blocked_count, completed_count, critical_items: [{id, title, due_date}], due_this_week: [{id, title, due_date}], recently_completed: [{id, title, completed_at}], blocked_items: [{id, title, blocked_reason}]}
-When Postgres is unavailable, task_summary falls back to counts derived from the handoff's own tasks arrays: {open_count, blocked_count, completed_count}.
-
-artifact_summary shape:
-Computed live from Postgres against the authoritative artifacts table. Use this to ground narration about artifact lifecycle — handoff active_context.prompts_generated text can become stale once an artifact transitions to 'completed'. Shape:
-{ready_count, executing_count, draft_count, completed_count, recently_completed: [{id, title, artifact_type, execution_order, completed_at}], currently_executing: [{id, title, artifact_type, execution_order}], ready_queue: [{id, title, artifact_type, execution_order}]}
-recently_completed only includes artifacts whose status transitioned to 'completed' after the handoff's stored_at. When Postgres is unavailable, artifact_summary is null (no fallback) — treat the absence as a degradation signal.
-
-SessionEvidence:
-evidence_pulled indicates whether operational context was successfully loaded.
-When false, judgment-class responses (career advice, strategic decisions,
-relationship guidance) should note that they lack session history context.
-This is advisory — the model decides how to weight the signal.
-
-Parameters:
-- scope (optional, default "full"): "full" | "work" | "personal"
-- timezone (optional): IANA timezone for retrieved_at formatting`;
-
-const PATCH_HANDOFF_DESCRIPTION = `Apply a partial update to the most recent handoff state, creating a new handoff file with merged results. Use this instead of create_handoff when you only need to update mood, append to conversation arc, or revise tone_notes. Scalars overwrite, objects deep-merge. Each call creates a new timestamped file (append-only).
-
-Context Library has four content primitives: handoffs (ephemeral session state), tasks (actionable items with lifecycle), notes (permanent decisions and patterns), and artifacts (generated outputs with status lifecycle). This tool handles handoffs. Route content to the appropriate primitive — see create_note, create_task, and create_artifact for guidance on what belongs elsewhere.
-
-IMPORTANT: Always call get_latest_handoff first to confirm current state before patching. This prevents merge conflicts and stale data issues.
-
-Session naming convention: Use YYYY-MM-DD-vNN format for session labels in active_context.session_meta.label (e.g., "2026-04-10-v01").
-
-Merge semantics:
-- Scalars (tone_notes, timezone): Direct overwrite if provided, preserved if null/absent.
-- Objects (operational_state, active_context): Deep merge — patch keys overwrite, others preserved.
-- active_context supports an optional session_meta sub-object: {label, surface, model}.
-
-Task management uses create_task and update_task — the handoff tasks parameter is deprecated. A tasks argument is still accepted for backwards compatibility, but task array operations (append/remove/replace) are no-ops: the patch succeeds, a structured warning is logged, and the returned task_summary reflects the authoritative Postgres state.
-
-Parameters:
-  - operational_state (optional): Partial object — keys provided overwrite, others preserved
-  - active_context (optional): Partial object — keys provided overwrite, others preserved
-  - tone_notes (optional): String to replace, or null to preserve
-  - timezone (optional): IANA timezone string to replace, or null to preserve
-  - final (optional, default false): Set true on the last write of a session. Marks the patched handoff with session_closed=true plus a session_closed_at timestamp. Setting final=true alone (with no other field) is a valid session-close patch. Future get_latest_handoff calls read this to derive session_continuity (cold start vs. resume). If unsure whether this is the final write, omit — false is the safe default. Note: a patch without final=true clears any session_closed/session_closed_at markers carried over from the source handoff — patching a previously closed session reopens it.
-
-Content routing — what belongs in active_context (handoff):
-- Working state: current branch, where you stopped, next steps in this session
-- In-progress decisions not yet finalized
-- Short-lived context that only matters in the next 1–2 sessions
-
-What belongs elsewhere:
-- Durable decisions, architectural patterns, lessons learned → create_note
-- Action items with completion lifecycle → create_task
-- Generated outputs (CC prompts, research, templates) → create_artifact
-
-If content would be expensive for a future session to re-derive from handoff archaeology, it belongs in a note, not a handoff.
-
-Returns: {success, patched_fields, stored_at, source_handoff, task_summary, schema_version, session_closed, session_closed_at}
-
-Response Format:
-- Reasoning-capable models (extended thinking enabled): Use structured reflection before patching. Evaluate whether the patch is consistent with the loaded state. Note any gaps or conflicts explicitly.
-- Standard inference models: Respond directly. Confirm the patched_fields and updated task_summary. Flag when the patch seems inconsistent with recent context.`;
+Returns: success, filename (the new handoff), patched_fields, stored_at, source_handoff, task_summary, session_closed, session_closed_at, schema_version. HANDOFF_CONFLICT (nothing saved): expected_source is stale; re-read and re-apply.`;
 
 // ── Zod Schemas for update_handoff ──────────────────────────────────
 
@@ -542,8 +454,14 @@ export function registerHandoffTools(mcpServer: McpServer): void {
           energy_level: z.string().optional(),
           mood: z.string().optional(),
         })
-        .optional(),
-      active_context: z.record(z.string(), z.unknown()).optional(),
+        .optional()
+        .describe("The user's current state as free text: sleep_hours, physical_state, energy_level, mood."),
+      active_context: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          "Free-form working state: where work stopped, next steps, open decisions. Optional session_meta: {label (YYYY-MM-DD-vNN), surface, model}."
+        ),
       /**
        * @deprecated Handoff task arrays are deprecated since schema 1.3 and
        * stripped server-side before storage. Use create_task / update_task
@@ -555,20 +473,17 @@ export function registerHandoffTools(mcpServer: McpServer): void {
           open: z.array(z.string()).optional(),
           blocked: z.array(z.string()).optional(),
         })
-        .optional(),
-      tone_notes: z.string().optional(),
+        .optional()
+        .describe("Deprecated and ignored: handoff task arrays are stripped. Use create_task / update_task."),
+      tone_notes: z.string().optional().describe("Guidance for the next session on how to approach the user."),
       timezone: z
         .string()
         .optional()
-        .describe(
-          "IANA timezone identifier (e.g., 'America/New_York'). Used to format retrieved_at in the user's local timezone."
-        ),
+        .describe("IANA timezone, e.g. 'America/New_York'; used to show times in the user's local time."),
       final: z
         .boolean()
         .optional()
-        .describe(
-          "Set true on the last write of a session. Marks the stored handoff with session_closed=true and a session_closed_at timestamp. Default false (safe default for mid-session writes)."
-        ),
+        .describe("true on the last write of a session: marks the session closed. Default false."),
     },
     async (args) => {
       const argsBytes = Buffer.byteLength(JSON.stringify(args), "utf-8");
@@ -707,7 +622,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
         .enum(["full", "work", "personal"])
         .optional()
         .describe(
-          "Filter scope: 'full' returns everything (default), 'work' excludes personal health/financial data, 'personal' excludes work-specific items"
+          "'full' (default); 'work' drops sleep_hours, physical_state and other personal fields; 'personal' drops active_context."
         ),
     },
     async (args) => {
@@ -777,6 +692,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
             type: "text" as const,
             text: JSON.stringify({
               ...filtered,
+              filename: latestFilename,
               retrieved_at: localIsoTimestamp(handoff.timezone),
               elapsed_seconds: computeElapsedSeconds(handoff.stored_at),
               same_calendar_day: computeSameCalendarDay(handoff.stored_at, handoff.timezone),
@@ -809,11 +725,13 @@ export function registerHandoffTools(mcpServer: McpServer): void {
       operational_state: z
         .record(z.string(), z.string().optional())
         .nullable()
-        .optional(),
+        .optional()
+        .describe("Keys to set (sleep_hours, physical_state, energy_level, mood); each replaces that key. null = unchanged."),
       active_context: z
         .record(z.string(), z.unknown())
         .nullable()
-        .optional(),
+        .optional()
+        .describe("Top-level keys to set; each replaces that key's whole value, other keys are kept. null = unchanged."),
       /**
        * @deprecated Handoff task array operations are no-ops since schema
        * 1.3. The Postgres tasks table is authoritative — use create_task /
@@ -827,20 +745,19 @@ export function registerHandoffTools(mcpServer: McpServer): void {
           blocked: arrayOpSchema,
         })
         .nullable()
-        .optional(),
-      tone_notes: z.string().nullable().optional(),
-      timezone: z.string().nullable().optional(),
+        .optional()
+        .describe("Deprecated no-op, accepted and ignored. Use create_task / update_task."),
+      tone_notes: z.string().nullable().optional().describe("New tone_notes, replacing the old text. null = unchanged."),
+      timezone: z.string().nullable().optional().describe("New IANA timezone, e.g. 'Europe/Berlin'. null = unchanged."),
       final: z
         .boolean()
         .optional()
-        .describe(
-          "Set true on the last write of a session. Marks the patched handoff with session_closed=true and a session_closed_at timestamp. Default false (safe default for mid-session patches)."
-        ),
+        .describe("true on the last write of a session: marks it closed. Default false; a call without it reopens a closed session."),
       expected_source: z
         .string()
         .optional()
         .describe(
-          "Optimistic concurrency precondition. When provided, the patch is applied ONLY if the current latest handoff filename matches this value — if a concurrent writer (chat, pipeline, phone) has since written a new handoff, returns HANDOFF_CONFLICT with the current latest filename instead of merging over stale state. Backward compatible: when omitted, the patch applies to whatever is currently latest (legacy read-merge-write behaviour)."
+          "filename from get_latest_handoff (or your last create_handoff / update_handoff). If a newer handoff exists: HANDOFF_CONFLICT, nothing saved."
         ),
     },
     async (args) => {
@@ -1035,6 +952,7 @@ export function registerHandoffTools(mcpServer: McpServer): void {
             type: "text" as const,
             text: JSON.stringify({
               success: true,
+              filename: newFilename,
               patched_fields: patchedFields,
               stored_at: merged.stored_at,
               source_handoff: sourceFilename,
