@@ -55,6 +55,7 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: npm run typecheck:scripts
       - run: npm test
 
       - name: Notify on completion

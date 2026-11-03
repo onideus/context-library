@@ -15,7 +15,7 @@
  * Environment:
  *   ANTHROPIC_API_KEY  Anthropic API key (required)
  *   DATA_DIR           Root data dir (default: ./data). Handoffs live in DATA_DIR/handoffs.
- *   EXTRACT_MODEL      Override model (default: claude-sonnet-4-20250514).
+ *   EXTRACT_MODEL      Override model (default: claude-sonnet-5-5).
  *
  * Notes:
  *   - This script does NOT run in production. It is a one-shot seeding tool.
@@ -32,7 +32,7 @@ import { mergeEntities, type EntitySeed, type Scope } from "./merge-entities.js"
 
 export { mergeEntities, type EntitySeed, type Scope } from "./merge-entities.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "claude-sonnet-5-5";
 const BATCH_SIZE = 8;
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -118,6 +118,8 @@ async function readExistingSeed(path: string): Promise<EntitySeed[]> {
 // loading the Anthropic SDK. Re-exported at the top of this file.
 
 // ── Prompting ─────────────────────────────────────────────────────
+// buildUserMessage, parseModelOutput and extractBatch are exported for the
+// contract test (extract-entities-client.test.ts); nothing else imports them.
 
 const SYSTEM_PROMPT = `You are extracting canonical entities from operational handoff data.
 
@@ -147,7 +149,7 @@ Example shape (generic placeholders — do not copy these as real entities):
   {"canonical_name": "staging-server", "scope": "shared", "aliases": ["stage"], "constraints": ["Shared with other teams"], "confidence": 0.6}
 ]`;
 
-function buildUserMessage(batch: Array<{ filename: string; body: unknown }>): string {
+export function buildUserMessage(batch: Array<{ filename: string; body: unknown }>): string {
   const lines: string[] = [
     "Extract canonical entities from the following handoff files.",
     "Each file is presented as `--- <filename> ---` followed by its JSON body.",
@@ -161,7 +163,7 @@ function buildUserMessage(batch: Array<{ filename: string; body: unknown }>): st
   return lines.join("\n");
 }
 
-function parseModelOutput(raw: string): EntitySeed[] {
+export function parseModelOutput(raw: string): EntitySeed[] {
   // Strip fences if the model ignored instructions and wrapped the JSON.
   const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
   const parsed = JSON.parse(trimmed);
@@ -194,7 +196,7 @@ function parseModelOutput(raw: string): EntitySeed[] {
 
 // ── Orchestration ─────────────────────────────────────────────────
 
-async function extractBatch(
+export async function extractBatch(
   client: Anthropic,
   model: string,
   batch: Array<{ filename: string; body: unknown }>
