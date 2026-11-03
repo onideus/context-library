@@ -35,33 +35,13 @@ function jsonResponse(data: unknown) {
 
 // ── Tool Descriptions ──────────────────────────────────────────────
 
-const LIST_HANDOFFS_DESCRIPTION = `List historical handoffs as metadata (NOT full content). Use this to discover which handoff to retrieve via get_handoff when the user references a session by date or label. Results sort by stored_at descending (newest first).
+const LIST_HANDOFFS_DESCRIPTION = `List past handoffs as metadata only, newest first, to find a session by date or label; load one with get_handoff.
 
-This complements get_latest_handoff: use get_latest_handoff for the current session boundary, list_handoffs + get_handoff for digging into past sessions.
+Returns: handoffs [{filename, stored_at, session_label, size_bytes, …}], total_count, limit, offset.`;
 
-Parameters:
-- limit (optional, default 10, max 50): Page size
-- offset (optional, default 0): Pagination offset
-- after (optional): ISO date/timestamp — only include handoffs stored after this
-- before (optional): ISO date/timestamp — only include handoffs stored before this
+const GET_HANDOFF_DESCRIPTION = `Load one past handoff by filename (from list_handoffs), with the same scope filter and live summaries as get_latest_handoff.
 
-Returns: {handoffs: [{filename, stored_at, session_label, size_bytes, has_tasks, schema_version}], total_count, limit, offset}
-
-The metadata is intentionally lightweight. Call get_handoff with a filename to load full content for a specific entry.`;
-
-const GET_HANDOFF_DESCRIPTION = `Retrieve a specific historical handoff by filename (obtained from list_handoffs). Returns the same enriched response shape as get_latest_handoff, including elapsed_seconds, task_summary, artifact_summary, and scope filtering.
-
-Use this after list_handoffs identifies the target session. For the most recent handoff, use get_latest_handoff directly — it's faster than listing then fetching.
-
-Parameters:
-- filename (required): Exact filename from list_handoffs (must not contain '/' or '..')
-- scope (optional, default "full"): "full" | "work" | "personal" — same semantics as get_latest_handoff
-
-Returns: The handoff content filtered by scope plus retrieved_at, elapsed_seconds, same_calendar_day, task_summary, artifact_summary, applied_scope, filtered_fields (if scope != full), schema_version.
-
-artifact_summary scopes recently_completed to artifacts whose status transitioned to 'completed' after this handoff's stored_at — useful for spotting in-flight items the handoff narrates that have since finished. Null when Postgres is unavailable.
-
-Errors: Returns {error: true, code: "NOT_FOUND"} if the filename doesn't exist or fails validation, or {error: true, code: "PARSE_ERROR"} if the file exists but is not valid JSON.`;
+Returns the handoff fields plus task_summary, artifact_summary (recently_completed: since this handoff), elapsed_seconds, same_calendar_day, applied_scope, filtered_fields, other metadata. Errors: NOT_FOUND, PARSE_ERROR.`;
 
 // ── Tool Registration ──────────────────────────────────────────────
 
@@ -71,10 +51,10 @@ export function registerHandoffNavTools(mcpServer: McpServer): void {
     "list_handoffs",
     LIST_HANDOFFS_DESCRIPTION,
     {
-      limit: z.number().min(1).max(50).optional().default(10),
-      offset: z.number().min(0).optional().default(0),
-      after: z.string().optional().describe("ISO date — handoffs stored after this date"),
-      before: z.string().optional().describe("ISO date — handoffs stored before this date"),
+      limit: z.number().min(1).max(50).optional().default(10).describe("Page size (default 10)."),
+      offset: z.number().min(0).optional().default(0).describe("Entries to skip (default 0)."),
+      after: z.string().optional().describe("ISO date or timestamp: only handoffs stored after it."),
+      before: z.string().optional().describe("ISO date or timestamp: only handoffs stored before it."),
     },
     async (args) => {
       const limit = args.limit ?? 10;
@@ -167,12 +147,12 @@ export function registerHandoffNavTools(mcpServer: McpServer): void {
     "get_handoff",
     GET_HANDOFF_DESCRIPTION,
     {
-      filename: z.string().describe("Exact handoff filename from list_handoffs"),
+      filename: z.string().describe("Exact filename from list_handoffs."),
       scope: z
         .enum(["full", "work", "personal"])
         .optional()
         .default("full")
-        .describe("Filter scope: 'full' (default), 'work', or 'personal'"),
+        .describe("'full' (default), 'work' or 'personal'; the same filter as get_latest_handoff."),
     },
     async (args) => {
       // Path traversal prevention: reject any filename with separators or parent refs

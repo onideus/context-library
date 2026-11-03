@@ -1,11 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTool, strReplaceNoteAdapter } from "./tool-aliases.js";
 import { pool, query } from "../db/client.js";
 import { withTransaction } from "../db/changes.js";
 import { indexNote } from "../embeddings/indexer.js";
 import { config } from "../config.js";
 import { extractAndStore } from "../entities/pipeline.js";
-import { countOccurrences, literalReplace, appendWithNewline } from "./note-edits.js";
+import { appendWithNewline, applyEdits, type ContentEdit } from "./note-edits.js";
 import {
   EFFECTIVE_NOTE_STATUSES,
   PROVENANCE_VALUES,
@@ -162,182 +163,99 @@ const statusFilterEnum = z.enum(EFFECTIVE_NOTE_STATUSES);
 
 // ── Tool Descriptions ────────────────────────────────────────────
 
-const PROVENANCE_STEERING = `Provenance: set 'provenance' on every note to record where its content came from.
-- 'stated' — the user said it directly (e.g. "Jane Developer said the Acme Corp cutover is 12 March").
-- 'decided' — a decision reached in conversation and agreed by the user.
-- 'inferred' — your own conclusion from evidence the user did not confirm.
-- 'fetched' — captured from external material (also set source_url).
-- 'derived' — computed or aggregated from other notes, tasks, or handoffs.
-Be honest: 'inferred' is correct whenever the user did not confirm the claim — a wrong 'stated' or 'decided' will be treated as the user's own words in future sessions and never challenged.`;
+const CREATE_NOTE_DESC = `Save permanent knowledge: a decision and why, a constraint, a pattern, a lesson, a source's takeaways. If it replaces an older note, create it, then call supersede_note on the old one.
 
-const CREATE_NOTE_DESC = `Create a permanent knowledge entry. Use for decisions made, approaches tried, constraints discovered, patterns identified, article takeaways, and connections between ideas — anything that should survive across sessions and never be compacted away.
+provenance is optional but set it on every note (omitting it returns a hint): 'stated' = the user said it; 'decided' = agreed in conversation; 'inferred' = your unconfirmed conclusion; 'fetched' = external material (set source_url); 'derived' = computed from other records. Use 'inferred' whenever the user did not confirm.
 
-Context Library has four content primitives — tasks, handoffs, artifacts, and notes. Notes are distinct from the others:
-- Tasks are action items with a lifecycle (open → completed). "Research X" is a task.
-- Handoffs are ephemeral session state that gets compacted over time.
-- Artifacts are generated outputs with a status lifecycle (draft → ready → completed). A produced CC prompt is an artifact.
-- Notes are permanent interpretation — the reasoning, the decision, the insight. "After researching X, we decided Y because Z" is knowledge.
+valid_until needs an explicit offset (Z or ±hh:mm), else VALIDATION_ERROR; after it the note reads 'expired'.
 
-Use the 'domain' field to categorize (e.g., 'architecture', 'security', 'career', 'health'). Tags are free-form and compose with domain. The 'scope' field separates work/personal/shared knowledge. Provide 'source_url' when capturing takeaways from external material. Set 'related_task_ids' to link a note back to the tasks that produced it.
+Returns: id, title, created_at, version, status, provenance, valid_until, hint (when provenance was omitted).`;
 
-Scope routing: scope is required. If the user's request is clearly personal (health, family, finance), pass scope='personal'. If clearly work-related, pass scope='work'. If the note is reusable across contexts (architecture decisions, OSS project notes, language patterns), pass scope='shared'. When ambiguous, ask before storing.
+const GET_NOTE_DESC = `Get one note by id, with content. status is 'active', 'superseded' or 'expired' (computed from valid_until). successor is {id, title} when superseded; supersedes lists the ids this note replaced. Pass version as expected_version when writing.
 
-Content can be long — notes do not compact. Notes are versioned: every later edit keeps the prior version (see get_note_history), and a note whose facts change should be edited with update_note, or retired with supersede_note once a newer note replaces it.
+Returns every note field (content, status, version, provenance, valid_until, …) plus successor and supersedes. NOT_FOUND if missing.`;
 
-${PROVENANCE_STEERING}
+const LIST_NOTES_DESC = `List notes by filter, metadata only (get_note returns the content). Defaults: every scope and status, newest first.
 
-Expiry: set 'valid_until' (ISO-8601 date-time WITH an explicit offset, e.g. 2026-12-31T00:00:00Z) when the knowledge has a known end date — a freeze window, a trial period, a deadline-bound constraint. After that instant the note reads status 'expired' (computed; nothing is deleted or hidden). Omit it for knowledge that does not lapse. A date-time without an offset is rejected with VALIDATION_ERROR.
+Returns: notes [{id, title, domain, scope, tags, status, valid_until, superseded_by, provenance, version, created_at, updated_at}], total_count, limit, offset.`;
 
-Returns { id, title, created_at, version (starts at 1), status, provenance, valid_until }, plus a 'hint' when provenance was omitted.`;
+const SEARCH_NOTES_DESC = `Keyword search (full-text, English stemming) over note titles and content, ranked; returns full notes. search_context covers all content types.
 
-const GET_NOTE_DESC = `Retrieve a single note by its UUID. Returns the full note object including content.
+CALL THIS WHEN: a prior decision may constrain a recommendation; the user asks what was decided; before creating a note on a topic.
+DO NOT CALL WHEN: search_context already returned the relevant notes this turn, or the question is about session state.
+CONSEQUENCE OF SKIPPING: you re-derive settled decisions and may contradict them.
 
-Lifecycle fields: 'status' is 'active', 'superseded' (replaced by a newer note — see 'successor'), or 'expired' (valid_until has passed; computed at read time). 'successor' is { id, title } for a superseded note, otherwise null. 'supersedes' lists the ids of notes this one replaced. 'provenance' says where the content came from (null = not recorded). 'version' is the note's edit counter — pass it as expected_version to update_note, str_replace_note, append_note, or supersede_note to guard against overwriting a concurrent edit. Use get_note_history to read what earlier versions said.`;
+Lifecycle: a matching superseded note is replaced by the head of its supersession chain, matched ids in matched_via. Expired notes are omitted; if the chain ends in an expired note, nothing is shown and a notice says so. The scope and domain filters apply to the successor too: if it falls outside them, the superseded note comes back as itself, flagged. Read lifecycle_notices when non-empty; cite successors, never superseded notes.
 
-const LIST_NOTES_DESC = `List knowledge entries with optional filters and pagination. Returns metadata only (id, title, domain, scope, tags, status, valid_until, superseded_by, provenance, version, timestamps) — NOT the full content. Call get_note for the body.
+Returns: notes[] (with successor_title, matched_via, rank), total_count (before redirection), redirected (superseded matches replaced by a returned successor), lifecycle_notices[], next_step.`;
 
-Defaults to newest-first by created_at. Filter by scope, domain, tags (ANY-match), or lifecycle status. Use search_notes or search_context when you want relevance ranking instead of filtered browsing.
+const UPDATE_NOTE_DESC = `Change fields of a note. Sent fields replace the stored values, omitted ones are kept; tags and related_task_ids replace the whole list. null clears only domain, source_url, provenance or valid_until (clearing valid_until revives an expired note). Small content changes: edit_note or append_note.
 
-Scope filter: when scope is omitted, this tool returns notes across all scopes (work, personal, shared). Pass scope='work', 'personal', or 'shared' to restrict results.
+Use it to correct a note that is still true; for a replaced decision, use supersede_note. Editing a superseded or expired note is allowed and versioned.
 
-Status filter: when status is omitted, notes of every status are listed (this is an inventory, not retrieval). Pass status='active' for current knowledge only, 'superseded' for notes that have been replaced, or 'expired' for notes whose valid_until has passed.`;
+Errors: VERSION_CONFLICT (stale expected_version; nothing written, current holds the note), VALIDATION_ERROR (valid_until without offset, or no field).
 
-const SEARCH_NOTES_DESC = `Full-text search across note titles and content. Uses PostgreSQL FTS with English stemming, ranked by relevance. Returns matching notes WITH full content (unlike list_notes).
+Returns the note plus changed (false for a no-op; version unchanged).`;
 
-Use search_notes when looking for a specific decision or pattern: "What did we decide about X?", "Is there a note about Y?" It queries only the notes table, making it faster for targeted knowledge lookup. Prefer search_context when you need cross-primitive results (handoffs + notes + artifacts in one query). Prefer search_notes when you specifically want decisions and patterns.
+const EDIT_NOTE_DESC = `Replace exact text inside a note's content without resending it. Call get_note first, copy each old_str exactly, and pass its version as expected_version.
 
-CALL THIS WHEN:
-- You need to verify a prior decision before making a recommendation
-- The topic touches a domain where decisions have been documented (architecture, security, career, health)
-- You are about to create or update an artifact and need to check for related decisions
-- The user asks "what did we decide about X" or "is there a rule for Y"
+Edits apply in order, each to the previous result; all apply or none do. old_str must occur exactly once unless replace_all is true. The result may be empty. Editing a superseded or expired note is allowed and versioned.
 
-DO NOT CALL WHEN:
-- search_context already returned relevant notes in this turn
-- The question is about ephemeral session state (use get_latest_handoff)
+Errors (nothing written): NOT_FOUND; VERSION_CONFLICT (stale expected_version, checked first; current holds the note); NO_MATCH / AMBIGUOUS_MATCH with edit_index, match_count.
 
-CONSEQUENCE OF SKIPPING: You will re-derive decisions that were already made, potentially reaching different conclusions.
+Returns, without content: id, title, version, changed, updated_at, replacements (per edit), content_length.`;
 
-Scope filter: when scope is omitted, this tool searches notes across all scopes. Pass scope='work', 'personal', or 'shared' to restrict results to a single context.
+const APPEND_NOTE_DESC = `Add text to the end of a note, on a new line, without resending it; suited to logs and dated entries. Appending to a superseded or expired note is allowed and versioned.
 
-Lifecycle: a note can be superseded by a newer note, or expire (valid_until in the past). By default this tool REDIRECTS: when a superseded note matches, the result for it is replaced by the note that currently stands in its place (the head of its supersession chain), keeping the old note's relevance rank, and its matched_via lists the superseded note id(s) that matched. If the current note also matched directly, the two merge into one result. Expired notes are omitted (a superseded note is still redirected even if its own valid_until has passed). If a superseded note matched but its chain ends in an expired note, nothing is shown for it and a notice says so - do not treat the old note as current. The scope and domain filters apply to the successor too: if the successor lies outside the filter, the superseded note is returned as itself, flagged status 'superseded', with a notice. 'lifecycle_notices' holds one plain-English line per redirect (and per expired or superseded note you opted to see) - READ it whenever it is non-empty, and cite the successor, never the superseded note. Pass include_superseded: true to get superseded notes as themselves (flagged, with successor_title), include_expired: true to include expired notes (flagged). Each result carries status (active | superseded | expired), superseded_by, superseded_at, successor_title (null unless superseded), valid_until, provenance, version, matched_via ([] when it matched directly).
+Errors: VALIDATION_ERROR (empty content), NOT_FOUND, VERSION_CONFLICT (nothing written; current holds the note).
 
-Returns: { notes[], total_count, redirected, lifecycle_notices[], next_step }. total_count counts the matching candidates BEFORE redirection; because redirects can merge or drop results, notes.length may be smaller than total_count or limit (redirected is the number of superseded matches that were replaced by a returned successor — several matches can collapse into one successor). Notices describe only the page returned.
+Returns, without content: id, title, version, changed, updated_at, content_length.`;
 
-Filter by scope and domain. For cross-type semantic search that finds relevant notes alongside handoffs and tasks, use search_context with content_types: ["note"] instead — this tool only searches within the notes table.`;
+const DELETE_NOTE_DESC = `Permanently delete a note and its version history. This is the only way to remove a note and cannot be undone: use it only for a note that should never have existed; when knowledge changed, use supersede_note. Notes it had superseded are re-pointed to its successor, or reactivated if it had none.
 
-const UPDATE_NOTE_DESC = `Update fields on an existing note. All fields are optional — only provided fields are modified, and at least one must be given. Tags and related_task_ids are full-replacement (provide complete arrays). Pass null to clear domain, source_url, provenance, or valid_until. Re-embeds on title/content/domain/tags change. For small edits to an existing note's content, prefer str_replace_note (exact-text replace) or append_note (add to the end) — they avoid resending the full content.
+Returns: deleted, id, relinked [{id, status, superseded_by}]. NOT_FOUND if missing.`;
 
-Version history: every note has a 'version' counter. Every edit that actually changes something records the prior version (readable later with get_note_history) and bumps the counter. An edit that changes nothing is a true no-op: the response has changed: false and the version does not move.
+const SUPERSEDE_NOTE_DESC = `Retire a note that a newer note replaces (a decision reversed, a fact changed). The old note keeps its content and history and gets status 'superseded'. To fix a note that is still true, edit it instead.
 
-Edit precondition: pass expected_version (the 'version' you saw in get_note or in a previous response) to be sure you are editing the note you read. It is enforced whenever present, whatever fields the call changes. If the note has moved on, nothing is written and you get VERSION_CONFLICT with the note as it is now under 'current' — re-read, reconcile, and retry with the new version. Omit expected_version for a last-writer-wins edit (the overwritten content is still kept in history).
+Create the successor first: it must exist, be active (not superseded or expired) and differ from the old note, else INVALID_SUCCESSOR. An already-superseded note returns STATUS_CONFLICT; a stale expected_version, VERSION_CONFLICT.
 
-Valid_until: ISO-8601 date-time WITH an explicit offset (e.g. 2026-12-31T00:00:00Z); a value without an offset is rejected. Pass null to clear it, which revives an expired note.
+Search then redirects matches of the old note to the successor and reports it in lifecycle_notices. No undo: only delete_note on the successor reverses it, deleting it and reactivating every note it superseded.
 
-This tool cannot change a note's lifecycle status. To retire a note in favour of a newer one, call supersede_note. Editing a superseded or expired note is allowed and versioned; its status is unaffected.
+Returns: superseded {id, title, version, superseded_by, superseded_at}, successor {id, title}. NOT_FOUND names the missing id.`;
 
-${PROVENANCE_STEERING} Pass provenance: null to clear it.
+const GET_NOTE_HISTORY_DESC = `Read a note's version history: what it said before each edit, what changed and which tool changed it. Newest first; entry 0 is the current version.
 
-Returns the full updated note plus 'changed' (false when the call was a no-op).`;
+CALL THIS WHEN: a note reads differently than expected; after VERSION_CONFLICT; the user asks what a note used to say or when it changed.
+DO NOT CALL WHEN: finding notes (search_notes) or reading only the current text (get_note).
+CONSEQUENCE OF SKIPPING: you may overwrite another writer's change unseen, or misreport what a note said.
 
-const STR_REPLACE_NOTE_DESC = `Replace an exact span of text inside an existing note's content without resending the whole note. Prefer this over update_note for small edits to long notes (changing a status line, fixing a sentence, updating a value) — update_note requires the complete new content, costs tokens for the entire note, and risks silently dropping lines you didn't mean to touch.
+Each entry is a full snapshot plus changed_fields, changed_via and changed_at for the edit that replaced it (empty on the current entry). changed_via names the writing tool ('sql' = outside the tools); 'edit_note' and 'str_replace_note' are the same kind of edit.
 
-Workflow: call get_note first so old_str is copied exactly from the current content, and pass the 'version' it returned as expected_version.
+Returns: id, current_version, total_entries, entries, limit, offset. NOT_FOUND if missing.`;
 
-Parameters:
-- id (required): UUID of the note to edit.
-- old_str (required, non-empty): the exact text to find. Literal match — case-sensitive, whitespace-sensitive, NOT a regex (characters like . * $ ( ) are matched as-is).
-- new_str (required, may be empty): the replacement text, inserted verbatim (no $& / $1 substitution). An empty string deletes old_str.
-- replace_all (optional, default false): when true, replace every occurrence; when false, old_str must occur exactly once.
-- expected_version (optional): the note's 'version' as you last saw it (from get_note or a previous response). Enforced whenever present; omit for last-writer-wins.
+const PRUNE_NOTE_HISTORY_DESC = `Delete old versions from one note's history, keeping the newest keep_last; the note and its version number do not change. Irreversible. History is otherwise kept and exported, so this is the only way to remove text edited out of a note (e.g. a pasted secret).
 
-Errors (returned as {error: true, message, code, ...}):
-- VALIDATION_ERROR — old_str is empty.
-- NOT_FOUND — no note with that id.
-- VERSION_CONFLICT — expected_version is stale: the note changed since you read it, so nothing is written. The note as it is now is under 'current' — copy old_str from it and retry with its version. Checked before matching, so it takes precedence over NO_MATCH / AMBIGUOUS_MATCH.
-- NO_MATCH — old_str does not occur in the content (match_count: 0). Re-read the note with get_note and copy the text exactly.
-- AMBIGUOUS_MATCH — old_str occurs more than once and replace_all is false (match_count gives the number of occurrences). Widen old_str with surrounding text until it is unique, or pass replace_all: true if every occurrence should change.
-
-Version history: like update_note, an edit that changes the content records the prior version (readable with get_note_history, changed_via 'str_replace_note') and bumps 'version'. If the replacement leaves the content identical (new_str equal to old_str), the call is a true no-op: changed is false and the version does not move. Editing a superseded or expired note is allowed and versioned; its status is unaffected.
-
-Returns a compact confirmation WITHOUT the note content: {id, title, version, changed, updated_at, replacements, content_length}. replacements is the number of occurrences replaced; content_length is the new content length (JavaScript string length, i.e. UTF-16 code units). Title, tags, and other fields are unchanged — use update_note for those. Re-embeds the note for search when the content changed.`;
-
-const APPEND_NOTE_DESC = `Append text to the end of an existing note's content without resending the whole note. Prefer this over update_note for logs, running journals, and dated entries (e.g. "2026-01-15: Acme Corp rollout finished") — it costs tokens only for the new text and cannot accidentally drop existing lines.
-
-Parameters:
-- id (required): UUID of the note to append to.
-- content (required, non-empty): the text to append. It always starts on a new line: if the existing content is non-empty and does not already end with a newline, exactly one newline is inserted first. If the existing content is empty, the result is just the new text.
-- expected_version (optional): the note's 'version' as you last saw it. Enforced whenever present; omit it (the usual case for a log) to append to whatever the note holds now.
-
-Errors (returned as {error: true, message, code, ...}):
-- VALIDATION_ERROR — content is empty.
-- NOT_FOUND — no note with that id.
-- VERSION_CONFLICT — expected_version is stale; nothing is written and the note as it is now is under 'current'.
-
-Version history: every append records the prior version (readable with get_note_history, changed_via 'append_note') and bumps 'version', like update_note. Editing a superseded or expired note is allowed and versioned; its status is unaffected.
-
-Returns a compact confirmation WITHOUT the note content: {id, title, version, changed, updated_at, content_length}. content_length is the new total content length (JavaScript string length, i.e. UTF-16 code units). Concurrent appends to the same note are serialized, so none are lost. Re-embeds the note for search.`;
-
-const DELETE_NOTE_DESC = `Permanently delete a note by UUID. Also removes its entry from the embeddings index and its entire version history. Knowledge entries are intended to be permanent — use this only for mistakes (a note that should never have existed); use supersede_note when the knowledge simply changed. Deletion cannot be undone.
-
-Deleting a note that sits in a supersession chain splices the chain so no note is left pointing at nothing: notes that the deleted note had superseded are re-pointed to the deleted note's own successor, or reactivated (status back to 'active') when the deleted note was the end of the chain. The response lists every affected note under 'relinked' as { id, status, superseded_by }.
-
-Returns { deleted: true, id, relinked }.`;
-
-const SUPERSEDE_NOTE_DESC = `Retire a note because a newer note replaces it. The old note is kept — content and history intact — and marked status 'superseded' with 'superseded_by' pointing at the successor and 'superseded_at' recording when. Use this when the knowledge CHANGED (a decision was reversed, a fact was updated); use delete_note only for mistakes, and update_note to fix or extend a note that is still true.
-
-Workflow: (1) create the successor first with create_note — it must already exist; (2) call supersede_note({ id: <old note>, superseded_by: <new note> }). Both notes must be active: a superseded or expired note cannot be the successor (INVALID_SUCCESSOR), and a note cannot supersede itself (INVALID_SUCCESSOR). If the old note is already superseded you get STATUS_CONFLICT with the note as it is now under 'current' (its 'superseded_by' shows what replaced it). Pass expected_version (from get_note) to guard against the old note being edited concurrently: a stale value returns VERSION_CONFLICT with the current note.
-
-Superseded notes keep their content and are marked status 'superseded' with superseded_by pointing at the successor; get_note on the successor lists the old note under 'supersedes'. Search follows the chain for readers: search_notes and search_context redirect from a superseded note to its successor by default and say so in lifecycle_notices (pass include_superseded: true to see superseded notes themselves), so superseding does not hide the old wording from a query that only matches it. There is no un-supersede tool. If you superseded the WRONG note, the only recovery is delete_note on the successor — which PERMANENTLY deletes the successor and its history, and reactivates (or re-points down the chain) EVERY note that successor had superseded, not just the one you meant. Do that only when the successor was created for this supersession alone and you will re-create it; otherwise tell the user and leave the chain as it is.
-
-Returns { superseded: { id, title, version, superseded_by, superseded_at }, successor: { id, title } }. Errors: NOT_FOUND (either id missing; the message says which), VERSION_CONFLICT, STATUS_CONFLICT, INVALID_SUCCESSOR.`;
-
-const GET_NOTE_HISTORY_DESC = `Read the version history of a note: what it said before each edit, which fields changed, and which tool made the change. Entries are newest-first; entry 0 is the current version (is_current: true), followed by earlier versions. Each entry carries the full prior content: version, title, content, domain, tags, scope, source_url, related_task_ids, provenance, valid_until, status (the stored lifecycle status, 'active' or 'superseded'; expiry is not stored, so compare valid_until), superseded_by, superseded_at, changed_fields, changed_via, changed_at, is_current.
-
-For an earlier version, changed_fields / changed_via / changed_at describe the edit that REPLACED that version (for example changed_fields ["content"], changed_via "update_note"). The current entry has changed_fields [] and changed_via null, and its changed_at is the note's last-modified time. changed_via is the tool that wrote the change; "sql" means a writer outside the tools.
-
-CALL THIS WHEN:
-- A note reads differently than you expected, or its content seems to have changed since you last saw it
-- You received VERSION_CONFLICT from update_note, str_replace_note, append_note, or supersede_note and need to see what the other writer changed
-- The user asks what a note used to say, when it changed, or what changed
-- You are about to revert or rewrite a note and want to see the prior wording first
-
-DO NOT CALL WHEN:
-- You want to browse or find notes (use list_notes or search_notes)
-- You want the current fact only (use get_note)
-
-CONSEQUENCE OF SKIPPING: You may overwrite another writer's change without seeing it, or misreport what a note used to say.
-
-Parameters: limit (1-50, default 10) and offset (default 0, counts from entry 0) page through long histories. Returns { id, current_version, total_entries, entries, limit, offset }. NOT_FOUND if the note does not exist. History is removed with the note when it is deleted, and can be trimmed with prune_note_history.`;
-
-const PRUNE_NOTE_HISTORY_DESC = `Delete old versions from one note's history, keeping only the newest keep_last prior versions. The note itself (its current content) is not changed.
-
-This is the ONLY way to remove content that was edited out of a note: version history otherwise persists indefinitely and is included in exports. Use it when something sensitive (a pasted secret, a mistaken personal detail) was edited out of a note and must not survive in history, or to trim a very long history. keep_last: 0 purges all history. This is irreversible: pruned versions can no longer be read with get_note_history. The note's current version number is unchanged.
-
-Returns { id, current_version, deleted (history rows removed), remaining (history rows kept) }. NOT_FOUND if the note does not exist.`;
+Returns: id, current_version, deleted, remaining. NOT_FOUND if missing.`;
 
 // ── Partial content edits ────────────────────────────────────────
-
-type ContentEdit =
-  | { ok: true; content: string; replacements?: number }
-  | { ok: false; message: string; code: string; match_count: number };
 
 type ContentEditOutcome =
   | { kind: "conflict"; conflict: NoteWriteConflict }
   | { kind: "rejected"; result: Extract<ContentEdit, { ok: false }> }
-  | { kind: "updated"; row: NoteRow; changed: boolean; replacements?: number };
+  | { kind: "updated"; row: NoteRow; changed: boolean; replacements?: number | number[] };
 
 /**
- * Shared body for str_replace_note / append_note: lock the row FOR UPDATE,
- * compute the new content from it, and write it through updateNoteInTx in the
- * same transaction — so these tools get update_note's version history
+ * Shared body for edit_note / append_note (and the deprecated str_replace_note
+ * alias, which writes as edit_note): lock the row FOR UPDATE, compute the new
+ * content from it, and write it through updateNoteInTx in the same
+ * transaction — so these tools get update_note's version history
  * (changed_via = the tool name), true-no-op semantics, change-log row, and
  * history retention. Post-commit re-index + entity extraction mirror
  * update_note. The response is compact — no `content` echo.
  */
 async function editNoteContent(
   id: string,
-  via: "str_replace_note" | "append_note",
+  via: "edit_note" | "append_note",
   expectedVersion: number | undefined,
   edit: (content: string) => ContentEdit
 ) {
@@ -380,8 +298,14 @@ async function editNoteContent(
     return conflictResponse(outcome.conflict, id);
   }
   if (outcome.kind === "rejected") {
-    const { message, code, match_count } = outcome.result;
-    return jsonResponse({ error: true, message, code, match_count });
+    const { message, code, match_count, edit_index } = outcome.result;
+    return jsonResponse({
+      error: true,
+      message,
+      code,
+      ...(edit_index !== undefined ? { edit_index } : {}),
+      match_count,
+    });
   }
 
   const { row, changed, replacements } = outcome;
@@ -416,20 +340,20 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "create_note",
     CREATE_NOTE_DESC,
     {
-      title: z.string().describe("Short descriptive title for the knowledge entry"),
-      content: z.string().describe("The knowledge content — decisions, insights, patterns, takeaways. Can be long."),
+      title: z.string().describe("Short descriptive title."),
+      content: z.string().describe("The knowledge itself; can be long."),
       scope: scopeEnum.describe(
-        "'work', 'personal', or 'shared' (required). Pass 'shared' when the knowledge is reusable across contexts (architecture decisions, OSS project notes)."
+        "'work', 'personal', or 'shared' (reusable across both). Ask when unclear."
       ),
-      domain: z.string().optional().describe("Knowledge domain for categorization (e.g., 'architecture', 'security', 'career', 'health')"),
-      tags: z.array(z.string()).optional().describe("Free-form tags for categorization"),
-      source_url: z.string().optional().describe("URL of the source material, if applicable"),
-      related_task_ids: z.array(z.string()).optional().describe("UUIDs of related tasks, if applicable"),
+      domain: z.string().optional().describe("Category, e.g. 'architecture', 'security', 'health'."),
+      tags: z.array(z.string()).optional().describe("Free-form tags."),
+      source_url: z.string().optional().describe("URL of the source material."),
+      related_task_ids: z.array(z.string()).optional().describe("UUIDs of related tasks."),
       provenance: provenanceEnum.optional().describe(
-        "Where the content came from: 'stated' (user said it), 'decided' (agreed in conversation), 'inferred' (your own conclusion, unconfirmed), 'fetched' (external material), 'derived' (computed from other notes/tasks/handoffs). Be honest — 'inferred' whenever the user did not confirm."
+        "Where the content came from (see the tool description). Use 'inferred' unless the user confirmed it."
       ),
       valid_until: z.string().optional().describe(
-        "Expiry instant as an ISO-8601 date-time WITH an explicit offset (e.g. '2026-12-31T00:00:00Z'). After it the note reads status 'expired'. Omit for knowledge that does not lapse."
+        "Expiry: ISO-8601 date-time with offset, e.g. '2026-12-31T00:00:00Z'. Omit if it does not lapse."
       ),
     },
     async (args) => {
@@ -496,7 +420,7 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "get_note",
     GET_NOTE_DESC,
     {
-      id: z.string().describe("UUID of the note to retrieve"),
+      id: z.string().describe("Note id (UUID)."),
     },
     async (args) => {
       try {
@@ -538,16 +462,16 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "list_notes",
     LIST_NOTES_DESC,
     {
-      limit: z.number().min(1).max(100).optional().describe("Max results (1-100, default 20)"),
-      offset: z.number().min(0).optional().describe("Offset for pagination (default 0)"),
-      scope: scopeEnum.nullable().optional().describe("Filter by scope (null/omitted = all scopes)"),
-      domain: z.string().optional().describe("Filter by domain"),
-      tags: z.array(z.string()).optional().describe("Filter by tags (ANY match)"),
+      limit: z.number().min(1).max(100).optional().describe("Max results (default 20)."),
+      offset: z.number().min(0).optional().describe("Rows to skip (default 0)."),
+      scope: scopeEnum.nullable().optional().describe("Scope filter; omit or null = all."),
+      domain: z.string().optional().describe("Domain filter (exact match)."),
+      tags: z.array(z.string()).optional().describe("Match notes with ANY of these tags."),
       status: statusFilterEnum.nullable().optional().describe(
-        "Filter by computed lifecycle status: 'active', 'superseded', or 'expired' (null/omitted = all statuses)"
+        "Lifecycle filter ('expired' = valid_until has passed); omit or null = all."
       ),
-      order_by: listOrderByEnum.optional().describe("Sort field (default: 'created_at')"),
-      order_dir: orderDirEnum.optional().describe("Sort direction (default: 'desc')"),
+      order_by: listOrderByEnum.optional().describe("Sort field (default 'created_at')."),
+      order_dir: orderDirEnum.optional().describe("Sort direction (default 'desc')."),
     },
     async (args) => {
       try {
@@ -610,21 +534,21 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "search_notes",
     SEARCH_NOTES_DESC,
     {
-      query: z.string().describe("Full-text search query"),
-      scope: scopeEnum.nullable().optional().describe("Filter by scope"),
-      domain: z.string().optional().describe("Filter by domain"),
-      limit: z.number().min(1).max(50).optional().describe("Max results (1-50, default 10)"),
+      query: z.string().describe("Search words; every word must match (stemmed)."),
+      scope: scopeEnum.nullable().optional().describe("Scope filter; omit or null = all."),
+      domain: z.string().optional().describe("Domain filter (exact match)."),
+      limit: z.number().min(1).max(50).optional().describe("Max results (default 10)."),
       include_superseded: z
         .boolean()
         .optional()
         .describe(
-          "false (default): a superseded note that matches is replaced by its current successor (see matched_via and lifecycle_notices). true: return superseded notes as themselves, flagged status 'superseded' with successor_title."
+          "true: return superseded notes as themselves (status 'superseded') instead of redirecting. Default false."
         ),
       include_expired: z
         .boolean()
         .optional()
         .describe(
-          "false (default): notes whose valid_until has passed are omitted. true: include them, flagged status 'expired'."
+          "true: include notes whose valid_until has passed, flagged status 'expired'. Default false."
         ),
     },
     async (args) => {
@@ -804,22 +728,22 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "update_note",
     UPDATE_NOTE_DESC,
     {
-      id: z.string().describe("UUID of the note to update"),
-      title: z.string().optional().describe("New title"),
-      content: z.string().optional().describe("New content"),
-      domain: z.string().nullable().optional().describe("New domain, or null to clear"),
-      tags: z.array(z.string()).optional().describe("New tags (full replacement)"),
-      scope: scopeEnum.optional().describe("New scope"),
-      source_url: z.string().nullable().optional().describe("New source URL, or null to clear"),
-      related_task_ids: z.array(z.string()).optional().describe("New related task IDs (full replacement)"),
+      id: z.string().describe("Note id (UUID)."),
+      title: z.string().optional().describe("New title."),
+      content: z.string().optional().describe("New full content, replacing the old."),
+      domain: z.string().nullable().optional().describe("New domain; null clears."),
+      tags: z.array(z.string()).optional().describe("New tags; replaces the whole list."),
+      scope: scopeEnum.optional().describe("New scope."),
+      source_url: z.string().nullable().optional().describe("New source URL; null clears."),
+      related_task_ids: z.array(z.string()).optional().describe("Related task UUIDs; replaces the whole list."),
       provenance: provenanceEnum.nullable().optional().describe(
-        "Where the content came from: 'stated', 'decided', 'inferred', 'fetched', or 'derived'; null clears it. Be honest — 'inferred' whenever the user did not confirm."
+        "stated, decided, inferred (your unconfirmed conclusion), fetched or derived; null clears. Use 'inferred' unless the user confirmed it."
       ),
       valid_until: z.string().nullable().optional().describe(
-        "Expiry instant as an ISO-8601 date-time WITH an explicit offset (e.g. '2026-12-31T00:00:00Z'), or null to clear it (revives an expired note)"
+        "Expiry: ISO-8601 date-time with offset, e.g. '2026-12-31T00:00:00Z'; null clears."
       ),
       expected_version: z.number().int().min(1).optional().describe(
-        "Optimistic-concurrency precondition: the note's 'version' as you last saw it (from get_note or a previous response). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns the current note. Omit for last-writer-wins."
+        "Note version you last read. Enforced when present (mismatch: VERSION_CONFLICT, nothing written); omit for last-writer-wins."
       ),
     },
     async (args) => {
@@ -889,59 +813,63 @@ export function registerNoteTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── str_replace_note ─────────────────────────────────────────
-  mcpServer.tool(
-    "str_replace_note",
-    STR_REPLACE_NOTE_DESC,
+  // ── edit_note ────────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "edit_note",
+    EDIT_NOTE_DESC,
     {
-      id: z.string().describe("UUID of the note to edit"),
-      old_str: z
-        .string()
-        .describe("Exact text to find (literal, case- and whitespace-sensitive, not a regex)"),
-      new_str: z
-        .string()
-        .describe("Replacement text, inserted verbatim. Empty string deletes old_str"),
-      replace_all: z
-        .boolean()
-        .optional()
-        .describe("Replace every occurrence instead of requiring exactly one (default false)"),
+      id: z.string().describe("Note id (UUID)."),
+      edits: z
+        .array(
+          z.object({
+            old_str: z
+              .string()
+              .min(1)
+              .describe("Exact text to find: literal, case- and whitespace-sensitive, not a regex."),
+            new_str: z
+              .string()
+              .describe("Replacement text, inserted verbatim; an empty string deletes old_str."),
+            replace_all: z
+              .boolean()
+              .optional()
+              .describe("Replace every occurrence instead of requiring exactly one (default false)."),
+          })
+        )
+        .min(1)
+        .max(50)
+        .describe("Exact-text replacements, applied in order."),
       expected_version: z.number().int().min(1).optional().describe(
-        "Optimistic-concurrency precondition: the note's 'version' as you last saw it (from get_note or a previous response). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns the current note. Omit for last-writer-wins."
+        "Note version you last read. Enforced when present (mismatch: VERSION_CONFLICT, nothing written); omit for last-writer-wins."
       ),
     },
     async (args) => {
-      if (!args.old_str) {
-        return errorResponse("old_str must be a non-empty string", "VALIDATION_ERROR");
-      }
       try {
-        return await editNoteContent(args.id, "str_replace_note", args.expected_version, (content) => {
-          const matchCount = countOccurrences(content, args.old_str);
-          if (matchCount === 0) {
+        return await editNoteContent(args.id, "edit_note", args.expected_version, (content) => {
+          const result = applyEdits(content, args.edits);
+          if (!result.ok) {
+            const message =
+              result.code === "NO_MATCH"
+                ? `edits[${result.edit_index}].old_str was not found in the note content (after applying earlier edits). Call get_note and copy the text exactly.`
+                : `edits[${result.edit_index}].old_str matches ${result.match_count} times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.`;
             return {
               ok: false,
-              message: "old_str was not found in the note content. Call get_note and copy the text exactly.",
-              code: "NO_MATCH",
-              match_count: 0,
+              message,
+              code: result.code,
+              edit_index: result.edit_index,
+              match_count: result.match_count,
             };
           }
-          if (matchCount > 1 && !args.replace_all) {
-            return {
-              ok: false,
-              message: `old_str matches ${matchCount} times. Widen old_str with surrounding text to make it unique, or pass replace_all: true.`,
-              code: "AMBIGUOUS_MATCH",
-              match_count: matchCount,
-            };
-          }
-          const replaceAll = args.replace_all === true;
-          return {
-            ok: true,
-            content: literalReplace(content, args.old_str, args.new_str, replaceAll),
-            replacements: replaceAll ? matchCount : 1,
-          };
+          return { ok: true, content: result.content, replacements: result.replacements };
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
       }
+    },
+    {
+      str_replace_note: strReplaceNoteAdapter((id, expectedVersion, edit) =>
+        editNoteContent(id, "edit_note", expectedVersion, edit)
+      ),
     }
   );
 
@@ -950,12 +878,12 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "append_note",
     APPEND_NOTE_DESC,
     {
-      id: z.string().describe("UUID of the note to append to"),
+      id: z.string().describe("Note id (UUID)."),
       content: z
         .string()
-        .describe("Text to append; starts on a new line after the existing content"),
+        .describe("Text to append (non-empty); starts on a new line."),
       expected_version: z.number().int().min(1).optional().describe(
-        "Optional precondition: the note's 'version' as you last saw it. Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns the current note. Omit to append to whatever the note holds now."
+        "The note's version as you last read it; on mismatch VERSION_CONFLICT. Usually omitted for logs."
       ),
     },
     async (args) => {
@@ -978,7 +906,7 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "delete_note",
     DELETE_NOTE_DESC,
     {
-      id: z.string().describe("UUID of the note to delete"),
+      id: z.string().describe("Note id (UUID)."),
     },
     async (args) => {
       try {
@@ -1023,12 +951,12 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "supersede_note",
     SUPERSEDE_NOTE_DESC,
     {
-      id: z.string().describe("UUID of the OLD note being retired (it must be active)"),
+      id: z.string().describe("Id of the OLD note being retired; it must not already be superseded."),
       superseded_by: z.string().describe(
-        "UUID of the successor note that replaces it. The successor must already exist and be active (create it first with create_note)."
+        "Id of the successor note, which must already exist and be active (create it first with create_note)."
       ),
       expected_version: z.number().int().min(1).optional().describe(
-        "Optional precondition on the OLD note's 'version' (from get_note). Enforced whenever present; on mismatch nothing is written and VERSION_CONFLICT returns the current note."
+        "The OLD note's version as you last read it; on mismatch VERSION_CONFLICT, nothing written."
       ),
     },
     async (args) => {
@@ -1065,10 +993,10 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "get_note_history",
     GET_NOTE_HISTORY_DESC,
     {
-      id: z.string().describe("UUID of the note whose history to read"),
-      limit: z.number().int().min(1).max(50).optional().describe("Max entries (1-50, default 10)"),
+      id: z.string().describe("Note id (UUID)."),
+      limit: z.number().int().min(1).max(50).optional().describe("Max entries (default 10)."),
       offset: z.number().int().min(0).optional().describe(
-        "Entries to skip, counted from the newest entry (the current version is entry 0). Default 0."
+        "Entries to skip from the newest (entry 0 is the current version). Default 0."
       ),
     },
     async (args) => {
@@ -1183,9 +1111,9 @@ export function registerNoteTools(mcpServer: McpServer): void {
     "prune_note_history",
     PRUNE_NOTE_HISTORY_DESC,
     {
-      id: z.string().describe("UUID of the note whose history to prune"),
+      id: z.string().describe("Note id (UUID)."),
       keep_last: z.number().int().min(0).describe(
-        "How many of the newest prior versions to keep. 0 purges all history. Irreversible."
+        "Number of newest prior versions to keep; 0 deletes all history."
       ),
     },
     async (args) => {

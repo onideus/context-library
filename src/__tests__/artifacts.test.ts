@@ -183,17 +183,17 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     const res = await mcpPost(jsonrpc("tools/list"));
     const data = (await parseSseResponse(res)) as any;
     const toolNames: string[] = data.result.tools.map((t: any) => t.name);
-    expect(toolNames).toContain("store_artifact");
+    expect(toolNames).toContain("create_artifact");
     expect(toolNames).toContain("get_artifact");
     expect(toolNames).toContain("list_artifacts");
     expect(toolNames).toContain("search_artifacts");
     expect(toolNames).toContain("update_artifact");
-    expect(toolNames).toContain("patch_artifact");
+    expect(toolNames).toContain("edit_artifact");
   });
 
-  describe("store_artifact", () => {
+  describe("create_artifact", () => {
     it("creates an inline-content artifact with all fields", async () => {
-      const result = await callTool("store_artifact", {
+      const result = await callTool("create_artifact", {
         title: "CC prompt: migrate auth",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -213,7 +213,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("creates a pointer-only artifact", async () => {
-      const result = await callTool("store_artifact", {
+      const result = await callTool("create_artifact", {
         title: "Research report PDF",
         artifact_type: "research",
         scope: "work",
@@ -226,7 +226,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("defaults status to 'draft' when not provided", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Draft artifact",
         artifact_type: "blog-post",
         scope: "personal",
@@ -236,7 +236,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("rejects artifacts with neither content nor pointer", async () => {
-      const result = await callTool("store_artifact", {
+      const result = await callTool("create_artifact", {
         title: "Missing body",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -246,7 +246,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("returns validation error for empty title", async () => {
-      const result = await callTool("store_artifact", {
+      const result = await callTool("create_artifact", {
         title: "",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -257,13 +257,13 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("accepts a dependencies UUID array", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "A",
         artifact_type: "cc-prompt",
         scope: "work",
         content: "first",
       });
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "B",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -278,7 +278,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
   describe("get_artifact", () => {
     it("retrieves full artifact by UUID", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "To retrieve",
         artifact_type: "template",
         scope: "shared",
@@ -304,7 +304,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
   describe("list_artifacts", () => {
     it("returns metadata only — not full content", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "List-test artifact",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -323,13 +323,13 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("filters by artifact_type", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "type-filter cc",
         artifact_type: "cc-prompt",
         scope: "personal",
         content: "x",
       });
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "type-filter blog",
         artifact_type: "blog-post",
         scope: "personal",
@@ -343,7 +343,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("filters by status", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "ready-status-filter",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -358,7 +358,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("filters by scope", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "scope-filter",
         artifact_type: "cc-prompt",
         scope: "shared",
@@ -371,7 +371,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("filters by tags with ANY-match", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "tagged-artifact",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -387,21 +387,21 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("orders by execution_order ASC when artifact_type filter is set", async () => {
       const typeName = "order-batch-" + Date.now();
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "third",
         artifact_type: typeName,
         scope: "work",
         content: "c",
         execution_order: 3,
       });
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "first",
         artifact_type: typeName,
         scope: "work",
         content: "a",
         execution_order: 1,
       });
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "second",
         artifact_type: typeName,
         scope: "work",
@@ -426,7 +426,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
   describe("search_artifacts", () => {
     it("finds artifacts by keyword in title or content", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "Unique search token qqrstt",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -438,7 +438,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("includes full content in search results (unlike list)", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "Search-full-content-marker-uniqueabc",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -453,7 +453,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("filters by artifact_type", async () => {
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "Filter-type-marker-defghi",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -482,7 +482,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
   describe("update_artifact", () => {
     it("updates basic fields", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Original title",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -501,7 +501,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("enforces valid status transitions: draft → ready → executing → completed", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Lifecycle",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -520,7 +520,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("rejects invalid status transitions", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Bad-transition",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -533,7 +533,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("allows transition to 'superseded' from any state", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Supersede-me",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -542,7 +542,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const r1 = await callTool("update_artifact", { id: created.id, status: "superseded" });
       expect(r1.status).toBe("superseded");
 
-      const c2 = await callTool("store_artifact", {
+      const c2 = await callTool("create_artifact", {
         title: "Supersede-from-completed",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -556,7 +556,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("merges metadata at the top level", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Metadata-merge",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -584,7 +584,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("returns VALIDATION_ERROR when no updates provided", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Empty-update",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -596,7 +596,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("rejects clearing both content and pointer", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Clear-body",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -612,8 +612,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
   });
 
   describe("content_hash locking", () => {
-    it("store_artifact with status 'ready' sets content_hash in metadata", async () => {
-      const result = await callTool("store_artifact", {
+    it("create_artifact with status 'ready' sets content_hash in metadata", async () => {
+      const result = await callTool("create_artifact", {
         title: "Hash-on-ready",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -628,8 +628,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(fetched.metadata.content_hash).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    it("store_artifact sets content_hash for any status when content is provided", async () => {
-      const result = await callTool("store_artifact", {
+    it("create_artifact sets content_hash for any status when content is provided", async () => {
+      const result = await callTool("create_artifact", {
         title: "Hash-on-draft",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -643,7 +643,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact transitioning to 'ready' computes content_hash", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-on-transition",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -662,14 +662,14 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("content_hash is deterministic for the same content", async () => {
       const content = "deterministic-content-xyz";
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Hash-det-a",
         artifact_type: "cc-prompt",
         scope: "work",
         content,
         status: "ready",
       });
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "Hash-det-b",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -682,7 +682,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact recomputes content_hash when content is updated", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-recompute",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -701,7 +701,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("server-computed hash overrides caller-supplied content_hash when content is provided", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-override",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -719,7 +719,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact rejects content modification when status is 'ready'", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Locked-ready",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -736,7 +736,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact rejects content modification when status is 'executing'", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Locked-executing",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -754,7 +754,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact rejects content modification when status is 'completed'", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Locked-completed",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -773,7 +773,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact preserves content_hash when reverting 'ready' → 'draft'", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Revert-to-draft",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -795,7 +795,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact preserves existing metadata keys when setting content_hash", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-preserves-meta",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -812,7 +812,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("content_hash survives metadata-only update on a draft artifact", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-survives-meta-update",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -832,7 +832,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("content_hash is stable across a revert-to-draft and re-promote cycle", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-stable-across-cycle",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -858,7 +858,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("strips caller-supplied content_hash from metadata update on draft artifact", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-strip-on-draft",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -876,7 +876,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("content_hash survives a full store -> metadata update -> promote -> metadata fix sequence", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Full-lifecycle-hash",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -913,7 +913,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("pointer-only artifact does not set content_hash", async () => {
-      const result = await callTool("store_artifact", {
+      const result = await callTool("create_artifact", {
         title: "Pointer-no-hash",
         artifact_type: "research",
         scope: "work",
@@ -926,8 +926,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(fetched.metadata.content_hash).toBeUndefined();
     });
 
-    it("store_artifact strips caller-supplied content_hash on pointer-only artifact", async () => {
-      const result = await callTool("store_artifact", {
+    it("create_artifact strips caller-supplied content_hash on pointer-only artifact", async () => {
+      const result = await callTool("create_artifact", {
         title: "Pointer-strip-fake-hash",
         artifact_type: "research",
         scope: "work",
@@ -941,8 +941,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(fetched.metadata.label).toBe("keep-me");
     });
 
-    it("store_artifact overrides caller-supplied content_hash when content is provided", async () => {
-      const result = await callTool("store_artifact", {
+    it("create_artifact overrides caller-supplied content_hash when content is provided", async () => {
+      const result = await callTool("create_artifact", {
         title: "Content-override-fake-hash",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -958,7 +958,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("update_artifact silently ignores content_hash supplied in metadata on a locked artifact", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Tamper-guard",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -987,7 +987,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       // described the now-removed content must not survive — otherwise the
       // metadata advertises a content_hash that no longer corresponds to any
       // stored content.
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Clear-content-strip-hash",
         artifact_type: "research",
         scope: "work",
@@ -1017,7 +1017,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       // updates (no content, no metadata supplied) must never leave the row
       // in a state where content exists but content_hash does not — the
       // pipeline rejects such artifacts as malformed.
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Hash-status-only-roundtrip",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1055,11 +1055,11 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
   });
 
-  describe("patch_artifact", () => {
+  describe("edit_artifact", () => {
     const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
     async function storeDraft(content: string, extra: Record<string, unknown> = {}) {
-      return callTool("store_artifact", {
+      return callTool("create_artifact", {
         title: "Patch target",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1074,7 +1074,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       });
       const before = await callTool("get_artifact", { id: created.id });
 
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "Status: pending", new_str: "Status: done" }],
       });
@@ -1100,7 +1100,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("applies multiple edits in order", async () => {
       const created = await storeDraft("alpha beta gamma");
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [
           { old_str: "alpha", new_str: "ALPHA" },
@@ -1117,7 +1117,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const created = await storeDraft("one two three");
       const before = await callTool("get_artifact", { id: created.id });
 
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [
           { old_str: "one", new_str: "1" },
@@ -1137,7 +1137,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("returns AMBIGUOUS_MATCH with match_count", async () => {
       const created = await storeDraft("x and x");
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "x", new_str: "y" }],
       });
@@ -1147,7 +1147,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("returns NOT_FOUND for a non-existent artifact", async () => {
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: "00000000-0000-0000-0000-000000000000",
         edits: [{ old_str: "a", new_str: "b" }],
       });
@@ -1167,7 +1167,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         const before = await callTool("get_artifact", { id: created.id });
         expect(before.status).toBe(status);
 
-        const result = await callTool("patch_artifact", {
+        const result = await callTool("edit_artifact", {
           id: created.id,
           edits: [{ old_str: "locked", new_str: "changed" }],
         });
@@ -1181,13 +1181,13 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     }
 
     it("rejects a pointer-only artifact with VALIDATION_ERROR", async () => {
-      const created = await callTool("store_artifact", {
+      const created = await callTool("create_artifact", {
         title: "Pointer-only patch",
         artifact_type: "research",
         scope: "work",
         pointer: { type: "git", repo: "acme/docs", branch: "main", path: "out/report.md" },
       });
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "a", new_str: "b" }],
       });
@@ -1198,7 +1198,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     it("succeeds when expected_content_hash matches", async () => {
       const created = await storeDraft("hash guarded");
       const before = await callTool("get_artifact", { id: created.id });
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "guarded", new_str: "checked" }],
         expected_content_hash: before.metadata.content_hash,
@@ -1211,7 +1211,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     it("returns VERSION_CONFLICT on a stale expected_content_hash and writes nothing", async () => {
       const created = await storeDraft("stale guard");
       const before = await callTool("get_artifact", { id: created.id });
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "stale", new_str: "fresh" }],
         expected_content_hash: FAKE_HASH,
@@ -1227,7 +1227,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("VERSION_CONFLICT takes precedence over NO_MATCH", async () => {
       const created = await storeDraft("precedence");
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "absent", new_str: "x" }],
         expected_content_hash: FAKE_HASH,
@@ -1238,7 +1238,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     it("returns changed: false and writes nothing for a no-op patch", async () => {
       const created = await storeDraft("same text");
       const before = await callTool("get_artifact", { id: created.id });
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "same", new_str: "same" }],
       });
@@ -1254,7 +1254,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("rejects an edit that would empty the content", async () => {
       const created = await storeDraft("everything");
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "everything", new_str: "" }],
       });
@@ -1267,7 +1267,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     it("patches a superseded artifact (mirrors update_artifact)", async () => {
       const created = await storeDraft("retired body");
       await callTool("update_artifact", { id: created.id, status: "superseded" });
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "retired", new_str: "archived" }],
       });
@@ -1280,7 +1280,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("a patched draft promoted to ready carries the hash of the patched content", async () => {
       const created = await storeDraft("draft v1", { metadata: { target_repo: "project-alpha" } });
-      await callTool("patch_artifact", {
+      await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "v1", new_str: "v2" }],
       });
@@ -1292,13 +1292,13 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     it("offers no way to set content_hash: no parameter, and a stray key is ignored", async () => {
       const res = await mcpPost(jsonrpc("tools/list"));
       const data = (await parseSseResponse(res)) as any;
-      const tool = data.result.tools.find((t: any) => t.name === "patch_artifact");
+      const tool = data.result.tools.find((t: any) => t.name === "edit_artifact");
       expect(Object.keys(tool.inputSchema.properties).sort()).toEqual(
         ["edits", "expected_content_hash", "id"]
       );
 
       const created = await storeDraft("caller hash");
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "caller", new_str: "server" }],
         content_hash: FAKE_HASH,
@@ -1312,7 +1312,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const created = await storeDraft("timestamp body");
       const before = await callTool("get_artifact", { id: created.id });
       await new Promise((r) => setTimeout(r, 10));
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "timestamp", new_str: "bumped" }],
       });
@@ -1327,7 +1327,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       await withDb((c) =>
         c.query("UPDATE artifacts SET content = '   ' WHERE id = $1", [created.id])
       );
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: " ", new_str: " ", replace_all: true }],
       });
@@ -1343,7 +1343,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         ])
       );
 
-      const conflict = await callTool("patch_artifact", {
+      const conflict = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "legacy", new_str: "x" }],
         expected_content_hash: FAKE_HASH,
@@ -1351,7 +1351,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(conflict.code).toBe("VERSION_CONFLICT");
       expect(conflict.current_content_hash).toBe(sha256("legacy body"));
 
-      const result = await callTool("patch_artifact", {
+      const result = await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "legacy", new_str: "current" }],
         expected_content_hash: sha256("legacy body"),
@@ -1372,7 +1372,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
         const created = await storeDraft("schema guard a");
         const before = await callTool("get_artifact", { id: created.id });
         const res = await mcpPost(
-          jsonrpc("tools/call", { name: "patch_artifact", arguments: { id: created.id, edits } })
+          jsonrpc("tools/call", { name: "edit_artifact", arguments: { id: created.id, edits } })
         );
         const data = (await parseSseResponse(res)) as any;
         expect(data.error !== undefined || data.result?.isError === true).toBe(true);
@@ -1385,7 +1385,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("leaves update_artifact usable after a patch (re-reads current content)", async () => {
       const created = await storeDraft("first");
-      await callTool("patch_artifact", {
+      await callTool("edit_artifact", {
         id: created.id,
         edits: [{ old_str: "first", new_str: "second" }],
       });
@@ -1397,7 +1397,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
   describe("cross-tool isolation", () => {
     it("artifacts do NOT appear in list_notes", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Isolation-marker-artifact",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -1410,7 +1410,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("artifacts do NOT appear in list_tasks", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "Isolation-marker-artifact-2",
         artifact_type: "cc-prompt",
         scope: "personal",
@@ -1426,14 +1426,14 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
   describe("execution_order uniqueness", () => {
     it("rejects duplicate execution_order within the same artifact_type", async () => {
       const typeName = "dup-order-" + Date.now();
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "first",
         artifact_type: typeName,
         scope: "work",
         content: "a",
         execution_order: 1,
       });
-      const dup = await callTool("store_artifact", {
+      const dup = await callTool("create_artifact", {
         title: "second",
         artifact_type: typeName,
         scope: "work",
@@ -1449,14 +1449,14 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       const stamp = Date.now();
       const typeA = "type-a-" + stamp;
       const typeB = "type-b-" + stamp;
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "a1",
         artifact_type: typeA,
         scope: "work",
         content: "a",
         execution_order: 1,
       });
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "b1",
         artifact_type: typeB,
         scope: "work",
@@ -1469,13 +1469,13 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("allows multiple artifacts with null execution_order in the same type", async () => {
       const typeName = "null-order-" + Date.now();
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "a",
         artifact_type: typeName,
         scope: "work",
         content: "a",
       });
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "b",
         artifact_type: typeName,
         scope: "work",
@@ -1487,14 +1487,14 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
 
     it("update_artifact rejects moving to a duplicate execution_order", async () => {
       const typeName = "update-dup-" + Date.now();
-      await callTool("store_artifact", {
+      await callTool("create_artifact", {
         title: "a",
         artifact_type: typeName,
         scope: "work",
         content: "a",
         execution_order: 1,
       });
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "b",
         artifact_type: typeName,
         scope: "work",
@@ -1509,8 +1509,8 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
   });
 
   describe("dependencies validation", () => {
-    it("rejects store_artifact with non-existent dependency UUID", async () => {
-      const result = await callTool("store_artifact", {
+    it("rejects create_artifact with non-existent dependency UUID", async () => {
+      const result = await callTool("create_artifact", {
         title: "bad-dep",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1523,7 +1523,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("rejects update_artifact adding a non-existent dependency UUID", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "a",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1542,14 +1542,14 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       // Regression: validateDependenciesExist must compare case-insensitively
       // so an uppercase input (still a valid UUID) is not falsely reported
       // as missing.
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "dep-target",
         artifact_type: "cc-prompt",
         scope: "work",
         content: "target",
       });
       const upper = (a.id as string).toUpperCase();
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "dep-consumer",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1560,7 +1560,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
       expect(b.id).toBeDefined();
 
       // Same check on update_artifact.
-      const c = await callTool("store_artifact", {
+      const c = await callTool("create_artifact", {
         title: "dep-updater",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1574,13 +1574,13 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("accepts update_artifact clearing dependencies with an empty array", async () => {
-      const a = await callTool("store_artifact", {
+      const a = await callTool("create_artifact", {
         title: "a",
         artifact_type: "cc-prompt",
         scope: "work",
         content: "x",
       });
-      const b = await callTool("store_artifact", {
+      const b = await callTool("create_artifact", {
         title: "b",
         artifact_type: "cc-prompt",
         scope: "work",
@@ -1593,7 +1593,7 @@ describe.skipIf(!pgAvailable)("Artifact Tools", () => {
     });
 
     it("rejects malformed UUID in dependencies", async () => {
-      const result = await callTool("store_artifact", {
+      const result = await callTool("create_artifact", {
         title: "bad-uuid",
         artifact_type: "cc-prompt",
         scope: "work",

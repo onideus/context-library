@@ -9,7 +9,7 @@ interface ArrayOp {
  * Patch input accepted by mergeHandoff.
  *
  * Note: the `tasks` field is no longer processed by merge (deprecated since
- * schema 1.3). The patch_handoff handler strips `tasks` from both the patch
+ * schema 1.3). The update_handoff handler strips `tasks` from both the patch
  * and the source handoff before calling merge, so the legacy task arrays
  * never propagate into new files. The field stays in the type for callers
  * that still type-check against the old shape.
@@ -43,7 +43,7 @@ export function mergeHandoff(
     patchedFields.push("timezone");
   }
 
-  // Objects — deep merge
+  // Objects — one-level merge: each patch key replaces that key's whole value
   if (patch.operational_state !== undefined && patch.operational_state !== null) {
     merged.operational_state = {
       ...(original.operational_state || {}),

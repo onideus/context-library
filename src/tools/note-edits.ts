@@ -1,5 +1,5 @@
 /**
- * Pure string helpers for str_replace_note / append_note / patch_artifact. Kept
+ * Pure string helpers for edit_note / append_note / edit_artifact. Kept
  * dependency-free so unit tests can import them without loading config, the
  * pg pool, or the indexer.
  */
@@ -66,3 +66,11 @@ export function applyEdits(content: string, edits: LiteralEdit[]): ApplyEditsRes
   }
   return { ok: true, content: current, replacements };
 }
+
+/**
+ * What a partial note edit computed from the locked row's content: the new
+ * content, or a rejection returned to the caller as-is (nothing is written).
+ */
+export type ContentEdit =
+  | { ok: true; content: string; replacements?: number | number[] }
+  | { ok: false; message: string; code: string; match_count: number; edit_index?: number };

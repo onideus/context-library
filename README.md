@@ -5,6 +5,8 @@
 [![Release](https://img.shields.io/github/v/release/onideus/context-library)](https://github.com/onideus/context-library/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+**Portable memory for AI assistants that keeps every client in sync: switch tools and pick up exactly where you left off.**
+
 A personal MCP server that provides persistent operational context, task management, knowledge capture, artifact tracking, and semantic search across AI assistant sessions. Model-agnostic, Docker-ready, designed for single-user cognitive infrastructure.
 
 ## What It Does
@@ -25,11 +27,11 @@ The simplest deployment. Stores and retrieves operational context as append-only
 docker compose up -d
 ```
 
-**Available tools:** `store_handoff`, `get_latest_handoff`, `patch_handoff`, `list_handoffs`, `get_handoff`
+**Available tools:** `create_handoff`, `get_latest_handoff`, `update_handoff`, `list_handoffs`, `get_handoff`
 
 > **Retention.** Handoff files are retained indefinitely by default (`RETENTION_COUNT=0`). For long-lived deployments, set `RETENTION_COUNT` to a positive number (e.g., `5000`) to cap disk growth — older handoffs are pruned along with their search-index entries. The tradeoff: higher retention keeps more history searchable; lower retention keeps the disk footprint tight.
 >
-> **Compaction.** After each `store_handoff`, the handoff it supersedes may be rewritten to keep the working set small. This rewrite is **lossy**: `active_context` is collapsed to a single `compacted_summary` line, and the original prose survives only as chunks in the embeddings index (and is destroyed there too if `reindex` re-reads the already-compacted file). `COMPACTION_MODE` decides what happens:
+> **Compaction.** After each `create_handoff`, the handoff it supersedes may be rewritten to keep the working set small. This rewrite is **lossy**: `active_context` is collapsed to a single `compacted_summary` line, and the original prose survives only as chunks in the embeddings index (and is destroyed there too if a handoff reindex — `npm run reindex -- --types handoff --include-handoffs` — re-reads the already-compacted file). `COMPACTION_MODE` decides what happens:
 >
 > | Mode | Behaviour |
 > |---|---|
@@ -47,11 +49,11 @@ Adds structured task management, permanent knowledge capture, generated-output t
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `str_replace_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `store_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`, `patch_artifact`
+**Additional tools:** `create_task`, `get_task`, `list_tasks`, `update_task`, `search_tasks`, `create_note`, `get_note`, `list_notes`, `search_notes`, `update_note`, `edit_note`, `append_note`, `delete_note`, `supersede_note`, `get_note_history`, `prune_note_history`, `create_artifact`, `get_artifact`, `list_artifacts`, `search_artifacts`, `update_artifact`, `edit_artifact`
 
 ### Tier 3: + Embeddings (Semantic Search)
 
-Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Use the `--profile` flag to select GPU or CPU runtime.
+Adds vector-based semantic search across all stored content using a Text Embeddings Inference (TEI) server. Use the `--profile` flag to select the GPU, CPU, or ARM64 runtime (see [Embedding Server Platform Options](#embedding-server-platform-options)).
 
 **GPU (desktop with NVIDIA GPU):**
 ```bash
@@ -65,7 +67,9 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 
 With no `--profile` flag, neither TEI service starts — the application degrades gracefully (semantic search falls back to FTS).
 
-**Additional tools:** `search_context`, `reindex`
+**Additional tools:** `search_context`
+
+**Rebuilding the index.** `npm run reindex` re-embeds tasks, notes and artifacts (it is an operator script, not an MCP tool). Run it from a source checkout with `EMBEDDING_URL`, the `PG*` variables and `DATA_DIR` pointed at the deployment — for example `localhost` with the host ports your compose file publishes for the embedding server and Postgres. `--types task,note` narrows it. Handoffs are skipped unless you pass both `--types handoff` and `--include-handoffs`: reindexing a compacted handoff overwrites the only copy of its pre-compaction text in the index, so run `npm run audit-compaction` first.
 
 The TEI server can run on a separate machine — just point `EMBEDDING_URL` to its address. This is the recommended setup if your main server doesn't have a GPU.
 
@@ -75,7 +79,7 @@ For improved retrieval precision, an optional cross-encoder reranker rescores ca
 
 ```bash
 # Add to your compose command:
---profile reranker-gpu   # or reranker-cpu
+--profile reranker-gpu   # or reranker-cpu, reranker-arm64
 ```
 
 When the reranker is not configured or unreachable, `search_context` falls back to RRF-only ordering. Set `RERANKER_URL` in your `.env` to enable it.
@@ -113,7 +117,11 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-co
 
 Extraction is disabled by default (`ENTITY_EXTRACTION_ENABLED=false`) and is fully fire-and-forget: if the provider is unreachable, handoff and note writes still succeed and a warning is logged. Ollama itself is not managed by Compose — point `OLLAMA_BASE_URL` at wherever it runs.
 
-**Additional tools:** `extract_entities`, `run_extraction`, `compare_extractions`, `list_extraction_runs`, `browse_entities`, `entity_relations`
+Here Context Library is the caller: it sends your content to a model to extract triples. Chatting with a local model that calls Context Library's tools is the reverse direction, covered in [Local LLM](#local-llm).
+
+**Additional tools:** `extract_entities`, `create_extraction_run`, `compare_extraction_runs`, `list_extraction_runs`, `list_entities`, `get_entity_relations`
+
+These six tools are registered only when `ENTITY_TOOLS` resolves on. The default, `auto`, turns them on when `ENTITY_EXTRACTION_ENABLED` or `ENTITY_GRAPH_ENABLED` is `true`, or `ENTITY_EXTRACTION_PROVIDER` is set to anything other than `none` (the `docker-compose.entities.yml` overlay sets it to `ollama` unless you override it). **Upgrading:** if you use the entity tools without setting any of those, set `ENTITY_TOOLS=true` to keep them; to hide them despite a configured provider, set `ENTITY_TOOLS=false`.
 
 ## Architecture
 
@@ -137,9 +145,9 @@ The reference implementation is private. What is documented here is the pattern 
 
 | Tool | Tier | Description |
 |---|---|---|
-| `store_handoff` | Core | Full-state capture at session boundaries (append-only) |
+| `create_handoff` | Core | Full-state capture at session boundaries (append-only) |
 | `get_latest_handoff` | Core | Retrieve most recent handoff with pre-computed fields |
-| `patch_handoff` | Core | Partial update with merge semantics |
+| `update_handoff` | Core | Partial update with merge semantics |
 | `list_handoffs` | Core | Browse historical handoffs by date with metadata |
 | `get_handoff` | Core | Retrieve a specific historical handoff by filename |
 | `create_task` | Postgres | Create task with scope, priority, tags, dates |
@@ -152,26 +160,45 @@ The reference implementation is private. What is documented here is the pattern 
 | `list_notes` | Postgres | Browse notes with scope, domain, tag, and lifecycle-status filters |
 | `search_notes` | Postgres | Full-text search across note titles and content; a superseded hit is redirected to its current successor (`include_superseded` / `include_expired` opt out) |
 | `update_note` | Postgres | Update note fields with optional `expected_version` precondition; every effective edit is versioned; re-embeds on content change |
-| `str_replace_note` | Postgres | Replace an exact text span in a note's content (literal match; optional `expected_version`; versioned; compact response, no content echo) |
+| `edit_note` | Postgres | Exact-match edits to a note's content (ordered, all-or-nothing; optional `expected_version`; versioned; compact response, no content echo) |
 | `append_note` | Postgres | Append text to a note on a new line (logs, dated entries; optional `expected_version`; versioned; compact response) |
 | `delete_note` | Postgres | Permanently delete a note, its history, and its embedding; splices any supersession chain through it |
 | `supersede_note` | Postgres | Mark a note as replaced by another (both must be active); the old note keeps its content with `status='superseded'` |
 | `get_note_history` | Postgres | Read a note's prior versions (title, content, what changed, who changed it) |
 | `prune_note_history` | Postgres | Drop all but the newest N history rows of a note — the only way to remove content edited out of it |
-| `store_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
+| `create_artifact` | Postgres | Capture a generated output (CC prompt, research, template) with lifecycle state |
 | `get_artifact` | Postgres | Retrieve artifact by UUID (full content + pointer + metadata) |
 | `list_artifacts` | Postgres | Browse artifacts with type, status, scope, and tag filters; execution_order-aware sort |
 | `search_artifacts` | Postgres | Full-text search across artifact titles and content |
 | `update_artifact` | Postgres | Update artifact fields; enforces status transitions; re-embeds on content change |
-| `patch_artifact` | Postgres | Exact-match edits to an artifact's content (ordered, all-or-nothing) without resending the whole body; draft/superseded only; recomputes `content_hash` |
+| `edit_artifact` | Postgres | Exact-match edits to an artifact's content (ordered, all-or-nothing) without resending the whole body; draft/superseded only; recomputes `content_hash` |
 | `search_context` | Embeddings | Hybrid semantic search (vector + FTS with RRF fusion) across all content types; superseded notes redirect to their successor, expired notes are hidden (`include_superseded` / `include_expired` opt out) |
-| `reindex` | Embeddings | Rebuild semantic search index for handoffs, tasks, notes, and artifacts |
-| `extract_entities` | Entities | Trigger entity extraction on a single content item |
-| `run_extraction` | Entities | Batch-extract entities from multiple content items |
-| `compare_extractions` | Entities | Compare two extraction runs (e.g., different providers or models) |
-| `list_extraction_runs` | Entities | List recent entity extraction runs with stats |
-| `browse_entities` | Entities | Browse the extracted entity graph with type and name filters |
-| `entity_relations` | Entities | Retrieve the relation graph for a specific entity |
+| `extract_entities` | Entities¹ | Trigger entity extraction on a single content item |
+| `create_extraction_run` | Entities¹ | Batch-extract entities from multiple content items |
+| `compare_extraction_runs` | Entities¹ | Compare two extraction runs (e.g., different providers or models) |
+| `list_extraction_runs` | Entities¹ | List recent entity extraction runs with stats |
+| `list_entities` | Entities¹ | Browse the extracted entity graph with type and name filters |
+| `get_entity_relations` | Entities¹ | Retrieve the relation graph for a specific entity |
+
+¹ Registered only when `ENTITY_TOOLS` resolves on (see [Tier 4](#tier-4--entity-extraction-knowledge-graph)).
+
+Tool names follow one convention: `verb_noun` in snake_case (`create_`, `get_`, `list_`, `search_`, `update_`, `edit_`, `append_`, `delete_`, plus a few domain verbs such as `supersede_` and `prune_`).
+
+### Renamed tools
+
+Nine tools were renamed. The old names still work as deprecated aliases for **one release** and are removed in the next one; each alias call logs `[deprecated-tool] <old> called; use <new>`. Set `LEGACY_TOOL_NAMES=false` to preview the removal — it also brings the tool count down from 43 to 34 with the entity tools registered, or from 33 to 28 without them (see `ENTITY_TOOLS`), which matters for clients that warn when a server offers around 40 tools. `reindex` is no longer an MCP tool (no alias): use `npm run reindex`.
+
+| Old name | New name |
+|---|---|
+| `store_handoff` | `create_handoff` |
+| `patch_handoff` | `update_handoff` |
+| `store_artifact` | `create_artifact` |
+| `patch_artifact` | `edit_artifact` |
+| `str_replace_note` | `edit_note` (takes an `edits` array like `edit_artifact`; the alias keeps the old `old_str`/`new_str` input) |
+| `browse_entities` | `list_entities` |
+| `entity_relations` | `get_entity_relations` (the `entity_relations` table keeps its name) |
+| `run_extraction` | `create_extraction_run` |
+| `compare_extractions` | `compare_extraction_runs` |
 
 The server also registers three MCP prompts as workflow entry points: `session_start` (load handoff state at conversation start), `architect` (load prior design decisions before architecture discussions), and `plan` (load task and artifact state before planning).
 
@@ -179,18 +206,20 @@ The server also registers three MCP prompts as workflow entry points: `session_s
 
 The server exposes two health endpoints:
 
-- **`GET /health`** — Basic liveness check. Returns server status, version, and uptime.
+- **`GET /health`** — Basic liveness check. Returns server status, version, uptime, and whether the embedding server is reachable.
 - **`GET /health/ready`** — Readiness check. Verifies the data directory is writable. Returns `"ok"` (HTTP 200) or `"degraded"` (HTTP 503) accordingly.
 
 Both return JSON. Use `/health` for uptime monitoring and `/health/ready` after deployment to confirm the server can write data.
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.10.0","uptime":42}
+# {"status":"ok","version":"<version>","uptime":42,"embedding_status":{"available":true}}
 
 curl http://localhost:3100/health/ready
 # {"status":"ok","writable":true,"uptime":42}
 ```
+
+`version` depends on the build: a released image reports its release version (`X.Y.Z`), an image built from `main` reports `0.0.0-sha.<hash>`, and a source checkout reports `0.0.0-development`. `embedding_status.available` is `true` when the TEI server answers its health check, `false` when it does not (including deployments without Tier 3), and `null` if the check itself failed; the result is cached for about 10 seconds.
 
 ## Quick Start
 
@@ -235,65 +264,157 @@ curl http://localhost:3100/health
 
 ## Connecting MCP Clients
 
-Once Context Library is running (either via `npm run dev` or Docker), you can connect any MCP-compatible client. The server uses **Streamable HTTP** transport on a single endpoint: `http://localhost:3100/mcp`.
+The server speaks **Streamable HTTP** on a single endpoint, `http://localhost:3100/mcp`, and has no authentication of its own. Who can reach that endpoint depends on how you run it:
 
-### Roo Code (VS Code)
+- **Docker Compose (base `docker-compose.yml`):** the port is published on `127.0.0.1:3100` only, so only clients on the same machine can connect.
+- **From source (`npm run dev` / `npm start`):** the process listens on all interfaces (`0.0.0.0`), so the unauthenticated endpoint is reachable from the network. On a shared network, block port 3100 with a host firewall or run via Compose instead.
 
-Roo Code is the most common local setup. Open your MCP settings (click the MCP icon in the Roo Code panel, then **Edit Global MCP** or **Edit Project MCP**) and add:
+Anything that has to reach the server from another machine, including every cloud-hosted client, goes through the auth proxy: see [External Access with Auth Proxy](#external-access-with-auth-proxy). Do not publish the port on `0.0.0.0` without it.
 
-```json
-{
-  "mcpServers": {
-    "context-library": {
-      "type": "streamable-http",
-      "url": "http://localhost:3100/mcp"
-    }
-  }
-}
-```
+### Claude
 
-For project-level configuration, create `.roo/mcp.json` in your project root with the same content. Project-level configs override global settings and can be committed to version control so your whole team shares the same MCP setup.
-
-Save the file and Context Library should appear in the MCP servers list with a connected status. Roo Code will discover all available tools automatically.
-
-### Claude Code (Terminal)
+#### Claude Code
 
 ```bash
-claude mcp add context-library --transport http http://localhost:3100/mcp
+claude mcp add --transport http context-library http://localhost:3100/mcp
 ```
 
-This registers the server globally. Claude Code will connect on next launch.
+This uses the default **local** scope: the server is available in the current project only, and the entry is stored in `~/.claude.json`. Other scopes:
 
-### Claude Desktop
+- `--scope user` makes the server available in every project.
+- `--scope project` writes a shared `.mcp.json` at the project root, which can be committed:
 
-Add to your Claude Desktop config file:
+  ```json
+  {
+    "mcpServers": {
+      "context-library": {
+        "type": "http",
+        "url": "http://localhost:3100/mcp"
+      }
+    }
+  }
+  ```
+
+  The `"type": "http"` field is required: an entry with a `url` but no `type` is reported as a configuration error and skipped. Claude Code asks you to approve project-scoped servers the first time it sees them.
+
+Reference: [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+#### Claude Desktop
+
+Which setup applies depends on where the server runs.
+
+**Local server (the default deployment).** Claude Desktop's config file takes stdio servers only, so bridge to the HTTP endpoint with [mcp-remote](https://github.com/geelen/mcp-remote). Edit the config file:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 **Windows (Store):** `%LOCALAPPDATA%\Packages\Claude_<hash>\LocalCache\Roaming\Claude\claude_desktop_config.json`
-
-Claude Desktop does not natively support remote HTTP MCP servers. Use [mcp-remote](https://github.com/geelen/mcp-remote) as a stdio bridge:
 
 ```json
 {
   "mcpServers": {
     "context-library": {
       "command": "npx",
-      "args": ["mcp-remote", "http://localhost:3100/mcp"]
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:3100/mcp"]
     }
   }
 }
 ```
 
-Restart Claude Desktop after saving.
+`-y` skips the npx install prompt, and `127.0.0.1` avoids problems when `localhost` resolves to IPv6 first. Fully quit Claude Desktop and relaunch it after saving.
 
-### Claude.ai (Hosted)
+**Public deployment behind the auth proxy.** Add the server as a custom connector instead. The connection is opened from Anthropic's cloud, not from your machine, so the URL must be reachable from the public internet over valid TLS; a `localhost` URL never works as a custom connector. See [External Access with Auth Proxy](#external-access-with-auth-proxy).
 
-Claude.ai requires the server to be publicly accessible with OAuth authentication. See [External Access with Auth Proxy](#external-access-with-auth-proxy) below.
+Reference: [Get started with custom connectors using remote MCP](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+
+#### Claude.ai
+
+Claude.ai uses the same custom-connector model: a public URL, with OAuth handled by the auth proxy. See [External Access with Auth Proxy](#external-access-with-auth-proxy).
+
+### Local LLM
+
+Two different pieces are involved when you use a local model:
+
+- The **model runtime** (Ollama, LM Studio's server, llama.cpp) loads and runs the model.
+- The **MCP client** is the chat application that shows the conversation and calls tools.
+
+Context Library connects to the MCP client, not to the runtime. Some applications are both.
+
+> This is unrelated to using Ollama as an [entity extraction provider](#tier-4--entity-extraction-knowledge-graph) (Tier 4). There, Context Library calls a model; here, a model's chat client calls Context Library.
+
+#### LM Studio (0.3.17 or later)
+
+LM Studio is both runtime and MCP client. In the app, open the **Program** tab in the right sidebar, then **Install > Edit mcp.json**, and add:
+
+```json
+{
+  "mcpServers": {
+    "context-library": {
+      "url": "http://localhost:3100/mcp"
+    }
+  }
+}
+```
+
+LM Studio's documentation warns that servers designed for cloud models can use enough tokens to overflow a local model's context. Read [Model and context requirements](#model-and-context-requirements) before using it.
+
+Reference: [LM Studio MCP documentation](https://lmstudio.ai/docs/app/mcp).
+
+#### Open WebUI (0.6.31 or later) with Ollama or another local runtime
+
+Open WebUI works with Ollama or any OpenAI-compatible local runtime. Its native MCP support is Streamable HTTP only, which is what this server speaks. Go to **Admin Settings > External Tools > Add Server**, choose the type **MCP (Streamable HTTP)**, and enter the URL for your setup.
+
+Open WebUI's backend makes the connection, not your browser. When Open WebUI runs in Docker, `localhost` means the Open WebUI container, not the host:
+
+| Setup | URL |
+|---|---|
+| Open WebUI running directly on the host (not in Docker) | `http://localhost:3100/mcp` |
+| Open WebUI in Docker Desktop (macOS / Windows) | `http://host.docker.internal:3100/mcp` |
+| Open WebUI in Docker on Linux, Context Library on the default compose file | `http://context-library:3100/mcp` (after joining the network, below) |
+| Open WebUI in Docker on Linux, Context Library run from source (`npm run dev` / `npm start`) | `http://host.docker.internal:3100/mcp`, with `extra_hosts: ["host.docker.internal:host-gateway"]` on the Open WebUI container |
+
+When Context Library runs from source it listens on `0.0.0.0`, so `host-gateway` reaches it (a host firewall that blocks the Docker bridge will still refuse the connection). On Linux, the base compose file publishes the port on `127.0.0.1` only, so `host.docker.internal` / `host-gateway` gets connection refused. Attach Open WebUI to Context Library's compose network instead; inside that network the service is named `context-library` and listens on port `3100`. The network is named `<project>_default`, where the project name defaults to the directory holding the compose files (`context-library_default` for a default clone; check with `docker network ls`). Either connect a running container:
+
+```bash
+docker network connect context-library_default <open-webui-container>
+```
+
+or declare the network in Open WebUI's compose file:
+
+```yaml
+services:
+  open-webui:
+    # ...existing configuration...
+    networks:
+      - default
+      - context-library
+
+networks:
+  context-library:
+    external: true
+    name: context-library_default
+```
+
+Reference: [Open WebUI MCP documentation](https://docs.openwebui.com/features/mcp).
+
+#### Model and context requirements
+
+Every tool except the six entity-graph tools is registered on every server, whatever tier you deploy; the entity tools are registered only when `ENTITY_TOOLS` resolves on (see [Tier 4](#tier-4--entity-extraction-knowledge-graph)). The size of the `tools/list` response a client loads therefore depends on two settings. Measured after the tool descriptions were compacted (after v0.13.0), at roughly 4 characters per token:
+
+| `LEGACY_TOOL_NAMES` | Entity tools | Tools | `tools/list` size |
+|---|---|---|---|
+| `true` (default) | on | 43 | about 58,000 characters, roughly 15K tokens |
+| `true` (default) | off | 33 | about 51,000 characters, roughly 13K tokens |
+| `false` | on | 34 | about 48,000 characters, roughly 12K tokens |
+| `false` | off | 28 | about 43,000 characters, roughly **11K tokens** |
+
+The server also sends `instructions` (shared background on how the tools fit together) of about 3,600 characters, roughly 1K tokens, in every configuration. Clients that show instructions to the model add them on top of the tool list; some clients never show them. Tool descriptions change between releases, so treat these as approximate.
+
+- **Context window.** A model needs a context window of at least about 11K–15K tokens (depending on the configuration above), plus about 1K for the instructions, just to hold the tool list, before any conversation. Your messages and the tool results come on top of that, so configure well above it; 24K tokens is a practical floor and 32K or more is better. LM Studio and Ollama both default to context windows smaller than many models support. The context length is a setting in each: set it explicitly when you load the model.
+- **Tool calling.** The model must support tool calling. Small models often call tools poorly: wrong tool, malformed arguments, or no call at all.
 
 ### Other MCP Clients
 
-Any client that supports Streamable HTTP transport can connect to `http://localhost:3100/mcp`. This includes VS Code with GitHub Copilot, Cursor, Windsurf, Continue, and others. Consult your client's documentation for the MCP server configuration format — typically you need to specify the URL and transport type (`streamable-http` or `streamableHttp` depending on the client).
+Any client that supports the Streamable HTTP transport can connect to `http://localhost:3100/mcp` (or to the public URL behind the auth proxy). Consult the client's documentation for its configuration format; typically you specify the URL and the transport type.
 
 ### Verifying the Connection
 
@@ -301,8 +422,10 @@ After connecting, ask your AI assistant to call `get_latest_handoff`. If it retu
 
 ```bash
 curl http://localhost:3100/health
-# {"status":"ok","version":"0.10.0","uptime":42}
+# {"status":"ok","version":"<version>","uptime":42,"embedding_status":{"available":true}}
 ```
+
+See [Health Checks](#health-checks) for what each field means.
 
 ## External Access with Auth Proxy
 
@@ -513,7 +636,7 @@ Common causes:
 - Callback URL mismatch — must be `https://YOUR_DOMAIN/.auth/oidc/callback`
 - Missing or expired TLS certificates in `proxy-certs/`
 
-**Health check returns `"degraded"`**
+**`/health/ready` returns `"degraded"`**
 The data directory is not writable. Check ownership (UID 999) and that the volume mount exists.
 
 **Embeddings return errors but tasks still work**
@@ -546,8 +669,11 @@ See `.env.example` for all configuration options.
 | `DATA_DIR` | `./data` | Handoff file storage path |
 | `RETENTION_COUNT` | `0` | Max handoff files to retain (`0` = unlimited) |
 | `COMPACTION_MODE` | `archive` | How the superseded handoff is treated after a store: `archive` (keep a byte-exact original in `handoffs/archive/`), `off` (never rewrite), `in-place` (legacy, lossy) |
+| `LEGACY_TOOL_NAMES` | `true` | Also register the nine pre-rename tool names as deprecated aliases (see [Renamed tools](#renamed-tools)); removed in the next release. `false` previews that and lowers the tool count from 43 to 34 with the entity tools registered, or from 33 to 28 without them (`ENTITY_TOOLS`) |
 | `NOTE_HISTORY_MAX_VERSIONS` | `0` | Max prior versions kept per note in `note_versions` (`0` = unlimited); `prune_note_history` is the per-note manual control |
 | `CORS_ORIGINS` | `https://claude.ai,https://claude.com` | Comma-separated list of allowed CORS origins |
+| `LOG_RESPONSE_BODIES` | `false` | Include response bodies in the per-request `/mcp` response logs (debugging only; bodies contain user content) |
+| `APP_VERSION` | — | Version reported by `/health`, MCP server info, and export manifests. Set by the image build; when unset it falls back to `package.json` (`0.0.0-development`) |
 
 ### PostgreSQL (Tier 2)
 
@@ -558,7 +684,9 @@ See `.env.example` for all configuration options.
 | `PGUSER` | — | PostgreSQL user |
 | `PGPASSWORD` | — | PostgreSQL password |
 | `PGDATABASE` | — | PostgreSQL database name |
-| `POSTGRES_PASSWORD` | — | Root Postgres password (used by compose) |
+| `POSTGRES_DB` | `context_library` | Database created by the Postgres container (used by compose) |
+| `POSTGRES_USER` | `cl` | Superuser created by the Postgres container (used by compose) |
+| `POSTGRES_PASSWORD` | — | Password for that user (used by compose; required for Tier 2) |
 
 ### Embeddings (Tier 3)
 
@@ -569,6 +697,7 @@ See `.env.example` for all configuration options.
 | `EMBEDDING_DIMENSIONS` | `768` | Embedding vector dimensions |
 | `RERANKER_URL` | — | Cross-encoder reranker endpoint (optional; leave unset to disable) |
 | `RERANKER_TIMEOUT_MS` | `3000` | Abort budget per `/rerank` call; on timeout the search falls back to RRF ordering |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Model loaded by the reranker service (used by `docker-compose.embeddings.yml`) |
 | `SEARCH_ALIAS_PATH` | `./data/search-aliases.json` | Deployment-local search alias expansion file (optional) |
 | `ENTITY_SEED_PATH` | `./data/entities.seed.json` | Entity seed file for context envelopes (optional) |
 
@@ -576,6 +705,7 @@ See `.env.example` for all configuration options.
 
 | Variable | Default | Description |
 |---|---|---|
+| `ENTITY_TOOLS` | `auto` | Register the six entity-graph tools: `true`, `false`, or `auto` (on when `ENTITY_EXTRACTION_ENABLED` or `ENTITY_GRAPH_ENABLED` is `true`, or `ENTITY_EXTRACTION_PROVIDER` is not `none`). Other values warn and behave as `auto` |
 | `ENTITY_EXTRACTION_ENABLED` | `false` | Enable background entity extraction on handoff/note writes |
 | `ENTITY_EXTRACTION_PROVIDER` | `none` | Extraction provider: `ollama`, `api`, or `none` |
 | `ENTITY_EXTRACTION_ASYNC` | `true` | Run extraction fire-and-forget (recommended) |
@@ -587,6 +717,31 @@ See `.env.example` for all configuration options.
 | `ENTITY_API_BASE_URL` | `https://api.anthropic.com` | Base URL for the `api` provider |
 | `ENTITY_API_MODEL` | `claude-sonnet-4-20250514` | Model used by the `api` provider |
 | `ENTITY_API_FORMAT` | `anthropic` | API wire format: `anthropic` or `openai` |
+
+### Entity Graph Retrieval (optional)
+
+When enabled, `search_context` matches entity names in the query, walks `entity_relations`, and adds the content it reaches as a third ranking signal in RRF fusion. Turn it on once an extraction run has populated the graph.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENTITY_GRAPH_ENABLED` | `false` | Enable the graph signal in `search_context` |
+| `ENTITY_GRAPH_HOPS` | `1` | Traversal depth (clamped to 1–3) |
+| `ENTITY_GRAPH_RRF_WEIGHT` | `0.3` | Weight of the graph signal in fusion (0–1) |
+| `ENTITY_GRAPH_FTS_WEIGHT` | `1.0` | Weight of the full-text signal in hybrid fusion (0–1) |
+| `ENTITY_GRAPH_VECTOR_WEIGHT` | `1.0` | Weight of the vector signal in hybrid fusion (0–1) |
+| `ENTITY_GRAPH_MAX_CANDIDATES` | `50` | Maximum content rows returned by the traversal |
+
+### Sync Endpoints (optional)
+
+Plain-HTTP `/sync/*` endpoints for clients that cannot use the MCP OAuth flow. Every request is rejected until a token is set.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SYNC_BEARER_TOKEN` | — | Bearer token for `/sync/*` (unset or empty = every request rejected) |
+| `SYNC_CHANGES_DEFAULT_LIMIT` | `100` | Rows per `GET /sync/changes` when `limit` is omitted |
+| `SYNC_CHANGES_MAX_LIMIT` | `500` | Upper bound on the `limit` query parameter |
+| `SYNC_PUSH_MAX_BYTES` | `5242880` | Whole-request body cap for `POST /sync/push` (5 MiB) |
+| `SYNC_PUSH_MAX_OP_BYTES` | `131072` | Per-op cap for `POST /sync/push` (128 KiB) |
 
 ### Auth Proxy (External Access)
 

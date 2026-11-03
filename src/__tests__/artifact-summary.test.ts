@@ -146,13 +146,13 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
 
   it("get_latest_handoff includes artifact_summary with the expected shape", async () => {
     // Seed a variety of artifacts in distinct lifecycle states.
-    await callTool("store_artifact", {
+    await callTool("create_artifact", {
       title: "draft-A",
       artifact_type: "cc-prompt",
       scope: "work",
       content: "draft body",
     });
-    await callTool("store_artifact", {
+    await callTool("create_artifact", {
       title: "ready-A",
       artifact_type: "cc-prompt",
       scope: "work",
@@ -160,7 +160,7 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
       status: "ready",
       execution_order: 1,
     });
-    const exec = await callTool("store_artifact", {
+    const exec = await callTool("create_artifact", {
       title: "exec-A",
       artifact_type: "cc-prompt",
       scope: "work",
@@ -170,7 +170,7 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
     });
     await callTool("update_artifact", { id: exec.id, status: "executing" });
 
-    await callTool("store_handoff", { tone_notes: "artifact_summary shape" });
+    await callTool("create_handoff", { tone_notes: "artifact_summary shape" });
 
     const retrieved = await callTool("get_latest_handoff", {});
     expect(retrieved.artifact_summary).toBeDefined();
@@ -196,7 +196,7 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
 
   it("recently_completed only includes artifacts completed after the handoff's stored_at", async () => {
     // Complete an artifact BEFORE storing the handoff.
-    const beforeArtifact = await callTool("store_artifact", {
+    const beforeArtifact = await callTool("create_artifact", {
       title: "completed-before-handoff",
       artifact_type: "cc-prompt",
       scope: "work",
@@ -209,14 +209,14 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
     // Spacer so the handoff stored_at is strictly later than the prior completion.
     await new Promise((r) => setTimeout(r, 50));
 
-    const storeResult = await callTool("store_handoff", {
+    const storeResult = await callTool("create_handoff", {
       tone_notes: "recently_completed cutoff",
     });
     expect(storeResult.success).toBe(true);
 
     // Now complete a different artifact AFTER the handoff.
     await new Promise((r) => setTimeout(r, 50));
-    const afterArtifact = await callTool("store_artifact", {
+    const afterArtifact = await callTool("create_artifact", {
       title: "completed-after-handoff",
       artifact_type: "cc-prompt",
       scope: "work",
@@ -234,7 +234,7 @@ describe.skipIf(!pgAvailable)("artifact_summary on handoff retrieval", () => {
   });
 
   it("get_handoff returns the same artifact_summary shape", async () => {
-    const stored = await callTool("store_handoff", {
+    const stored = await callTool("create_handoff", {
       tone_notes: "get_handoff artifact_summary",
       active_context: { session_meta: { label: "artifact-summary-historical" } },
     });

@@ -438,10 +438,11 @@ function noteConflict(conflict: NoteWriteConflict): ApplyResult {
 /**
  * Queue a note for (re-)embedding inside the push transaction. There is no
  * embedding-server call on the push path and nothing the client can observe;
- * the existing pending_embeddings drain (server startup, next
- * search_context/reindex) embeds the note. Without this a note written from a
- * sync client would never be embedded at all. ON CONFLICT DO NOTHING keeps the
- * queue to one row per note however many edits land before a drain.
+ * the existing pending_embeddings drain (server startup, next search_context,
+ * or an operator `npm run reindex`) embeds the note. Without this a note
+ * written from a sync client would never be embedded at all. ON CONFLICT DO
+ * NOTHING keeps the queue to one row per note however many edits land before
+ * a drain.
  */
 async function enqueueNoteEmbedding(client: PoolClient, noteId: string): Promise<void> {
   await client.query(

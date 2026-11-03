@@ -27,15 +27,15 @@ describe("validatePayloadSize", () => {
   it("includes field name, actual and max in the error", () => {
     const tooBig = "x".repeat(200);
     try {
-      validatePayloadSize(tooBig, 100, "store_handoff payload");
+      validatePayloadSize(tooBig, 100, "create_handoff payload");
       expect.fail("expected throw");
     } catch (err) {
       expect(err).toBeInstanceOf(PayloadTooLargeError);
       const e = err as PayloadTooLargeError;
-      expect(e.field).toBe("store_handoff payload");
+      expect(e.field).toBe("create_handoff payload");
       expect(e.actual).toBe(202); // "x".repeat(200) stringified = 202
       expect(e.max).toBe(100);
-      expect(e.message).toContain("store_handoff payload");
+      expect(e.message).toContain("create_handoff payload");
       expect(e.message).toContain("202");
       expect(e.message).toContain("100");
     }

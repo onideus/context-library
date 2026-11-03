@@ -12,7 +12,7 @@ This documents a **pattern, not a product**. The reference implementation is pri
 
 ```mermaid
 flowchart TD
-    A[Planning session] -->|store_artifact status=draft| B[(Context Library<br/>artifacts table)]
+    A[Planning session] -->|create_artifact status=draft| B[(Context Library<br/>artifacts table)]
     B --> C{Operator review}
     C -->|update_artifact status=ready| B
     C -->|reject| Z[superseded]
@@ -31,7 +31,7 @@ flowchart TD
 
     J --> L[update_artifact status=completed]
     K -->|operator merges| L
-    L -->|create_note| M[Digest back into CB]
+    L -->|create_note| M[Digest back into Context Library]
     M --> A
 ```
 

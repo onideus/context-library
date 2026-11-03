@@ -391,8 +391,9 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    "\n[audit-compaction] Do NOT run reindex / indexAllHandoffs until recovery is complete —\n" +
-      "  re-indexing reads the compacted file and overwrites the surviving chunks."
+    "\n[audit-compaction] Do NOT reindex handoffs (npm run reindex -- --types handoff --include-handoffs,\n" +
+      "  or indexAllHandoffs) until recovery is complete — re-indexing reads the\n" +
+      "  compacted file and overwrites the surviving chunks."
   );
 }
 

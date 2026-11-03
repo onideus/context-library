@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTool } from "./tool-aliases.js";
 import { query } from "../db/client.js";
 import { config } from "../config.js";
 import { getProvider, getActiveProvider } from "../entities/registry.js";
@@ -66,88 +67,29 @@ interface RelationRow {
 
 // ── Tool Descriptions ────────────────────────────────────────────────────────
 
-const EXTRACT_ENTITIES_DESC = `Trigger entity extraction on a single content item (handoff or note) and persist the resulting knowledge graph triples.
+const EXTRACT_ENTITIES_DESC = `Extract entity triples (subject, relation, object) from one handoff or note into the entity graph. For many items use create_extraction_run.
 
-CALL THIS WHEN:
-- The user asks to "extract entities from this handoff/note" or "update the entity graph for X"
-- You want to populate the entity graph for a specific item before querying it with entity_relations or browse_entities
+Returns: run_id, provider_used, triple_count, entity_count, duration_ms. Errors: NO_PROVIDER (none configured), PROVIDER_UNAVAILABLE, NOT_FOUND.`;
 
-DO NOT CALL WHEN:
-- You want to process many items at once — use run_extraction instead
-- You want to browse already-extracted entities — use browse_entities or entity_relations
+const RUN_EXTRACTION_DESC = `Extract entities from many handoffs and/or notes in one batch: to fill or refresh the entity graph, or to compare providers with compare_extraction_runs.
 
-Parameters:
-- content_type: 'handoff' or 'note' (required)
-- content_id: UUID of a note, or filename of a handoff. If omitted, uses the most recent handoff.
-- provider: 'ollama', 'api', or 'mcp-sampling'. If omitted, uses the active provider from config.
+Returns: run_ids (one per content type), status, provider_used, triple_count, content_count, scope, duration_ms, next_step.`;
 
-Returns: triple_count, entity_count, provider_used, run_id, duration_ms.
-Returns error with code NO_PROVIDER if no extraction provider is configured or available.`;
+const COMPARE_EXTRACTIONS_DESC = `Compare two extraction runs (e.g. two providers on the same content): triples in common and unique to each.
 
-const RUN_EXTRACTION_DESC = `Batch-extract entities from multiple content items under a single extraction run. Used to populate or refresh the entity graph at scale.
+Returns: run_a and run_b {provider, triple_count, avg_confidence, entity_type_distribution, top_triples, …}, overlap_count, unique_to_a, unique_to_b, overlap_pct.`;
 
-CALL THIS WHEN:
-- The user asks to "re-extract everything", "run entity extraction on all notes", or similar batch requests
-- You want to set up two runs with different providers so you can compare them with compare_extractions
+const LIST_EXTRACTION_RUNS_DESC = `List recent entity extraction runs, newest first (run ids for compare_extraction_runs).
 
-DO NOT CALL WHEN:
-- Only one specific item needs extracting — use extract_entities instead
-- You just want to see what's already in the graph — use browse_entities
+Returns: runs [{id, provider, status, content_count, triple_count, started_at, error, …}], total.`;
 
-Parameters:
-- provider: which extraction provider to use ('ollama', 'api', 'mcp-sampling')
-- scope: 'handoffs', 'notes', or 'all' (default: 'all')
-- limit: max items to process (default: unlimited)
+const BROWSE_ENTITIES_DESC = `List entity-graph entities with mention and relation counts, most mentioned first; gives ids for get_entity_relations.
 
-Returns: run_id, status, triple_count, content_count, provider_used, duration_ms.
-Suggest following up with compare_extractions if this is the second run of a provider comparison.`;
+Returns: entities [{id, name, entity_type, mention_count, relation_count, …}], count, next_step.`;
 
-const COMPARE_EXTRACTIONS_DESC = `Compare two extraction runs to see how much overlap and divergence there is between providers or extraction passes.
+const ENTITY_RELATIONS_DESC = `Get an entity's relations in the entity graph (what it connects to and how), up to 3 hops.
 
-CALL THIS WHEN:
-- You just completed two extraction runs with different providers (e.g., ollama vs api) and want to evaluate quality
-- The user asks "how does run X compare to run Y" or "which provider found more relationships"
-
-Returns:
-- Triple counts for each run
-- Overlapping triples (same subject canonical name + predicate + object canonical name)
-- Triples unique to run A and unique to run B
-- Average confidence per run
-- Entity type distribution per run
-- Top 10 highest-confidence triples from each run`;
-
-const LIST_EXTRACTION_RUNS_DESC = `List recent entity extraction runs with status, provider, triple counts, and timestamps.
-
-Use this to find run IDs for compare_extractions, to check the status of a recent batch, or to review extraction history.`;
-
-const BROWSE_ENTITIES_DESC = `Browse the entity graph — list entity nodes with their mention counts and relation counts.
-
-CALL THIS WHEN:
-- The user asks "what entities are in the graph", "show me all technologies", or "list entities related to X"
-- You want to discover entity IDs before calling entity_relations
-
-DO NOT CALL WHEN:
-- You already know the entity ID and want its relations — use entity_relations directly
-
-Parameters:
-- entity_type: filter by type ('concept', 'technology', 'person', 'organization', etc.)
-- search: substring match on entity name (case-insensitive)
-- limit: max results (default 20, max 100)
-
-Returns: list of entities with id, name, type, mention_count, relation_count.`;
-
-const ENTITY_RELATIONS_DESC = `Retrieve the relation graph for an entity — what it connects to and how.
-
-CALL THIS WHEN:
-- The user asks "what is X connected to", "show me the relations for Y", or "what depends on Z"
-- You are traversing the entity graph to answer questions about dependencies or relationships
-
-Parameters:
-- entity_id: UUID of the entity (get from browse_entities if unknown)
-- hops: traversal depth 1–3 (default 1). Use 2+ for transitive relationships.
-- relation_type: filter to only relations of this type (e.g., 'blocked_by', 'implemented_with')
-
-Returns: source entity info, list of relations with connected entity names and types, and hop depth for multi-hop results.`;
+Returns: entity, hops, relation_count, relations [{source, relation_type, target, confidence, source_content_id, context_snippet, …}]. NOT_FOUND for an unknown id.`;
 
 // ── Tool Registration ─────────────────────────────────────────────────────────
 
@@ -172,9 +114,9 @@ export function registerEntityTools(mcpServer: McpServer): void {
     "extract_entities",
     EXTRACT_ENTITIES_DESC,
     {
-      content_type: z.enum(["handoff", "note"]).describe("Type of content to extract from"),
-      content_id: z.string().optional().describe("UUID (note) or filename (handoff). Defaults to most recent handoff."),
-      provider: z.string().optional().describe("Provider name: 'ollama', 'api', or 'mcp-sampling'. Defaults to active provider from config."),
+      content_type: z.enum(["handoff", "note"]).describe("Kind of content to extract from."),
+      content_id: z.string().optional().describe("Note UUID or handoff filename; for a handoff, defaults to the latest one."),
+      provider: z.string().optional().describe("'ollama', 'api' or 'mcp-sampling'; default the configured provider."),
     },
     async (args) => {
       const provider = resolveProvider(args.provider);
@@ -270,14 +212,15 @@ export function registerEntityTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── run_extraction ────────────────────────────────────────────────────────
-  mcpServer.tool(
-    "run_extraction",
+  // ── create_extraction_run ─────────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "create_extraction_run",
     RUN_EXTRACTION_DESC,
     {
-      provider: z.string().describe("Provider to use: 'ollama', 'api', or 'mcp-sampling'"),
-      scope: z.enum(["handoffs", "notes", "all"]).optional().describe("Which content to process (default: 'all')"),
-      limit: z.number().min(1).optional().describe("Max items to process per content type"),
+      provider: z.string().describe("'ollama', 'api' or 'mcp-sampling'."),
+      scope: z.enum(["handoffs", "notes", "all"]).optional().describe("Content to process (default 'all')."),
+      limit: z.number().min(1).optional().describe("Max items per content type; default all."),
     },
     async (args) => {
       const provider = resolveProvider(args.provider);
@@ -336,7 +279,7 @@ export function registerEntityTools(mcpServer: McpServer): void {
                 runTriples += stored;
                 totalContent++;
               } catch (err) {
-                console.warn(`[run_extraction] handoff ${file}:`, (err as Error).message);
+                console.warn(`[create_extraction_run] handoff ${file}:`, (err as Error).message);
               }
             }
 
@@ -344,7 +287,7 @@ export function registerEntityTools(mcpServer: McpServer): void {
             totalTriples += runTriples;
           }
         } catch (err) {
-          console.warn("[run_extraction] handoff processing failed:", (err as Error).message);
+          console.warn("[create_extraction_run] handoff processing failed:", (err as Error).message);
         }
       }
 
@@ -375,7 +318,7 @@ export function registerEntityTools(mcpServer: McpServer): void {
                 runTriples += stored;
                 totalContent++;
               } catch (err) {
-                console.warn(`[run_extraction] note ${note.id}:`, (err as Error).message);
+                console.warn(`[create_extraction_run] note ${note.id}:`, (err as Error).message);
               }
             }
 
@@ -396,19 +339,20 @@ export function registerEntityTools(mcpServer: McpServer): void {
         scope,
         duration_ms: Date.now() - startTime,
         next_step: runIds.length > 0
-          ? `Use compare_extractions with run_id_a and run_id_b to compare this run against a previous one.`
+          ? `Use compare_extraction_runs with run_id_a and run_id_b to compare this run against a previous one.`
           : undefined,
       });
     }
   );
 
-  // ── compare_extractions ───────────────────────────────────────────────────
-  mcpServer.tool(
-    "compare_extractions",
+  // ── compare_extraction_runs ───────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "compare_extraction_runs",
     COMPARE_EXTRACTIONS_DESC,
     {
-      run_id_a: z.string().uuid().describe("UUID of the first extraction run"),
-      run_id_b: z.string().uuid().describe("UUID of the second extraction run"),
+      run_id_a: z.string().uuid().describe("First run id (from list_extraction_runs)."),
+      run_id_b: z.string().uuid().describe("Second run id."),
     },
     async (args) => {
       try {
@@ -542,7 +486,7 @@ export function registerEntityTools(mcpServer: McpServer): void {
     "list_extraction_runs",
     LIST_EXTRACTION_RUNS_DESC,
     {
-      limit: z.number().min(1).max(50).optional().describe("Max runs to return (default 10, max 50)"),
+      limit: z.number().min(1).max(50).optional().describe("Max runs (default 10)."),
     },
     async (args) => {
       try {
@@ -572,14 +516,15 @@ export function registerEntityTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── browse_entities ───────────────────────────────────────────────────────
-  mcpServer.tool(
-    "browse_entities",
+  // ── list_entities ─────────────────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "list_entities",
     BROWSE_ENTITIES_DESC,
     {
-      entity_type: z.string().optional().describe("Filter by entity type (e.g., 'technology', 'concept', 'person')"),
-      search: z.string().optional().describe("Case-insensitive substring search on entity name"),
-      limit: z.number().min(1).max(100).optional().describe("Max results (default 20, max 100)"),
+      entity_type: z.string().optional().describe("Type filter, e.g. 'technology', 'concept', 'person'."),
+      search: z.string().optional().describe("Case-insensitive substring of the entity name."),
+      limit: z.number().min(1).max(100).optional().describe("Max results (default 20)."),
     },
     async (args) => {
       try {
@@ -625,8 +570,8 @@ export function registerEntityTools(mcpServer: McpServer): void {
           })),
           count: result.rows.length,
           next_step: result.rows.length > 0
-            ? "Use entity_relations with an entity id to explore its connections."
-            : "No entities found. Run extract_entities or run_extraction to populate the graph.",
+            ? "Use get_entity_relations with an entity id to explore its connections."
+            : "No entities found. Run extract_entities or create_extraction_run to populate the graph.",
         });
       } catch (err) {
         return errorResponse((err as Error).message, "DB_ERROR");
@@ -634,14 +579,15 @@ export function registerEntityTools(mcpServer: McpServer): void {
     }
   );
 
-  // ── entity_relations ──────────────────────────────────────────────────────
-  mcpServer.tool(
-    "entity_relations",
+  // ── get_entity_relations ──────────────────────────────────────────────────
+  registerTool(
+    mcpServer,
+    "get_entity_relations",
     ENTITY_RELATIONS_DESC,
     {
-      entity_id: z.string().uuid().describe("UUID of the entity (get from browse_entities if unknown)"),
-      hops: z.number().min(1).max(3).optional().describe("Traversal depth 1–3 (default 1)"),
-      relation_type: z.string().optional().describe("Filter to relations of this type only"),
+      entity_id: z.string().uuid().describe("Entity id (from list_entities)."),
+      hops: z.number().min(1).max(3).optional().describe("Traversal depth (default 1); 2+ for transitive links."),
+      relation_type: z.string().optional().describe("Only relations of this type, e.g. 'depends_on'."),
     },
     async (args) => {
       const hops = Math.min(Math.max(args.hops ?? 1, 1), 3);

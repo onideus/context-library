@@ -21,7 +21,7 @@ stateDiagram-v2
     superseded --> [*]
 ```
 
-Transitions are enforced by the server (`update_artifact` returns a validation error if you attempt an illegal move). `superseded` is reachable from any state — it is the retirement tombstone, not a completion signal.
+Transitions are enforced by the server (`update_artifact` returns `INVALID_STATUS_TRANSITION` if you attempt an illegal move). `superseded` is reachable from any state — it is the retirement tombstone, not a completion signal.
 
 ## What each state means operationally
 
@@ -31,7 +31,7 @@ Understanding the *meaning* of a state matters more than memorizing the transiti
 
 The artifact exists in Context Library. It is searchable and retrievable, but it should not be acted on yet. `draft` means: **an operator has not yet said this is fit to run.**
 
-New artifacts default to `draft` when `status` is omitted on `store_artifact`. A planning session should almost always leave its output in `draft` — the promotion to `ready` is a separate step, ideally taken by a human who has actually read the artifact.
+New artifacts default to `draft` when `status` is omitted on `create_artifact`. A planning session should almost always leave its output in `draft` — the promotion to `ready` is a separate step, ideally taken by a human who has actually read the artifact.
 
 ### ready — pipeline may pick this up
 
@@ -43,9 +43,11 @@ The interceptor's polling query is `list_artifacts({artifact_type: "cc-prompt", 
 
 `executing` doubles as a **claim marker**. The interceptor claims work by transitioning `ready → executing`; a second interceptor that queries `status: "ready"` afterward will not see the artifact in its result set.
 
-Race handling is enforced at the tool layer via conditional UPDATE. When two interceptors both read the artifact while it is `ready` and both call `update_artifact(status: "executing")`, `update_artifact` gates the write on the row still being in the caller's expected status (defaulting to the status read at the top of the call, or an explicit `expected_status` argument). The first UPDATE lands and returns the row; the second sees the row is no longer `ready` and returns `STATUS_CONFLICT` with the current server state. The loser then re-polls and picks up a different artifact — no silent double-claim, no invalid-transition detour.
+Race handling is enforced at the tool layer via conditional UPDATE. When two interceptors both read the artifact while it is `ready` and both call `update_artifact(status: "executing")`, `update_artifact` gates the write on the row still being in the caller's expected status (defaulting to the status read at the top of the call, or an explicit `expected_status` argument). The first UPDATE lands and returns the row; the second sees the row is no longer `ready` and returns `STATUS_CONFLICT` with the current server state. The loser then re-polls and picks up a different artifact.
 
-`metadata.claimed_by` is a useful audit-trail supplement (which interceptor holds the claim, when it started) but is not required to detect the race — `STATUS_CONFLICT` is the primary signal. Existing interceptors that detect races by round-tripping `metadata.claimed_by` still work correctly: the server-side conditional UPDATE fires strictly earlier than any read-back check, so any interceptor that would have caught a race the old way will now catch it via `STATUS_CONFLICT` instead. See the claim pseudocode in [build-your-own-interceptor.md](build-your-own-interceptor.md).
+The guard only runs when the call changes the row's status. A claim that starts after another claim has committed reads `executing`, so the requested status is unchanged, no conditional UPDATE runs, `expected_status` is not checked, and the write lands, overwriting the first claim's metadata.
+
+Both callers then get back a row showing their own `claimed_by`. Set `metadata.claimed_by` (which interceptor holds the claim, when it started) on the claim update and re-read the artifact with `get_artifact` just before executing; back off if `claimed_by` is no longer yours. That narrows the window but does not close it, so one interceptor per artifact type is the safe configuration. See the claim pseudocode in [build-your-own-interceptor.md](build-your-own-interceptor.md).
 
 An `executing` artifact is a **claim**, not a proof of progress. If the executor crashes, the artifact stays `executing` until manual recovery. See the failure handling section in [build-your-own-interceptor.md](build-your-own-interceptor.md).
 
@@ -87,7 +89,7 @@ Use it when:
 - Ordering isn't linear (two artifacts both depend on a third, then either can run).
 - You want the interceptor to enforce the wait explicitly rather than relying on the operator getting the order right by hand.
 
-Dependencies are validated at write time. `store_artifact` and `update_artifact` reject dependency UUIDs that don't exist (`VALIDATION_ERROR`), and malformed UUIDs are caught before the database cast.
+Dependencies are validated at write time. `create_artifact` and `update_artifact` reject dependency UUIDs that don't exist (`VALIDATION_ERROR`), and malformed UUIDs are caught before the database cast.
 
 The interceptor is responsible for honoring dependencies at execution time — it should skip an artifact whose dependencies aren't all `completed` and re-check on the next poll.
 
@@ -105,9 +107,9 @@ Pointer shape is intentionally free-form (`{type: "git", repo, branch, path}`, `
 
 ## Immutable content on locked statuses
 
-Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. Any caller-supplied `content_hash` is stripped before merge on both `store_artifact` and `update_artifact`. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` keeps the hash.
+Once an artifact transitions to `ready`, `executing`, or `completed`, its content is treated as immutable — the `content_hash` (SHA-256, stored in `metadata`) is set from the actual stored content and cannot be overridden by the caller. Any caller-supplied `content_hash` is stripped before merge on both `create_artifact` and `update_artifact`. The interceptor uses this hash to verify that the artifact it read on poll is the same artifact it is executing. Reverting to `draft` keeps the hash.
 
-Content edits while an artifact is in `draft` can use `patch_artifact` (exact-match replacements, no full-content resend) instead of `update_artifact`; it recomputes `content_hash` the same way, and the locked-status policy above is unchanged — `patch_artifact` rejects `ready`, `executing`, and `completed` artifacts too.
+Content edits while an artifact is in `draft` can use `edit_artifact` (exact-match replacements, no full-content resend) instead of `update_artifact`; it recomputes `content_hash` the same way, and the locked-status policy above is unchanged — `edit_artifact` rejects `ready`, `executing`, and `completed` artifacts too.
 
 If a locked artifact needs to change, the correct move is to store a new artifact (typically with `metadata.supersedes` pointing at the old one) and `update_artifact` the old one to `superseded`. This preserves the audit trail — the interceptor can always trust that what it ran matches what was captured.
 
@@ -132,7 +134,8 @@ Authoring agents that produce cc-prompt artifacts must set `target_repo` before 
 The interceptor's whole state machine is expressed in artifact transitions:
 
 - Poll `list_artifacts({status: "ready"})` for work.
-- `update_artifact(status: "executing")` to claim it — this is the mutex.
+- `get_artifact` for the full artifact (list items carry summary fields only).
+- `update_artifact(status: "executing", expected_status: "ready", metadata: {claimed_by})` to claim it, then re-read with `get_artifact` and back off if `claimed_by` is not yours.
 - Run the executor.
 - `update_artifact(status: "completed", metadata: {...outcome})` when the PR is merged, reverted, or otherwise resolved.
 

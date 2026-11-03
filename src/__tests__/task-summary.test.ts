@@ -173,7 +173,7 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
 
   describe("empty state", () => {
     it("returns the enriched shape with zero counts and empty arrays when no tasks exist", async () => {
-      await callTool("store_handoff", { tone_notes: "empty summary test" });
+      await callTool("create_handoff", { tone_notes: "empty summary test" });
 
       const result = await callTool("get_latest_handoff", {});
       const ts = result.task_summary;
@@ -240,7 +240,7 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
 
       // Store a handoff with NO tasks arrays — proves the summary comes from
       // Postgres, not from the handoff content.
-      await callTool("store_handoff", { tone_notes: "populated summary test" });
+      await callTool("create_handoff", { tone_notes: "populated summary test" });
       const result = await callTool("get_latest_handoff", {});
       const ts = result.task_summary;
 
@@ -283,12 +283,12 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
       expect(allItemIds).not.toContain(deferred.id);
     });
 
-    it("store_handoff task_summary reflects the tasks table, not deprecated handoff arrays", async () => {
+    it("create_handoff task_summary reflects the tasks table, not deprecated handoff arrays", async () => {
       // Since schema 1.3, legacy task arrays are accepted on input but
-      // dropped, and store_handoff's task_summary comes from the Postgres
+      // dropped, and create_handoff's task_summary comes from the Postgres
       // tasks table. The table currently holds 4 open tasks — the deprecated
       // array claiming a single open task must not influence the summary.
-      const result = await callTool("store_handoff", {
+      const result = await callTool("create_handoff", {
         tone_notes: "store summary source test",
         tasks: { open: ["only-one"], completed: [], blocked: [] },
       });
@@ -341,7 +341,7 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
         due_date: thirtyDaysOut,
       });
 
-      await callTool("store_handoff", { tone_notes: "due window test" });
+      await callTool("create_handoff", { tone_notes: "due window test" });
       const result = await callTool("get_latest_handoff", {});
       const ts = result.task_summary;
 
@@ -373,7 +373,7 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
         });
       }
 
-      await callTool("store_handoff", { tone_notes: "critical cap test" });
+      await callTool("create_handoff", { tone_notes: "critical cap test" });
       const result = await callTool("get_latest_handoff", {});
       const items = result.task_summary.critical_items;
 
@@ -399,7 +399,7 @@ describe.skipIf(!pgAvailable)("Task Summary", () => {
       // fields regardless of source. The enriched item arrays are optional.
       // (Killing Postgres mid-test is not feasible here — the null path
       // itself is exercised by the unit-level test below.)
-      await callTool("store_handoff", {
+      await callTool("create_handoff", {
         tone_notes: "degradation contract test",
         tasks: { open: ["a"], completed: [], blocked: [] },
       });

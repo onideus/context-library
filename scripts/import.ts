@@ -476,7 +476,8 @@ function classifyReembed(
 async function queueReembed(plan: ReembedPlan): Promise<void> {
   // Queue every present entity id / handoff filename into pending_embeddings.
   // The regular drain path (drainPendingEmbeddings) picks these up on the
-  // next successful search_context / reindex once TEI is reachable.
+  // next successful search_context (or an operator `npm run reindex`) once TEI
+  // is reachable.
   if (plan.handoffs > 0) {
     const handoffsDir = join(config.dataDir, "handoffs");
     const files = (await readdir(handoffsDir))

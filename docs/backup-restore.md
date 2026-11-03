@@ -169,7 +169,8 @@ The import queues rows into `pending_embeddings` when either:
 When neither condition is true, no re-embed is queued.
 
 Once queued, the standard `drainPendingEmbeddings()` path — invoked by
-`search_context` and `reindex` and by the server on startup — will
+`search_context`, by `npm run reindex` (task, note and artifact rows only;
+handoff rows are left to the server), and by the server on startup — will
 re-embed each entry against the current model in FIFO order. If TEI is
 unavailable at import time, the queue simply waits. This is the same
 resilience path used everywhere else in the server, not a special case.
@@ -233,10 +234,10 @@ drill:
    - `psql $PG* -c 'select count(*) from tasks; select count(*) from notes; select count(*) from note_versions; select count(*) from artifacts;'`
      match the manifest.
    - Start the server against the drill database and call
-     `get_latest_handoff` — the response should carry the same filename
-     as the newest file in `./drill/data-fresh/handoffs/`.
+     `get_latest_handoff` — its `stored_at` should match the `stored_at`
+     inside the newest file in `./drill/data-fresh/handoffs/`.
    - Wait for the pending-embeddings queue to drain (or force a
-     `reindex`) and run an FTS query against `search_context` for a term
+     `npm run reindex` from the checkout) and run an FTS query against `search_context` for a term
      you know is in a known-restored note or artifact.
 7. Tear down the drill environment.
 
@@ -252,8 +253,8 @@ The intended flow when you want to change the embedding model:
    disagrees with the destination.
 4. Let the drain path re-embed at its own pace against the new TEI.
 
-You do not need to run any special "reindex" step. The pending queue is
-the reindex.
+You do not need to run `npm run reindex`. The pending queue is the
+reindex.
 
 ## What the scripts do NOT do
 
