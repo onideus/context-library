@@ -23,10 +23,10 @@
   },
   "dependencies": {
     "@hono/mcp": "^0.3.5",
-    "@hono/node-server": "^2.1.5",
+    "@hono/node-server": "^2.1.6",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "dotenv": "^18.0.9",
-    "hono": "^4.13.14",
+    "hono": "^4.13.16",
     "pg": "^8.23.1",
     "zod": "^4.6.7"
   },
@@ -36,11 +36,11 @@
     "proxy-addr": "2.0.8"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^1.3.0",
+    "@anthropic-ai/sdk": "^1.6.0",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   }
 }
